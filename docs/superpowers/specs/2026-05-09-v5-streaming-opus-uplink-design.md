@@ -388,3 +388,64 @@ python scripts/v5_streaming_latency_eval.py --audio-dir /tmp/volc_asr_eval --bas
 - 9 条全部成功完成 full-chain，没有接口错误。
 - 当前首音频均值约 8.5 秒，total 均值约 13.0 秒；本轮仍不做 ASR partial 提前 LLM，因此这是保守链路口径。
 - 下一步建议补 v5 HTTP body Opus 完整上传和 v3 原链路同题矩阵，形成同时间轴横向对比。
+
+## 2026-05-09 P2：可选火山 ASR Provider
+
+P2 在同一个 `WS /api/v5/realtime/opus-stream` endpoint 上新增 ASR provider 选择。默认仍是 DashScope；只有 start control 显式传入 `asr_provider=volcengine` 时才使用火山 ASR。
+
+```json
+{"type":"start","run_asr":true,"run_full_chain":true,"asr_provider":"volcengine"}
+```
+
+边界：
+
+- 不接火山 LLM/TTS。
+- 不做 ASR partial 提前 LLM。
+- 不替换默认 provider。
+- 不修改 v3。
+
+火山路径是真 streaming PCM：
+
+```text
+Opus framed-v1 binary message
+  -> 服务端逐帧解码 PCM
+  -> 火山 bigmodel_async Audio Only Request
+  -> ASR final
+  -> 既有 RAG / LLM / TTS
+```
+
+火山协议沿用 v4 成功口径：
+
+- endpoint：`wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`
+- Full Request：gzip JSON，`format=pcm`、`codec=raw`、`rate=16000`、`bits=16`、`channel=1`
+- request：`model_name=bigmodel`、`enable_itn=true`、`enable_punc=true`、`enable_ddc=true`、`show_utterances=true`、`enable_nonstream=true`
+- Audio Only：gzip PCM payload，最后一包负 sequence
+
+新增 summary 字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `asr_provider` | `dashscope` 或 `volcengine` |
+| `asr_log_id` | 火山 log id 或 DashScope request id |
+| `asr_error_code` | ASR provider 层错误码 |
+| `asr_error_message` | ASR provider 层错误摘要 |
+
+A/B 文档：
+
+```text
+docs/superpowers/specs/2026-05-09-v5-asr-provider-ab.md
+```
+
+本轮 A/B 结果：
+
+| provider | successful | term_hits | mean_asr_final_abs_ms | mean_first_audio_byte_abs_ms | mean_done_abs_ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dashscope | 9/9 | 7/9 | 6429.8 | 11680.2 | 17160.0 |
+| volcengine | 9/9 | 9/9 | 3146.2 | 13884.1 | 18329.1 |
+
+阶段判断：
+
+- 火山 ASR 在佛学词准确率和 ASR final 延迟上明显更优。
+- full-chain 首音频和 total 未同步更优，主要受后续 LLM/TTS 抖动影响；这不是 ASR provider 层失败。
+- 当前 A/B 矩阵沿用 P1.5 的 first-frame 归一化口径，未单独计入火山 ASR WebSocket 建连等待；后续需要补 raw first-frame / provider-start 指标。
+- 下一步建议跑 ASR-only 重复矩阵，隔离 ASR 稳定性，再固定 LLM/TTS 输出长度做 full-chain 复测。

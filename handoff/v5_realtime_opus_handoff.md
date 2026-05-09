@@ -515,3 +515,85 @@ python scripts/v5_streaming_latency_eval.py --audio-dir /tmp/volc_asr_eval --bas
 - ASR 佛学词命中率为 7/9。错词为“四十八愿”数字化成“48愿”，以及“慧远”错为“慧云”。
 - mean 首音频约 8.5 秒，mean total 约 13.0 秒；当前未做 partial 提前 LLM，因此不是最终优化上限。
 - 下一步建议补 v5 HTTP body Opus 基线和 v3 原链路同 9 条对照，再讨论是否进入 ESP32-S3 端上行迁移。
+
+## 2026-05-09 P2：火山 ASR Provider A/B
+
+新增可选 ASR provider，默认仍是 DashScope，不替换现有链路：
+
+```json
+{"type":"start","run_asr":true,"run_full_chain":true,"asr_provider":"dashscope"}
+{"type":"start","run_asr":true,"run_full_chain":true,"asr_provider":"volcengine"}
+```
+
+新增/更新：
+
+- `src/providers/realtime_asr.py`
+- `src/api/realtime.py`
+- `src/models/realtime.py`
+- `src/storage/realtime_store.py`
+- `scripts/opus_uplink_stream_smoke.py`
+- `scripts/v5_streaming_latency_eval.py`
+- `tests/test_opus_uplink.py`
+- `docs/superpowers/specs/2026-05-09-v5-asr-provider-ab.md`
+
+火山实现口径：
+
+- 只替换 ASR，RAG/LLM/TTS 仍复用 v5 现有链路。
+- 火山 ASR 是 true streaming PCM：服务端每解出一个 Opus PCM chunk，就发送到火山 `bigmodel_async`。
+- Full Request 对齐 v4 成功口径：`format=pcm`、`codec=raw`、`rate=16000`、`enable_nonstream=true`。
+- 凭据从 v4 本地 `.env` 复制最小变量到 v5 本地 `.env`；`.env` 已忽略，未入库。
+
+单条火山回归：
+
+```bash
+python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url http://127.0.0.1:8010 --frame-ms 60 --realtime --run-asr --run-full-chain --asr-provider volcengine --max-polls 160 --status-timeout 30 --timeout 30
+```
+
+结果：火山 ASR、RAG、LLM、TTS 全链路跑通。
+
+| 指标 | 结果 |
+| --- | ---: |
+| uplink_frame_count | 79 |
+| uplink_opus_bytes | 13415 |
+| uplink_pcm_bytes | 150156 |
+| reconstructed_audio_ms | 4692 |
+| first_pcm_to_asr_abs_ms | 1542 |
+| first_asr_partial_abs_ms | 4880 |
+| asr_final_abs_ms | 5454 |
+| first_audio_byte_abs_ms | 11413 |
+| done_abs_ms | 16366 |
+
+ASR final：
+
+```text
+请解释阿弥陀佛是什么意思？
+```
+
+9 条 A/B 矩阵：
+
+```bash
+python scripts/v5_streaming_latency_eval.py --audio-dir /tmp/volc_asr_eval --base-url http://127.0.0.1:8010 --target streaming --provider-matrix dashscope,volcengine --output /tmp/v5_asr_provider_ab.jsonl --markdown /tmp/v5_asr_provider_ab.md --max-polls 180 --status-timeout 30 --timeout 30
+```
+
+| provider | successful | term_hits | mean_first_asr_partial_abs_ms | mean_asr_final_abs_ms | mean_first_audio_byte_abs_ms | mean_done_abs_ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| dashscope | 9/9 | 7/9 | 4466.7 | 6429.8 | 11680.2 | 17160.0 |
+| volcengine | 9/9 | 9/9 | 1926.9 | 3146.2 | 13884.1 | 18329.1 |
+
+逐词结论：
+
+- 火山 9/9 命中：阿弥陀佛、四十八愿、净土宗、无量寿经、金刚经、般若、慧远、善导、东林寺。
+- DashScope 7/9 命中，错词仍是 `四十八愿 -> 48愿`、`慧远 -> 慧云`，并且“请解释”仍可能识别为“情解释”。
+- 火山 ASR final 均值明显更快，但 full-chain 首音频和 total 未同步领先，主要受后续 LLM/TTS 抖动影响；`金刚经`、`善导` 两条火山 full-chain 特别慢。
+- 口径注意：A/B 矩阵沿用 P1.5 的 `first_frame_server_abs_ms` 归一化；火山 provider 建连造成的首帧服务端处理延迟未进入表内。单条火山回归中该值为 `1542ms`，后续应新增 `provider_start_ms` 或 raw first-frame 字段。
+
+阶段判断：
+
+- P2 已证明同一 v5 streaming Opus 上行链路可以可选切换火山 ASR provider。
+- 火山 ASR 在佛学专有词准确率和 ASR final 延迟上明显值得继续评估。
+- 现在不建议直接替换默认 ASR；下一步应跑 ASR-only 多轮稳定性矩阵，并固定 LLM/TTS 输出长度后再做 full-chain A/B。
+
+验证：
+
+- `python -m pytest -q`：118 passed, 1 warning
+- 本地 uvicorn 已停止

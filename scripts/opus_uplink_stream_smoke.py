@@ -72,12 +72,13 @@ def build_stream_headers(*, frame_ms: int, original_pcm_bytes: int) -> dict[str,
     }
 
 
-def build_start_control(*, run_asr: bool, run_full_chain: bool) -> str:
+def build_start_control(*, run_asr: bool, run_full_chain: bool, asr_provider: str = "dashscope") -> str:
     return json.dumps(
         {
             "type": "start",
             "run_asr": run_asr,
             "run_full_chain": run_full_chain,
+            "asr_provider": asr_provider,
         }
     )
 
@@ -166,6 +167,7 @@ def run_stream_smoke(
     run_session_after_stream: bool,
     run_asr: bool,
     run_full_chain: bool,
+    asr_provider: str,
     poll_interval: float,
     max_polls: int,
     status_timeout: float,
@@ -187,6 +189,7 @@ def run_stream_smoke(
                     "url": url,
                     "frame_ms": frame_ms,
                     "realtime": realtime,
+                    "asr_provider": asr_provider if run_asr or run_full_chain else None,
                     "local_uplink": local_metrics,
                 },
                 ensure_ascii=False,
@@ -205,7 +208,13 @@ def run_stream_smoke(
     )
     try:
         if run_asr or run_full_chain:
-            websocket.send(build_start_control(run_asr=run_asr or run_full_chain, run_full_chain=run_full_chain))
+            websocket.send(
+                build_start_control(
+                    run_asr=run_asr or run_full_chain,
+                    run_full_chain=run_full_chain,
+                    asr_provider=asr_provider,
+                )
+            )
         for frame_index, message in enumerate(messages):
             if client_first_frame_sent_ms is None:
                 client_first_frame_sent_ms = _client_elapsed_ms(started)
@@ -214,7 +223,14 @@ def run_stream_smoke(
             ack = _recv_until_ack(websocket, started=started, frame_index=frame_index, emit_trace=emit_trace)
             last_payload = ack
             if ack.get("type") == "error":
-                break
+                client_done_received_ms = _client_elapsed_ms(started)
+                return _add_client_timeline(
+                    ack,
+                    client_first_frame_sent_ms=client_first_frame_sent_ms,
+                    client_last_frame_sent_ms=client_last_frame_sent_ms,
+                    client_end_sent_ms=client_end_sent_ms,
+                    client_done_received_ms=client_done_received_ms,
+                )
             if realtime:
                 time.sleep(frame_ms / 1000)
 
@@ -297,6 +313,7 @@ def main() -> None:
     parser.add_argument("--run-session-after-stream", action="store_true")
     parser.add_argument("--run-asr", action="store_true")
     parser.add_argument("--run-full-chain", action="store_true")
+    parser.add_argument("--asr-provider", choices=["dashscope", "volcengine"], default="dashscope")
     parser.add_argument("--realtime", dest="realtime", action="store_true")
     parser.add_argument("--no-realtime", dest="realtime", action="store_false")
     parser.set_defaults(realtime=True)
@@ -311,6 +328,7 @@ def main() -> None:
         run_session_after_stream=args.run_session_after_stream,
         run_asr=args.run_asr,
         run_full_chain=args.run_full_chain,
+        asr_provider=args.asr_provider,
         poll_interval=args.poll_interval,
         max_polls=args.max_polls,
         status_timeout=args.status_timeout,

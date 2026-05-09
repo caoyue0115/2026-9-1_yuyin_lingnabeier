@@ -18,7 +18,13 @@ from src.providers.opus import (
     opus_available,
     parse_framed_v1_packets,
 )
-from src.providers.realtime_asr import RealtimeAsrError, RealtimeAsrEvent, create_realtime_asr_session
+from src.providers.realtime_asr import (
+    ASR_PROVIDER_DASHSCOPE,
+    ASR_PROVIDER_CHOICES,
+    RealtimeAsrError,
+    RealtimeAsrEvent,
+    create_realtime_asr_session,
+)
 from src.services.realtime_session import start_realtime_session, start_realtime_session_from_question
 from src.settings import settings
 from src.storage.files import save_pcm_as_wav
@@ -216,6 +222,7 @@ async def stream_opus_realtime_session(
     run_asr = False
     run_full_chain = False
     realtime_asr = None
+    asr_provider = ASR_PROVIDER_DASHSCOPE
     asr_started_server_ms: int | None = None
     first_pcm_to_asr_ms: int | None = None
     asr_result = None
@@ -276,11 +283,17 @@ async def stream_opus_realtime_session(
                         return
                     run_asr = bool(control.get("run_asr", False))
                     run_full_chain = bool(control.get("run_full_chain", False))
+                    requested_provider = str(control.get("asr_provider") or ASR_PROVIDER_DASHSCOPE).strip().lower()
+                    if requested_provider not in ASR_PROVIDER_CHOICES:
+                        await _send_stream_error(websocket, "invalid_asr_provider", close_code=1008)
+                        return
+                    asr_provider = requested_provider
                     if run_asr:
                         try:
                             realtime_asr = create_realtime_asr_session(
                                 sample_rate=x_opus_sample_rate,
                                 audio_format="pcm",
+                                provider=asr_provider,
                             )
                             asr_started_server_ms = int(round((time.perf_counter() - accepted_at) * 1000))
                             realtime_asr.start()
@@ -346,6 +359,10 @@ async def stream_opus_realtime_session(
                     "first_pcm_to_asr_abs_ms": first_pcm_to_asr_ms,
                     "first_asr_partial_abs_ms": first_asr_partial_abs_ms,
                     "asr_final_abs_ms": asr_final_abs_ms,
+                    "asr_provider": asr_provider,
+                    "asr_log_id": asr_result.request_id,
+                    "asr_error_code": asr_result.error_code,
+                    "asr_error_message": asr_result.error_message,
                     "request_id": asr_result.request_id,
                 }
             )
@@ -359,6 +376,8 @@ async def stream_opus_realtime_session(
                 "asr_final_ms": asr_result.asr_final_ms,
                 "first_asr_partial_abs_ms": first_asr_partial_abs_ms,
                 "asr_final_abs_ms": asr_final_abs_ms,
+                "asr_provider": asr_provider,
+                "asr_log_id": asr_result.request_id,
                 "request_id": asr_result.request_id,
             }
         )
@@ -411,6 +430,10 @@ async def stream_opus_realtime_session(
         "done_abs_ms": websocket_done_abs_ms,
         "question_text": asr_result.text if asr_result is not None else None,
         "realtime_asr_request_id": asr_result.request_id if asr_result is not None else None,
+        "asr_provider": asr_provider if asr_result is not None else None,
+        "asr_log_id": asr_result.request_id if asr_result is not None else None,
+        "asr_error_code": None,
+        "asr_error_message": None,
         "error_code": None,
         "error_message": None,
         "session_started": False,
@@ -433,6 +456,10 @@ async def stream_opus_realtime_session(
                 "asr_final_ms": asr_result.asr_final_ms,
                 "asr_ms": asr_result.asr_final_ms,
                 "realtime_asr_request_id": asr_result.request_id,
+                "asr_provider": asr_provider,
+                "asr_log_id": asr_result.request_id,
+                "asr_error_code": None,
+                "asr_error_message": None,
                 "stream_to_session_start_abs_ms": stream_to_session_start_abs_ms,
                 "server_stream_accept_abs_ms": 0,
                 "first_frame_server_abs_ms": first_frame_server_ms,

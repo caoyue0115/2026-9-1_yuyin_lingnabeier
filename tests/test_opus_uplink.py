@@ -89,9 +89,16 @@ class _FakeWebSocket:
 
 
 class _FakeStreamingAsrAdapter:
-    def __init__(self, *, text: str | None = "请解释阿弥陀佛是什么意思", error_code: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        text: str | None = "请解释阿弥陀佛是什么意思",
+        error_code: str | None = None,
+        request_id: str = "req-test",
+    ) -> None:
         self.text = text
         self.error_code = error_code
+        self.request_id = request_id
         self.started = False
         self.pcm_chunks: list[bytes] = []
 
@@ -114,7 +121,7 @@ class _FakeStreamingAsrAdapter:
             error_message=self.error_code,
             first_asr_partial_ms=33 if self.text else None,
             asr_final_ms=123 if self.text else None,
-            request_id="req-test",
+            request_id=self.request_id,
         )
 
 
@@ -444,6 +451,98 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         start_from_question.assert_called_once()
         self.assertEqual(start_from_question.call_args.args[2], "请解释阿弥陀佛是什么意思")
 
+    def test_stream_opus_realtime_session_defaults_to_dashscope_provider(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 960
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [
+                {"type": "websocket.receive", "text": json.dumps({"type": "start", "run_asr": True})},
+                {"type": "websocket.receive", "bytes": _outer_frame(0, inner_packets[0])},
+                {"type": "websocket.receive", "text": json.dumps({"type": "end"})},
+            ]
+        )
+        fake_asr = _FakeStreamingAsrAdapter()
+
+        with mock.patch.object(realtime_api, "create_realtime_asr_session", return_value=fake_asr) as factory:
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        factory.assert_called_once()
+        self.assertEqual(factory.call_args.kwargs["provider"], "dashscope")
+        self.assertEqual(websocket.sent_json[-1]["asr_provider"], "dashscope")
+
+    def test_stream_opus_realtime_session_selects_volcengine_provider(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 960
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps({"type": "start", "run_asr": True, "asr_provider": "volcengine"}),
+                },
+                {"type": "websocket.receive", "bytes": _outer_frame(0, inner_packets[0])},
+                {"type": "websocket.receive", "text": json.dumps({"type": "end"})},
+            ]
+        )
+        fake_asr = _FakeStreamingAsrAdapter(request_id="volc-log-id")
+
+        with mock.patch.object(realtime_api, "create_realtime_asr_session", return_value=fake_asr) as factory:
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        self.assertEqual(factory.call_args.kwargs["provider"], "volcengine")
+        done_payload = websocket.sent_json[-1]
+        self.assertEqual(done_payload["asr_provider"], "volcengine")
+        self.assertEqual(done_payload["asr_log_id"], "volc-log-id")
+
     def test_stream_opus_realtime_session_reports_asr_failure(self) -> None:
         from src.api import realtime as realtime_api
         from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
@@ -541,11 +640,11 @@ class OpusUplinkSmokeScriptTests(unittest.TestCase):
     def test_build_start_control_enables_asr_and_full_chain(self) -> None:
         module = _load_opus_uplink_stream_script()
 
-        payload = module.build_start_control(run_asr=True, run_full_chain=True)
+        payload = module.build_start_control(run_asr=True, run_full_chain=True, asr_provider="volcengine")
 
         self.assertEqual(
             json.loads(payload),
-            {"type": "start", "run_asr": True, "run_full_chain": True},
+            {"type": "start", "run_asr": True, "run_full_chain": True, "asr_provider": "volcengine"},
         )
 
 
@@ -598,6 +697,13 @@ class V5StreamingLatencyEvalScriptTests(unittest.TestCase):
         self.assertEqual(record["answer_chars"], 14)
         self.assertEqual(record["session_id"], "session-1")
         self.assertEqual(record["log_id"], "request-1")
+
+    def test_eval_parser_accepts_asr_provider(self) -> None:
+        module = _load_v5_streaming_latency_eval_script()
+
+        args = module.build_parser().parse_args(["--asr-provider", "volcengine"])
+
+        self.assertEqual(args.asr_provider, "volcengine")
 
     def test_build_error_record_preserves_case_and_error(self) -> None:
         module = _load_v5_streaming_latency_eval_script()

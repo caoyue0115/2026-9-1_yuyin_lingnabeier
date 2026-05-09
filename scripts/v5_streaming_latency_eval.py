@@ -66,16 +66,25 @@ def build_streaming_latency_record(
     audio_path: str,
     done_payload: dict,
     status_payload: dict | None,
+    asr_provider: str = "dashscope",
 ) -> dict:
     status_payload = status_payload or {}
     trace = status_payload.get("trace") if isinstance(status_payload.get("trace"), dict) else {}
     first_frame_base_ms = done_payload.get("first_frame_server_abs_ms")
     question_text = status_payload.get("question_text") or done_payload.get("question_text")
     answer_text = status_payload.get("answer_text") or ""
+    provider = done_payload.get("asr_provider") or trace.get("asr_provider") or asr_provider
+    asr_log_id = (
+        done_payload.get("asr_log_id")
+        or trace.get("asr_log_id")
+        or done_payload.get("realtime_asr_request_id")
+        or trace.get("realtime_asr_request_id")
+    )
     record = {
         "term": term,
         "audio_path": audio_path,
         "path_type": "streaming",
+        "asr_provider": provider,
         "question_text": question_text,
         "recognized_text": question_text,
         "term_hit": _term_hit(term, question_text),
@@ -84,7 +93,8 @@ def build_streaming_latency_record(
         "error_code": status_payload.get("error_code") or done_payload.get("error_code"),
         "error_message": status_payload.get("error_message") or done_payload.get("error_message"),
         "session_id": status_payload.get("session_id") or done_payload.get("session_id"),
-        "log_id": done_payload.get("realtime_asr_request_id") or trace.get("realtime_asr_request_id"),
+        "asr_log_id": asr_log_id,
+        "log_id": asr_log_id,
     }
     source_payload = dict(done_payload)
     source_payload.update(trace)
@@ -100,11 +110,13 @@ def build_error_record(
     path_type: str,
     error_code: str,
     error_message: str,
+    asr_provider: str = "dashscope",
 ) -> dict:
     record = {
         "term": term,
         "audio_path": audio_path,
         "path_type": path_type,
+        "asr_provider": asr_provider,
         "question_text": None,
         "recognized_text": None,
         "term_hit": False,
@@ -113,6 +125,7 @@ def build_error_record(
         "error_code": error_code,
         "error_message": error_message,
         "session_id": None,
+        "asr_log_id": None,
         "log_id": None,
     }
     for field in TIMELINE_FIELDS:
@@ -136,6 +149,7 @@ def run_streaming_case(
     status_timeout: float,
     poll_interval: float,
     max_polls: int,
+    asr_provider: str,
 ) -> dict:
     try:
         done_payload = run_stream_smoke(
@@ -147,6 +161,7 @@ def run_streaming_case(
             run_session_after_stream=False,
             run_asr=True,
             run_full_chain=True,
+            asr_provider=asr_provider,
             poll_interval=poll_interval,
             max_polls=max_polls,
             status_timeout=status_timeout,
@@ -159,43 +174,61 @@ def run_streaming_case(
             path_type="streaming",
             error_code="smoke_failed",
             error_message=str(exc),
+            asr_provider=asr_provider,
         )
     return build_streaming_latency_record(
         term=term,
         audio_path=str(audio_path),
         done_payload=done_payload,
         status_payload=done_payload.get("session_status") if isinstance(done_payload.get("session_status"), dict) else None,
+        asr_provider=asr_provider,
     )
+
+
+def _providers_from_args(args: argparse.Namespace) -> list[str]:
+    if args.provider_matrix:
+        providers = [provider.strip() for provider in args.provider_matrix.split(",") if provider.strip()]
+    else:
+        providers = [args.asr_provider]
+    valid = {"dashscope", "volcengine"}
+    invalid = [provider for provider in providers if provider not in valid]
+    if invalid:
+        raise ValueError(f"invalid ASR provider(s): {', '.join(invalid)}")
+    return providers
 
 
 def run_eval(args: argparse.Namespace) -> list[dict]:
     records: list[dict] = []
     cases = discover_cases(args.audio_dir)
+    providers = _providers_from_args(args)
     for term, audio_path in cases:
-        if args.target in {"streaming", "both"}:
-            records.append(
-                run_streaming_case(
-                    term=term,
-                    audio_path=audio_path,
-                    base_url=args.base_url.rstrip("/"),
-                    frame_ms=args.frame_ms,
-                    realtime=args.realtime,
-                    timeout=args.timeout,
-                    status_timeout=args.status_timeout,
-                    poll_interval=args.poll_interval,
-                    max_polls=args.max_polls,
+        for asr_provider in providers:
+            if args.target in {"streaming", "both"}:
+                records.append(
+                    run_streaming_case(
+                        term=term,
+                        audio_path=audio_path,
+                        base_url=args.base_url.rstrip("/"),
+                        frame_ms=args.frame_ms,
+                        realtime=args.realtime,
+                        timeout=args.timeout,
+                        status_timeout=args.status_timeout,
+                        poll_interval=args.poll_interval,
+                        max_polls=args.max_polls,
+                        asr_provider=asr_provider,
+                    )
                 )
-            )
-        if args.target in {"body", "both"}:
-            records.append(
-                build_error_record(
-                    term=term,
-                    audio_path=str(audio_path),
-                    path_type="body",
-                    error_code="body_target_not_implemented",
-                    error_message="P1.5 only runs the streaming path",
+            if args.target in {"body", "both"}:
+                records.append(
+                    build_error_record(
+                        term=term,
+                        audio_path=str(audio_path),
+                        path_type="body",
+                        error_code="body_target_not_implemented",
+                        error_message="P1.5 only runs the streaming path",
+                        asr_provider=asr_provider,
+                    )
                 )
-            )
     return records
 
 
@@ -219,6 +252,7 @@ def write_markdown(records: list[dict], markdown_path: str | Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     ok_records = [record for record in records if not record.get("error_code")]
     hit_count = sum(1 for record in ok_records if record.get("term_hit"))
+    providers = sorted({str(record.get("asr_provider") or "") for record in records if record.get("asr_provider")})
     lines = [
         "# v5 Streaming Latency Eval",
         "",
@@ -227,6 +261,7 @@ def write_markdown(records: list[dict], markdown_path: str | Path) -> None:
         "## Summary",
         "",
         f"- cases: {len(records)}",
+        f"- providers: {', '.join(providers) if providers else 'N/A'}",
         f"- successful: {len(ok_records)}",
         f"- term_hits: {hit_count}/{len(ok_records) if ok_records else 0}",
         f"- mean_asr_final_abs_ms: {_mean(ok_records, 'asr_final_abs_ms')}",
@@ -235,13 +270,14 @@ def write_markdown(records: list[dict], markdown_path: str | Path) -> None:
         "",
         "## Details",
         "",
-        "| term | hit | asr_final_abs_ms | first_audio_byte_abs_ms | done_abs_ms | audio_duration_ms | answer_chars | error_code | session_id | log_id |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
+        "| term | provider | hit | asr_final_abs_ms | first_audio_byte_abs_ms | done_abs_ms | audio_duration_ms | answer_chars | error_code | session_id | log_id |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
     ]
     for record in records:
         lines.append(
-            "| {term} | {hit} | {asr} | {first_audio} | {done} | {audio_duration} | {answer_chars} | {error} | {session} | {log_id} |".format(
+            "| {term} | {provider} | {hit} | {asr} | {first_audio} | {done} | {audio_duration} | {answer_chars} | {error} | {session} | {log_id} |".format(
                 term=record["term"],
+                provider=record.get("asr_provider") or "",
                 hit="Y" if record.get("term_hit") else "N",
                 asr=record.get("asr_final_abs_ms"),
                 first_audio=record.get("first_audio_byte_abs_ms"),
@@ -261,6 +297,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audio-dir", default="/tmp/volc_asr_eval")
     parser.add_argument("--base-url", default="http://127.0.0.1:8010")
     parser.add_argument("--target", choices=["streaming", "body", "both"], default="streaming")
+    parser.add_argument("--asr-provider", choices=["dashscope", "volcengine"], default="dashscope")
+    parser.add_argument("--provider-matrix", default="")
     parser.add_argument("--output", default="/tmp/v5_streaming_latency_eval.jsonl")
     parser.add_argument("--markdown", default="/tmp/v5_streaming_latency_eval.md")
     parser.add_argument("--frame-ms", type=int, default=60)
