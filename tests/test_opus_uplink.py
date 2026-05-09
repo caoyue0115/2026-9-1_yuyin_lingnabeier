@@ -78,6 +78,16 @@ def _load_v5_asr_only_repeat_eval_script():
     return module
 
 
+def _load_v5_full_chain_repeat_eval_script():
+    script_path = ROOT / "scripts" / "v5_full_chain_repeat_eval.py"
+    spec = importlib.util.spec_from_file_location("v5_full_chain_repeat_eval", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["v5_full_chain_repeat_eval"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class _FakeWebSocket:
     def __init__(self, incoming: list[dict]) -> None:
         self._incoming = list(incoming)
@@ -622,6 +632,64 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         start_from_question.assert_called_once()
         self.assertEqual(start_from_question.call_args.args[2], "请解释阿弥陀佛是什么意思")
 
+    def test_stream_opus_realtime_session_passes_short_answer_mode_to_session(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 960
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {
+                            "type": "start",
+                            "run_asr": True,
+                            "run_full_chain": True,
+                            "answer_mode": "short",
+                        }
+                    ),
+                },
+                {"type": "websocket.receive", "bytes": _outer_frame(0, inner_packets[0])},
+                {"type": "websocket.receive", "text": json.dumps({"type": "end"})},
+            ]
+        )
+        fake_asr = _FakeStreamingAsrAdapter()
+
+        with mock.patch.object(
+            realtime_api, "create_realtime_asr_session", return_value=fake_asr
+        ), mock.patch.object(realtime_api, "start_realtime_session_from_question") as start_from_question:
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        done_payload = websocket.sent_json[-1]
+        self.assertEqual(done_payload["type"], "done")
+        self.assertEqual(done_payload["answer_mode"], "short")
+        start_from_question.assert_called_once()
+        self.assertEqual(start_from_question.call_args.kwargs["answer_mode"], "short")
+
     def test_stream_opus_realtime_session_defaults_to_dashscope_provider(self) -> None:
         from src.api import realtime as realtime_api
         from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
@@ -817,6 +885,18 @@ class OpusUplinkSmokeScriptTests(unittest.TestCase):
             json.loads(payload),
             {"type": "start", "run_asr": True, "run_full_chain": True, "asr_provider": "volcengine"},
         )
+
+    def test_build_start_control_includes_short_answer_mode_when_requested(self) -> None:
+        module = _load_opus_uplink_stream_script()
+
+        payload = module.build_start_control(
+            run_asr=True,
+            run_full_chain=True,
+            asr_provider="volcengine",
+            answer_mode="short",
+        )
+
+        self.assertEqual(json.loads(payload)["answer_mode"], "short")
 
 
 class V5StreamingLatencyEvalScriptTests(unittest.TestCase):
@@ -1040,3 +1120,154 @@ class V5AsrOnlyRepeatEvalScriptTests(unittest.TestCase):
         self.assertIn("p95_asr_final_abs_ms", content)
         self.assertIn("hit_count / repeats", content)
         self.assertIn("unique recognized_texts", content)
+
+
+class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
+    def test_parser_accepts_answer_mode_and_repeat_options(self) -> None:
+        module = _load_v5_full_chain_repeat_eval_script()
+
+        args = module.build_parser().parse_args(
+            [
+                "--providers",
+                "dashscope,volcengine",
+                "--repeats",
+                "3",
+                "--answer-mode",
+                "short",
+                "--no-realtime",
+            ]
+        )
+
+        self.assertEqual(module.providers_from_args(args), ["dashscope", "volcengine"])
+        self.assertEqual(args.repeats, 3)
+        self.assertEqual(args.answer_mode, "short")
+        self.assertFalse(args.realtime)
+
+    def test_run_full_chain_case_enables_full_chain_and_short_mode(self) -> None:
+        module = _load_v5_full_chain_repeat_eval_script()
+        calls: list[dict] = []
+
+        def _fake_run_stream_smoke(*_args, **kwargs):
+            calls.append(kwargs)
+            return {
+                "type": "done",
+                "asr_provider": "volcengine",
+                "question_text": "请解释阿弥陀佛是什么意思？",
+                "asr_final_abs_ms": 4300,
+                "first_provider_result_abs_ms": 3900,
+                "provider_start_duration_ms": 1500,
+                "provider_log_id": "volc-log",
+                "session_id": "session-1",
+                "done_abs_ms": 5000,
+                "error_code": None,
+                "session_status": {
+                    "session_id": "session-1",
+                    "question_text": "请解释阿弥陀佛是什么意思？",
+                    "answer_text": "阿弥陀佛是无量光寿。念佛是归向净土的核心方便。",
+                    "error_code": None,
+                    "trace": {
+                        "retrieval_done_abs_ms": 5200,
+                        "first_llm_chunk_abs_ms": 6500,
+                        "first_tts_chunk_abs_ms": 7600,
+                        "first_audio_byte_abs_ms": 7600,
+                        "done_abs_ms": 10800,
+                        "audio_duration_ms": 5200,
+                    },
+                },
+            }
+
+        with mock.patch.object(module, "run_stream_smoke", side_effect=_fake_run_stream_smoke):
+            record = module.run_full_chain_case(
+                term="阿弥陀佛",
+                audio_path=Path("/tmp/volc_asr_eval/amitabha.wav"),
+                repeat_index=1,
+                provider="volcengine",
+                base_url="http://127.0.0.1:8010",
+                frame_ms=60,
+                realtime=True,
+                timeout=30.0,
+                status_timeout=20.0,
+                poll_interval=0.3,
+                max_polls=120,
+                answer_mode="short",
+            )
+
+        self.assertEqual(calls[0]["run_asr"], True)
+        self.assertEqual(calls[0]["run_full_chain"], True)
+        self.assertEqual(calls[0]["asr_provider"], "volcengine")
+        self.assertEqual(calls[0]["answer_mode"], "short")
+        self.assertTrue(record["term_hit"])
+        self.assertEqual(record["answer_mode"], "short")
+        self.assertEqual(record["first_audio_byte_abs_ms"], 7600)
+        self.assertEqual(record["done_abs_ms"], 10800)
+        self.assertGreater(record["answer_chars"], 0)
+
+    def test_run_full_chain_case_records_error_and_continues_shape(self) -> None:
+        module = _load_v5_full_chain_repeat_eval_script()
+
+        with mock.patch.object(module, "run_stream_smoke", side_effect=RuntimeError("connection refused")):
+            record = module.run_full_chain_case(
+                term="慧远",
+                audio_path=Path("/tmp/volc_asr_eval/huiyuan.wav"),
+                repeat_index=2,
+                provider="dashscope",
+                base_url="http://127.0.0.1:8010",
+                frame_ms=60,
+                realtime=True,
+                timeout=30.0,
+                status_timeout=20.0,
+                poll_interval=0.3,
+                max_polls=120,
+                answer_mode="short",
+            )
+
+        self.assertEqual(record["provider"], "dashscope")
+        self.assertEqual(record["term"], "慧远")
+        self.assertEqual(record["repeat_index"], 2)
+        self.assertEqual(record["error_code"], "smoke_failed")
+        self.assertIn("connection refused", record["error_message"])
+
+    def test_write_markdown_includes_first_audio_done_and_output_length_summary(self) -> None:
+        module = _load_v5_full_chain_repeat_eval_script()
+        records = [
+            {
+                "provider": "dashscope",
+                "term": "阿弥陀佛",
+                "repeat_index": 1,
+                "question_text": "情解释阿弥陀佛是什么意思？",
+                "recognized_text": "情解释阿弥陀佛是什么意思？",
+                "term_hit": True,
+                "asr_final_abs_ms": 5000,
+                "first_audio_byte_abs_ms": 9000,
+                "done_abs_ms": 13000,
+                "answer_chars": 31,
+                "audio_duration_ms": 5200,
+                "error_code": None,
+            },
+            {
+                "provider": "volcengine",
+                "term": "阿弥陀佛",
+                "repeat_index": 1,
+                "question_text": "请解释阿弥陀佛是什么意思？",
+                "recognized_text": "请解释阿弥陀佛是什么意思？",
+                "term_hit": True,
+                "asr_final_abs_ms": 4300,
+                "first_audio_byte_abs_ms": 8200,
+                "done_abs_ms": 12100,
+                "answer_chars": 30,
+                "audio_duration_ms": 5100,
+                "error_code": None,
+            },
+        ]
+        output_path = Path(tempfile.mkstemp(suffix=".md")[1])
+        try:
+            module.write_markdown(records, output_path)
+            content = output_path.read_text(encoding="utf-8")
+        finally:
+            output_path.unlink(missing_ok=True)
+
+        self.assertIn("mean_first_audio_byte_abs_ms", content)
+        self.assertIn("median_first_audio_byte_abs_ms", content)
+        self.assertIn("p95_done_abs_ms", content)
+        self.assertIn("mean_answer_chars", content)
+        self.assertIn("mean_audio_duration_ms", content)

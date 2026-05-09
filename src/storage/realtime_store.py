@@ -88,6 +88,7 @@ class InMemoryRealtimeSessionStore:
                 "provider_log_id": None,
                 "provider_error_code": None,
                 "provider_error_message": None,
+                "answer_mode": None,
                 "retrieval_top_score": None,
                 "stream_to_session_start_abs_ms": None,
                 "server_stream_accept_abs_ms": None,

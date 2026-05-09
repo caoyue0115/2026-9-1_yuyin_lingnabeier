@@ -40,6 +40,21 @@ class LlmProviderTests(unittest.TestCase):
         self.assertIn("问题：什么是无相", messages[1]["content"])
         self.assertIn("金刚经", messages[1]["content"])
 
+    def test_short_answer_mode_uses_stricter_length_prompt(self) -> None:
+        from src.providers.llm import _build_messages
+
+        messages = _build_messages(
+            "什么是阿弥陀佛",
+            [{"source_title": "阿弥陀佛", "snippet": "无量光寿"}],
+            answer_mode="short",
+        )
+
+        self.assertIn("两句话内", messages[0]["content"])
+        self.assertIn("不超过70字", messages[0]["content"])
+        self.assertIn("先给直接解释", messages[0]["content"])
+        self.assertIn("不要长篇解释", messages[0]["content"])
+        self.assertIn("不超过70字", messages[1]["content"])
+
     def test_stream_answer_disables_thinking_for_dashscope_flash_model(self) -> None:
         from src.providers import llm
 
@@ -64,6 +79,30 @@ class LlmProviderTests(unittest.TestCase):
         self.assertEqual(captured_kwargs["model"], "qwen3.5-flash-2026-02-23")
         self.assertEqual(captured_kwargs["extra_body"], {"enable_thinking": False})
         self.assertTrue(captured_kwargs["stream"])
+
+    def test_stream_answer_short_mode_uses_fixed_smaller_max_tokens(self) -> None:
+        from src.providers import llm
+
+        captured_kwargs: dict = {}
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                captured_kwargs.update(kwargs)
+                chunk = SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="无相即离相。"))]
+                )
+                return iter([chunk])
+
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=FakeCompletions())
+        )
+
+        with patch.object(llm, "_build_client", return_value=fake_client):
+            chunks = list(llm.stream_answer_text("什么是无相", [], answer_mode="short"))
+
+        self.assertEqual(chunks, ["无相即离相。"])
+        self.assertLessEqual(captured_kwargs["max_tokens"], 96)
+        self.assertIn("不超过70字", captured_kwargs["messages"][0]["content"])
 
 
 if __name__ == "__main__":

@@ -72,15 +72,22 @@ def build_stream_headers(*, frame_ms: int, original_pcm_bytes: int) -> dict[str,
     }
 
 
-def build_start_control(*, run_asr: bool, run_full_chain: bool, asr_provider: str = "dashscope") -> str:
-    return json.dumps(
-        {
-            "type": "start",
-            "run_asr": run_asr,
-            "run_full_chain": run_full_chain,
-            "asr_provider": asr_provider,
-        }
-    )
+def build_start_control(
+    *,
+    run_asr: bool,
+    run_full_chain: bool,
+    asr_provider: str = "dashscope",
+    answer_mode: str = "default",
+) -> str:
+    payload = {
+        "type": "start",
+        "run_asr": run_asr,
+        "run_full_chain": run_full_chain,
+        "asr_provider": asr_provider,
+    }
+    if answer_mode and answer_mode != "default":
+        payload["answer_mode"] = answer_mode
+    return json.dumps(payload)
 
 
 def poll_session_until_terminal(
@@ -171,6 +178,7 @@ def run_stream_smoke(
     poll_interval: float,
     max_polls: int,
     status_timeout: float,
+    answer_mode: str = "default",
     emit_trace: bool = True,
 ) -> dict:
     from websocket import create_connection
@@ -213,6 +221,7 @@ def run_stream_smoke(
                     run_asr=run_asr or run_full_chain,
                     run_full_chain=run_full_chain,
                     asr_provider=asr_provider,
+                    answer_mode=answer_mode,
                 )
             )
         for frame_index, message in enumerate(messages):
@@ -314,6 +323,7 @@ def main() -> None:
     parser.add_argument("--run-asr", action="store_true")
     parser.add_argument("--run-full-chain", action="store_true")
     parser.add_argument("--asr-provider", choices=["dashscope", "volcengine"], default="dashscope")
+    parser.add_argument("--answer-mode", choices=["default", "short"], default="default")
     parser.add_argument("--realtime", dest="realtime", action="store_true")
     parser.add_argument("--no-realtime", dest="realtime", action="store_false")
     parser.set_defaults(realtime=True)
@@ -329,6 +339,7 @@ def main() -> None:
         run_asr=args.run_asr,
         run_full_chain=args.run_full_chain,
         asr_provider=args.asr_provider,
+        answer_mode=args.answer_mode,
         poll_interval=args.poll_interval,
         max_polls=args.max_polls,
         status_timeout=args.status_timeout,

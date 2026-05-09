@@ -22,6 +22,7 @@ from src.settings import settings
 from src.storage.realtime_store import InMemoryRealtimeSessionStore
 
 
+ANSWER_MODE_SHORT = "short"
 _SENTENCE_ENDINGS = "。！？!?；;…"
 _SOFT_CUT_HINTS = "，、,：: "
 logger = logging.getLogger(__name__)
@@ -83,6 +84,12 @@ def _set_trace_default(trace: dict, key: str, value):
 def _set_abs_trace(trace: dict, key: str, offset_ms: int | None, relative_ms: int | None) -> None:
     if offset_ms is not None and relative_ms is not None:
         trace[key] = offset_ms + relative_ms
+
+
+def _stream_answer_text_for_mode(question_text: str, references: list[dict], answer_mode: str | None) -> Iterable[str]:
+    if str(answer_mode or "").strip().lower() == ANSWER_MODE_SHORT:
+        return stream_answer_text(question_text, references, answer_mode=ANSWER_MODE_SHORT)
+    return stream_answer_text(question_text, references)
 
 
 def _compact_reference_text(text: str, max_chars: int) -> str:
@@ -257,6 +264,7 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
     if not updated:
         return
     stream_to_session_start_abs_ms = updated["trace"].get("stream_to_session_start_abs_ms")
+    answer_mode = str(updated["trace"].get("answer_mode") or "").strip().lower()
 
     if pretranscribed_question:
         question_text = pretranscribed_question
@@ -329,7 +337,11 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
                     updated["trace"]["tts_warmup_failed"] = True
                 updated["trace"]["tts_warmup_ms"] = _elapsed_ms(warmup_started)
         try:
-            llm_stream: Iterable[str] = stream_answer_text(question_text, llm_references)
+            llm_stream: Iterable[str] = _stream_answer_text_for_mode(
+                question_text,
+                llm_references,
+                answer_mode,
+            )
         except Exception as exc:
             store.mark_failed(session_id, "llm_request_failed", str(exc) or "LLM failed")
             store.fail_audio(session_id, "llm_request_failed")
@@ -627,6 +639,15 @@ def start_realtime_session_from_question(
     store: InMemoryRealtimeSessionStore,
     session_id: str,
     question_text: str,
+    *,
+    answer_mode: str | None = None,
 ) -> None:
-    store.update_session(session_id, question_text=question_text)
+    changes = {"question_text": question_text}
+    normalized_answer_mode = str(answer_mode or "").strip().lower()
+    if normalized_answer_mode:
+        session = store.get_session(session_id)
+        trace = dict(session.get("trace") or {}) if session else {}
+        trace["answer_mode"] = normalized_answer_mode
+        changes["trace"] = trace
+    store.update_session(session_id, **changes)
     start_realtime_session(store, session_id)

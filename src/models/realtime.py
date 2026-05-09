@@ -46,6 +46,7 @@ class RealtimeTrace(BaseModel):
     provider_log_id: str | None = None
     provider_error_code: str | None = None
     provider_error_message: str | None = None
+    answer_mode: str | None = None
     retrieval_top_score: float | None = None
     stream_to_session_start_abs_ms: int | None = None
     server_stream_accept_abs_ms: int | None = None

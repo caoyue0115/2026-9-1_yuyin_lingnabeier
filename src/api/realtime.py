@@ -41,6 +41,7 @@ store = InMemoryRealtimeSessionStore(
 
 ASR_PROVIDER_READY_TIMEOUT_SECONDS = 8.0
 ASR_PROVIDER_PENDING_PCM_MAX_BYTES = 2 * 1024 * 1024
+ANSWER_MODE_CHOICES = {"default", "short"}
 
 
 def _frame_audio_packets(chunks):
@@ -225,6 +226,7 @@ async def stream_opus_realtime_session(
     run_session_after_stream = False
     run_asr = False
     run_full_chain = False
+    answer_mode = "default"
     realtime_asr = None
     asr_start_task: asyncio.Task[None] | None = None
     asr_provider = ASR_PROVIDER_DASHSCOPE
@@ -388,6 +390,11 @@ async def stream_opus_realtime_session(
                         await _send_stream_error(websocket, "invalid_asr_provider", close_code=1008)
                         return
                     asr_provider = requested_provider
+                    requested_answer_mode = str(control.get("answer_mode") or "default").strip().lower()
+                    if requested_answer_mode not in ANSWER_MODE_CHOICES:
+                        await _send_stream_error(websocket, "invalid_answer_mode", close_code=1008)
+                        return
+                    answer_mode = requested_answer_mode
                     if run_asr:
                         try:
                             realtime_asr = create_realtime_asr_session(
@@ -558,6 +565,7 @@ async def stream_opus_realtime_session(
         "asr_error_code": None,
         "asr_error_message": None,
         **_provider_lifecycle_payload(),
+        "answer_mode": answer_mode if run_full_chain else None,
         "error_code": None,
         "error_message": None,
         "session_started": False,
@@ -593,6 +601,7 @@ async def stream_opus_realtime_session(
                 "provider_log_id": asr_result.request_id,
                 "provider_error_code": None,
                 "provider_error_message": None,
+                "answer_mode": answer_mode,
                 "stream_to_session_start_abs_ms": stream_to_session_start_abs_ms,
                 "server_stream_accept_abs_ms": 0,
                 "first_frame_server_abs_ms": first_frame_server_ms,
@@ -602,7 +611,12 @@ async def stream_opus_realtime_session(
             }
         )
         store.update_session(session["session_id"], trace=session_trace, question_text=asr_result.text)
-        start_realtime_session_from_question(store, session["session_id"], asr_result.text)
+        start_realtime_session_from_question(
+            store,
+            session["session_id"],
+            asr_result.text,
+            answer_mode=answer_mode,
+        )
         done_payload.update(
             {
                 "session_started": True,

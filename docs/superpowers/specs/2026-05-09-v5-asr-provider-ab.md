@@ -280,3 +280,65 @@ WebSocket start control：
 - Volcengine provider start 仍慢：mean `1412.8ms`，p95 `2512.0ms`；这部分已被单独拆账，且不阻塞首帧。
 - 计入 provider start 后，Volcengine ASR final 仍略优于 DashScope：mean `4694.7ms` vs `4851.8ms`，median `4430.0ms` vs `4492.0ms`，p95 `5643.0ms` vs `6424.0ms`。
 - 仅 ASR 层看，Volcengine 已有较强证据成为默认 provider 候选；但默认切换前仍应跑固定回答长度和固定 TTS 输出的 full-chain 重复矩阵，避免 ASR 优势被后段抖动抵消。
+
+## P2.3 固定短回答 full-chain 重复矩阵
+
+目标：固定后段 RAG/LLM/TTS 输出口径，验证 Volcengine ASR 的准确率优势是否会在端到端首音频和 total 中被后段抖动抵消。默认 provider 仍为 `dashscope`，Volcengine 仍为可选 provider。
+
+### 实现
+
+本轮新增 `answer_mode=short`：
+
+- WebSocket start control 可传 `answer_mode:"short"`。
+- full-chain session trace 记录 `answer_mode=short`。
+- LLM prompt 固定为两句话内、总字数不超过 70 字、先直接解释再补一句修行/理解上的补充。
+- short mode 使用固定更小 `max_tokens`，减少输出长度漂移。
+
+新增矩阵脚本：
+
+```bash
+python scripts/v5_full_chain_repeat_eval.py --audio-dir /tmp/volc_asr_eval --base-url http://127.0.0.1:8010 --providers dashscope,volcengine --repeats 3 --frame-ms 60 --realtime --answer-mode short --output /tmp/v5_full_chain_repeat_eval.jsonl --markdown /tmp/v5_full_chain_repeat_eval.md
+```
+
+结果文件只保存在 `/tmp`，不入库。
+
+### 单条 smoke
+
+输入：`/tmp/volc_asr_eval/amitabha.wav`
+
+| provider | question_text | asr_final_abs_ms | first_audio_byte_abs_ms | done_abs_ms | answer_chars | audio_duration_ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| dashscope | 情解释阿弥陀佛是什么意思？ | 5345 | 9884 | 13965 | 43 | 12800 |
+| volcengine | 请解释阿弥陀佛是什么意思？ | 5482 | 10476 | 14823 | 50 | 13440 |
+
+### 54 条矩阵汇总
+
+9 条音频 x 2 provider x 3 repeats，共 54 条记录，0 错误。
+
+| provider | success_count / total | term_hits / total | mean_asr_final_abs_ms | median_asr_final_abs_ms | p95_asr_final_abs_ms | mean_first_audio_byte_abs_ms | median_first_audio_byte_abs_ms | p95_first_audio_byte_abs_ms | mean_done_abs_ms | median_done_abs_ms | p95_done_abs_ms | mean_answer_chars | mean_audio_duration_ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dashscope | 27/27 | 21/27 | 4690.9 | 4601.0 | 5752.0 | 8441.1 | 8219.0 | 10298.0 | 13185.4 | 13454.0 | 15734.0 | 48.0 | 15060.7 |
+| volcengine | 27/27 | 27/27 | 4692.7 | 4388.0 | 5796.0 | 8740.3 | 8501.0 | 10361.0 | 13440.5 | 13580.0 | 15438.0 | 47.1 | 14829.6 |
+
+### 逐词稳定性
+
+| term | dashscope hit_count / repeats | dashscope recognized_text | volcengine hit_count / repeats | volcengine recognized_text |
+| --- | ---: | --- | ---: | --- |
+| 阿弥陀佛 | 3/3 | 情解释阿弥陀佛是什么意思？ | 3/3 | 请解释阿弥陀佛是什么意思？ |
+| 四十八愿 | 0/3 | 48愿和净土宗有什么关系？ | 3/3 | 四十八愿和净土宗有什么关系？ |
+| 净土宗 | 3/3 | 净土宗为什么重视信愿行？ | 3/3 | 净土宗为什么重视信愿行？ |
+| 无量寿经 | 3/3 | 无量寿经讲了什么？ | 3/3 | 无量寿经讲了什么？ |
+| 金刚经 | 3/3 | 金刚经的核心意思是什么？ | 3/3 | 金刚经的核心意思是什么？ |
+| 般若 | 3/3 | 佛教里般若是什么意思？ | 3/3 | 佛教里般若是什么意思？ |
+| 慧远 | 0/3 | 慧云大师和东林寺有什么关系？ | 3/3 | 慧远大师和东林寺有什么关系？ |
+| 善导 | 3/3 | 善导大师如何解释念佛？ | 3/3 | 善导大师如何解释念佛？ |
+| 东林寺 | 3/3 | 东林寺和净土宗有什么关系？ | 3/3 | 东林寺和净土宗有什么关系？ |
+
+### P2.3 判断
+
+- short answer 口径固定有效：两个 provider 的平均回答长度和输出音频时长已接近，Volcengine 平均回答少 `0.9` 字，平均音频少 `231.1ms`。
+- Volcengine 继续保持佛学词准确率优势：`27/27`，DashScope 为 `21/27`。
+- DashScope 的稳定错词仍是 `四十八愿 -> 48愿`、`慧远 -> 慧云`，以及非目标词但影响问题自然度的 `请解释 -> 情解释`。
+- 固定后段后，Volcengine 没有明确端到端均值延迟优势：mean 首音频比 DashScope 慢约 `299.2ms`，mean total 慢约 `255.1ms`；但 p95 total 略优。
+- 因为 `answer_chars` 和 `audio_duration_ms` 已接近，本轮不能把 full-chain 差异归因于回答更长；主要剩余变量是 provider 连接、ASR final 分布和 LLM/TTS 抖动。
+- 建议：Volcengine 已足以作为默认 ASR provider 候选，尤其在佛学专有词准确率优先时；但切换默认前应通过配置开关灰度，并保留 DashScope fallback。端到端“明显更快”暂不成立。
