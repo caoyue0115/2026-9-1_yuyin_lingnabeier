@@ -679,3 +679,63 @@ python scripts/v5_streaming_latency_eval.py --audio-dir /tmp/volc_asr_eval --bas
 - `.env` 已由 `.gitignore` 忽略，未入库
 - 凭据扫描未命中真实凭据
 - 本地 uvicorn 已停止
+
+## 2026-05-09 P2.2：ASR-only 重复矩阵
+
+目标：排除 RAG/LLM/TTS 抖动，只比较 DashScope 与 Volcengine 在同一批 9 条佛学词音频上的 ASR-only 稳定性。默认 provider 仍是 `dashscope`，火山仍是可选 provider。
+
+新增：
+
+- `scripts/v5_asr_only_repeat_eval.py`
+- `tests/test_opus_uplink.py` 中新增脚本参数、失败不中断、Markdown 汇总和 ASR-only 不触发 full-chain 的测试。
+
+ASR-only 口径：
+
+```json
+{"type":"start","run_asr":true,"run_full_chain":false,"asr_provider":"dashscope"}
+{"type":"start","run_asr":true,"run_full_chain":false,"asr_provider":"volcengine"}
+```
+
+服务端返回 ASR final 和 done summary；`session_started=false`，不进入 RAG/LLM/TTS。
+
+单条 smoke：
+
+| provider | question_text | first_frame_server_abs_ms | provider_start_duration_ms | first_pcm_sent_to_provider_abs_ms | first_provider_result_abs_ms | asr_final_abs_ms | session_started |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| dashscope | 情解释阿弥陀佛是什么意思？ | 7 | 63 | 69 | 2469 | 5304 | false |
+| volcengine | 请解释阿弥陀佛是什么意思？ | 3 | 1711 | 1714 | 4934 | 5751 | false |
+
+5 轮重复矩阵：
+
+```bash
+python scripts/v5_asr_only_repeat_eval.py --audio-dir /tmp/volc_asr_eval --base-url http://127.0.0.1:8010 --providers dashscope,volcengine --repeats 5 --frame-ms 60 --realtime --output /tmp/v5_asr_only_repeat_eval.jsonl --markdown /tmp/v5_asr_only_repeat_eval.md
+```
+
+结果：90 条记录，0 错误，结果文件只保存在 `/tmp`，不入库。
+
+| provider | success_count / total | term_hits / total | mean_asr_final_abs_ms | median_asr_final_abs_ms | p95_asr_final_abs_ms | mean_provider_start_duration_ms | p95_provider_start_duration_ms | mean_first_provider_result_abs_ms | p95_first_provider_result_abs_ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dashscope | 45/45 | 35/45 | 4851.8 | 4492.0 | 6424.0 | 63.2 | 63.0 | 2690.1 | 3709.0 |
+| volcengine | 45/45 | 45/45 | 4694.7 | 4430.0 | 5643.0 | 1412.8 | 2512.0 | 4088.9 | 5084.0 |
+
+逐词命中：
+
+| term | dashscope | volcengine |
+| --- | --- | --- |
+| 阿弥陀佛 | 5/5，稳定识别为“情解释阿弥陀佛是什么意思？” | 5/5，稳定识别为“请解释阿弥陀佛是什么意思？” |
+| 四十八愿 | 0/5，稳定错为“48愿和净土宗有什么关系？” | 5/5 |
+| 净土宗 | 5/5 | 5/5 |
+| 无量寿经 | 5/5 | 5/5 |
+| 金刚经 | 5/5 | 5/5 |
+| 般若 | 5/5 | 5/5 |
+| 慧远 | 0/5，稳定错为“慧云大师和东林寺有什么关系？” | 5/5 |
+| 善导 | 5/5 | 5/5 |
+| 东林寺 | 5/5 | 5/5 |
+
+阶段判断：
+
+- ASR-only 稳定性上，Volcengine 的佛学词准确率明显优于 DashScope：`45/45` vs `35/45`。
+- DashScope 错词稳定复现：`四十八愿 -> 48愿`、`慧远 -> 慧云`、`请解释 -> 情解释`。
+- Volcengine provider start 明显慢，均值 `1412.8ms`，p95 `2512.0ms`；但建连仍不阻塞首帧 ack。
+- 计入 provider start 后，Volcengine ASR final 分布仍略优于 DashScope：mean `4694.7ms` vs `4851.8ms`，median `4430.0ms` vs `4492.0ms`，p95 `5643.0ms` vs `6424.0ms`。
+- 仅从 ASR-only 数据看，Volcengine 已具备切换默认 provider 的技术依据；但默认切换前仍建议再跑固定后段输出的 full-chain 重复矩阵，确认首音频和 total 不被后段抖动抵消。

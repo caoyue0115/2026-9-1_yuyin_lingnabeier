@@ -68,6 +68,16 @@ def _load_v5_streaming_latency_eval_script():
     return module
 
 
+def _load_v5_asr_only_repeat_eval_script():
+    script_path = ROOT / "scripts" / "v5_asr_only_repeat_eval.py"
+    spec = importlib.util.spec_from_file_location("v5_asr_only_repeat_eval", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["v5_asr_only_repeat_eval"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class _FakeWebSocket:
     def __init__(self, incoming: list[dict]) -> None:
         self._incoming = list(incoming)
@@ -405,7 +415,11 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         )
         fake_asr = _FakeStreamingAsrAdapter()
 
-        with mock.patch.object(realtime_api, "create_realtime_asr_session", return_value=fake_asr):
+        with mock.patch.object(
+            realtime_api, "create_realtime_asr_session", return_value=fake_asr
+        ), mock.patch.object(realtime_api, "start_realtime_session_from_question") as start_from_question, mock.patch.object(
+            realtime_api, "start_realtime_session"
+        ) as start_session:
             asyncio.run(
                 realtime_api.stream_opus_realtime_session(
                     websocket,
@@ -439,6 +453,8 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertLessEqual(done_payload["first_asr_partial_abs_ms"], done_payload["asr_final_abs_ms"])
         self.assertLessEqual(done_payload["asr_final_abs_ms"], done_payload["done_abs_ms"])
         self.assertFalse(done_payload["session_started"])
+        start_from_question.assert_not_called()
+        start_session.assert_not_called()
 
     def test_stream_opus_realtime_session_provider_start_does_not_block_first_ack(self) -> None:
         from src.api import realtime as realtime_api
@@ -887,3 +903,140 @@ class V5StreamingLatencyEvalScriptTests(unittest.TestCase):
         self.assertEqual(record["path_type"], "streaming")
         self.assertEqual(record["error_code"], "smoke_failed")
         self.assertEqual(record["error_message"], "connection refused")
+
+
+class V5AsrOnlyRepeatEvalScriptTests(unittest.TestCase):
+    def test_parser_accepts_repeat_provider_and_realtime_options(self) -> None:
+        module = _load_v5_asr_only_repeat_eval_script()
+
+        args = module.build_parser().parse_args(
+            [
+                "--providers",
+                "dashscope,volcengine",
+                "--repeats",
+                "5",
+                "--frame-ms",
+                "60",
+                "--no-realtime",
+            ]
+        )
+
+        self.assertEqual(module.providers_from_args(args), ["dashscope", "volcengine"])
+        self.assertEqual(args.repeats, 5)
+        self.assertEqual(args.frame_ms, 60)
+        self.assertFalse(args.realtime)
+
+    def test_run_asr_only_case_does_not_enable_full_chain(self) -> None:
+        module = _load_v5_asr_only_repeat_eval_script()
+        calls: list[dict] = []
+
+        def _fake_run_stream_smoke(*_args, **kwargs):
+            calls.append(kwargs)
+            return {
+                "type": "done",
+                "asr_provider": "dashscope",
+                "question_text": "请解释阿弥陀佛是什么意思？",
+                "first_frame_server_abs_ms": 4,
+                "provider_start_duration_ms": 70,
+                "first_pcm_sent_to_provider_abs_ms": 72,
+                "first_provider_result_abs_ms": 2800,
+                "first_asr_partial_abs_ms": 2800,
+                "asr_final_abs_ms": 5200,
+                "provider_log_id": "req-1",
+                "error_code": None,
+            }
+
+        with mock.patch.object(module, "run_stream_smoke", side_effect=_fake_run_stream_smoke):
+            record = module.run_asr_only_case(
+                term="阿弥陀佛",
+                audio_path=Path("/tmp/volc_asr_eval/amitabha.wav"),
+                repeat_index=2,
+                provider="dashscope",
+                base_url="http://127.0.0.1:8010",
+                frame_ms=60,
+                realtime=True,
+                timeout=30.0,
+            )
+
+        self.assertEqual(calls[0]["run_asr"], True)
+        self.assertEqual(calls[0]["run_full_chain"], False)
+        self.assertEqual(calls[0]["asr_provider"], "dashscope")
+        self.assertEqual(record["repeat_index"], 2)
+        self.assertTrue(record["term_hit"])
+        self.assertEqual(record["question_text"], "请解释阿弥陀佛是什么意思？")
+        self.assertEqual(record["asr_final_abs_ms"], 5200)
+        self.assertEqual(record["provider_log_id"], "req-1")
+
+    def test_run_asr_only_case_records_error_and_continues_shape(self) -> None:
+        module = _load_v5_asr_only_repeat_eval_script()
+
+        with mock.patch.object(module, "run_stream_smoke", side_effect=RuntimeError("connection refused")):
+            record = module.run_asr_only_case(
+                term="金刚经",
+                audio_path=Path("/tmp/volc_asr_eval/diamond_sutra.wav"),
+                repeat_index=1,
+                provider="volcengine",
+                base_url="http://127.0.0.1:8010",
+                frame_ms=60,
+                realtime=True,
+                timeout=30.0,
+            )
+
+        self.assertEqual(record["provider"], "volcengine")
+        self.assertEqual(record["term"], "金刚经")
+        self.assertFalse(record["term_hit"])
+        self.assertEqual(record["error_code"], "smoke_failed")
+        self.assertIn("connection refused", record["error_message"])
+
+    def test_write_markdown_includes_mean_median_and_p95_summary(self) -> None:
+        module = _load_v5_asr_only_repeat_eval_script()
+        records = [
+            {
+                "provider": "dashscope",
+                "term": "阿弥陀佛",
+                "repeat_index": 1,
+                "question_text": "请解释阿弥陀佛是什么意思？",
+                "recognized_text": "请解释阿弥陀佛是什么意思？",
+                "term_hit": True,
+                "asr_final_abs_ms": 5000,
+                "provider_start_duration_ms": 70,
+                "first_provider_result_abs_ms": 2800,
+                "error_code": None,
+            },
+            {
+                "provider": "dashscope",
+                "term": "阿弥陀佛",
+                "repeat_index": 2,
+                "question_text": "情解释阿弥陀佛是什么意思？",
+                "recognized_text": "情解释阿弥陀佛是什么意思？",
+                "term_hit": True,
+                "asr_final_abs_ms": 6000,
+                "provider_start_duration_ms": 80,
+                "first_provider_result_abs_ms": 2900,
+                "error_code": None,
+            },
+            {
+                "provider": "volcengine",
+                "term": "阿弥陀佛",
+                "repeat_index": 1,
+                "question_text": "请解释阿弥陀佛是什么意思？",
+                "recognized_text": "请解释阿弥陀佛是什么意思？",
+                "term_hit": True,
+                "asr_final_abs_ms": 4300,
+                "provider_start_duration_ms": 1800,
+                "first_provider_result_abs_ms": 3900,
+                "error_code": None,
+            },
+        ]
+        output_path = Path(tempfile.mkstemp(suffix=".md")[1])
+        try:
+            module.write_markdown(records, output_path)
+            content = output_path.read_text(encoding="utf-8")
+        finally:
+            output_path.unlink(missing_ok=True)
+
+        self.assertIn("mean_asr_final_abs_ms", content)
+        self.assertIn("median_asr_final_abs_ms", content)
+        self.assertIn("p95_asr_final_abs_ms", content)
+        self.assertIn("hit_count / repeats", content)
+        self.assertIn("unique recognized_texts", content)

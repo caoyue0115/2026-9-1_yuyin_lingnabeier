@@ -221,3 +221,62 @@ P2.1 判断：
 - 即便计入建连，火山 ASR final 均值仍优于 DashScope：`4740.7ms` vs `5590.8ms`。
 - 火山佛学词精确命中保持 `9/9`，DashScope 仍为 `7/9`。
 - 本轮 full-chain 火山 mean 首音频和 total 也优于 DashScope，但这不是 ASR-only 结论；后段仍可能受 LLM/TTS 抖动影响。
+
+## P2.2 ASR-only 重复矩阵
+
+目标：只比较 ASR provider，不跑 RAG/LLM/TTS，排除后段抖动。默认 provider 仍为 `dashscope`，火山仍为可选 provider。
+
+新增脚本：
+
+```bash
+python scripts/v5_asr_only_repeat_eval.py --audio-dir /tmp/volc_asr_eval --base-url http://127.0.0.1:8010 --providers dashscope,volcengine --repeats 5 --frame-ms 60 --realtime --output /tmp/v5_asr_only_repeat_eval.jsonl --markdown /tmp/v5_asr_only_repeat_eval.md
+```
+
+WebSocket start control：
+
+```json
+{"type":"start","run_asr":true,"run_full_chain":false,"asr_provider":"dashscope"}
+{"type":"start","run_asr":true,"run_full_chain":false,"asr_provider":"volcengine"}
+```
+
+该模式只返回 ASR final 和 done summary；服务端 `session_started=false`，不会创建 realtime session，也不会触发 RAG/LLM/TTS。
+
+### 单条 smoke
+
+输入：`/tmp/volc_asr_eval/amitabha.wav`
+
+| provider | question_text | first_frame_server_abs_ms | provider_start_duration_ms | first_pcm_sent_to_provider_abs_ms | first_provider_result_abs_ms | asr_final_abs_ms | session_started |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| dashscope | 情解释阿弥陀佛是什么意思？ | 7 | 63 | 69 | 2469 | 5304 | false |
+| volcengine | 请解释阿弥陀佛是什么意思？ | 3 | 1711 | 1714 | 4934 | 5751 | false |
+
+### 5 轮重复矩阵汇总
+
+90 条记录全部成功，错误数为 0。结果文件只保存在 `/tmp`，不入库。
+
+| provider | success_count / total | term_hits / total | mean_asr_final_abs_ms | median_asr_final_abs_ms | p95_asr_final_abs_ms | mean_provider_start_duration_ms | p95_provider_start_duration_ms | mean_first_provider_result_abs_ms | p95_first_provider_result_abs_ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dashscope | 45/45 | 35/45 | 4851.8 | 4492.0 | 6424.0 | 63.2 | 63.0 | 2690.1 | 3709.0 |
+| volcengine | 45/45 | 45/45 | 4694.7 | 4430.0 | 5643.0 | 1412.8 | 2512.0 | 4088.9 | 5084.0 |
+
+### 逐词稳定性
+
+| term | dashscope hit_count / repeats | dashscope recognized_text | volcengine hit_count / repeats | volcengine recognized_text |
+| --- | ---: | --- | ---: | --- |
+| 阿弥陀佛 | 5/5 | 情解释阿弥陀佛是什么意思？ | 5/5 | 请解释阿弥陀佛是什么意思？ |
+| 四十八愿 | 0/5 | 48愿和净土宗有什么关系？ | 5/5 | 四十八愿和净土宗有什么关系？ |
+| 净土宗 | 5/5 | 净土宗为什么重视信愿行？ | 5/5 | 净土宗为什么重视信愿行？ |
+| 无量寿经 | 5/5 | 无量寿经讲了什么？ | 5/5 | 无量寿经讲了什么？ |
+| 金刚经 | 5/5 | 金刚经的核心意思是什么？ | 5/5 | 金刚经的核心意思是什么？ |
+| 般若 | 5/5 | 佛教里般若是什么意思？ | 5/5 | 佛教里般若是什么意思？ |
+| 慧远 | 0/5 | 慧云大师和东林寺有什么关系？ | 5/5 | 慧远大师和东林寺有什么关系？ |
+| 善导 | 5/5 | 善导大师如何解释念佛？ | 5/5 | 善导大师如何解释念佛？ |
+| 东林寺 | 5/5 | 东林寺和净土宗有什么关系？ | 5/5 | 东林寺和净土宗有什么关系？ |
+
+### P2.2 判断
+
+- ASR-only 重复矩阵中，Volcengine 准确率为 `45/45`，DashScope 为 `35/45`。
+- DashScope 错词稳定复现：`四十八愿 -> 48愿`、`慧远 -> 慧云`，以及非词项但会影响问题自然度的 `请解释 -> 情解释`。
+- Volcengine provider start 仍慢：mean `1412.8ms`，p95 `2512.0ms`；这部分已被单独拆账，且不阻塞首帧。
+- 计入 provider start 后，Volcengine ASR final 仍略优于 DashScope：mean `4694.7ms` vs `4851.8ms`，median `4430.0ms` vs `4492.0ms`，p95 `5643.0ms` vs `6424.0ms`。
+- 仅 ASR 层看，Volcengine 已有较强证据成为默认 provider 候选；但默认切换前仍应跑固定回答长度和固定 TTS 输出的 full-chain 重复矩阵，避免 ASR 优势被后段抖动抵消。
