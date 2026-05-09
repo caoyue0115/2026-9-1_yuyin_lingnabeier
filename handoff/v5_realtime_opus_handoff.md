@@ -192,3 +192,71 @@ python scripts/opus_uplink_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url h
 1. 在 v5 本地 `.env` 配置与 v3 同口径的 DashScope ASR/LLM/TTS 最小凭据后，重跑 `opus_uplink_smoke.py`，采集完整 ASR/RAG/LLM/TTS trace。
 2. 若完整 session 成功，再跑 9 条佛学 WAV 对比原 PCM 上传与 Opus 上行的上传体积、解码耗时和端到端指标。
 3. 仍不接板端；等 PC 模拟矩阵稳定后，再设计 ESP-VoCat v1.2 的上行迁移。
+
+## 2026-05-09 本地凭据联调结果
+
+已按授权从 v3 本地 `.env` 复制最小必要变量到 v5 本地 `.env`。`.env` 仍由 `.gitignore` 忽略，未入库。复制范围：
+
+- DashScope API Key 与 base URL
+- ASR provider/model/timeout
+- LLM provider/model/temperature/max tokens
+- TTS 与 realtime TTS model/voice/language/instructions
+- RAG top_k、BM25 权重、召回阈值、embedding 维度
+- v5 本地 `PUBLIC_BASE_URL=http://127.0.0.1:8010`
+
+未复制 v3 公网 `PUBLIC_BASE_URL`。v3 `.env` 中没有 `ASR_LANGUAGE_HINTS`、`ASR_VOCABULARY_ID`、`REALTIME_TTS_WARMUP_ENABLED`，v5 使用代码默认值。
+
+本轮 smoke：
+
+```bash
+python scripts/opus_uplink_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url http://127.0.0.1:8010 --max-polls 100 --status-timeout 20 --submit-timeout 20
+```
+
+结果：完整跑通，session `64fb5f06-e831-448e-b68d-ed81b91600b9`，`status=done`，`final_reason=completed_answer`。
+
+| 指标 | 结果 |
+| --- | ---: |
+| endpoint HTTP | 202 Accepted |
+| submit_ms | 84 |
+| uplink_frame_count | 79 |
+| uplink_opus_bytes | 13415 |
+| uplink_pcm_bytes | 150156 |
+| uplink_compression_ratio | 11.193 |
+| reconstructed_audio_ms | 4692 |
+| opus_decode_ms | 6 |
+| asr_ms | 8256 |
+| retrieval_ms | 689 |
+| first_llm_chunk_ms | 12188 |
+| first_tts_chunk_ms | 13240 |
+| first_audio_byte_ms | 13240 |
+| done_ms | 17763 |
+| audio_bytes | 504320 |
+| audio_duration_ms | 15760 |
+| audio_stream_wall_ms | 4267 |
+| production_ratio | 3.693 |
+
+ASR 文本：
+
+```text
+情解释阿弥陀佛是什么意思？
+```
+
+回答文本：
+
+```text
+阿弥陀佛是西方极乐世界教主的名号，意为无量光寿。此佛号包含光明与寿命的圆满，指引众生往生净土。
+```
+
+RAG 回放结果（同一 ASR 文本，本地 retriever 复算）：
+
+| rank | score | source_title |
+| ---: | ---: | --- |
+| 1 | 0.7802826136942801 | ZT02_阿弥陀佛是谁_大白话版.md |
+| 2 | 0.55 | ZT03_阿弥陀佛名号与无量光寿.md |
+
+注意：当前 session trace 只直接返回 `retrieval_ms`，top_score/top docs 是用同一 ASR 文本回放 retriever 得到的可复现补充证据。
+
+验证：
+
+- `python -m pytest -q`：104 passed, 1 warning
+- 本地 uvicorn 已停止

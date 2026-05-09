@@ -118,3 +118,55 @@ X-Original-Pcm-Bytes: <optional original PCM byte count>
 阶段 2：同一包格式迁移到真正流式上行，并把解码后的 PCM chunk 接入流式 ASR。
 
 阶段 3：基于稳定 ASR partial 再评估 LLM 提前启动、Prefill、打断和多轮。
+
+## 2026-05-09 本地完整链路实测
+
+本轮使用 v5 本地 `.env` 配置与 v3 同口径的 DashScope ASR / LLM / TTS 最小变量；`.env` 未入库，文档不记录真实凭据。
+
+命令：
+
+```bash
+python scripts/opus_uplink_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url http://127.0.0.1:8010 --max-polls 100 --status-timeout 20 --submit-timeout 20
+```
+
+结果：
+
+| 字段 | 值 |
+| --- | --- |
+| session_id | `64fb5f06-e831-448e-b68d-ed81b91600b9` |
+| status | `done` |
+| final_reason | `completed_answer` |
+| error_code | `null` |
+| question_text | `情解释阿弥陀佛是什么意思？` |
+
+关键 trace：
+
+| 指标 | ms / bytes / ratio |
+| --- | ---: |
+| submit_ms | 84 |
+| uplink_frame_count | 79 |
+| uplink_opus_bytes | 13415 |
+| uplink_pcm_bytes | 150156 |
+| uplink_compression_ratio | 11.193 |
+| reconstructed_audio_ms | 4692 |
+| opus_decode_ms | 6 |
+| asr_ms | 8256 |
+| retrieval_ms | 689 |
+| first_llm_chunk_ms | 12188 |
+| first_tts_chunk_ms | 13240 |
+| first_audio_byte_ms | 13240 |
+| done_ms | 17763 |
+| audio_bytes | 504320 |
+| audio_duration_ms | 15760 |
+| audio_stream_wall_ms | 4267 |
+| production_ratio | 3.693 |
+
+回答：
+
+```text
+阿弥陀佛是西方极乐世界教主的名号，意为无量光寿。此佛号包含光明与寿命的圆满，指引众生往生净土。
+```
+
+RAG 补充证据：当前 session trace 未直接存 top docs；用同一 ASR 文本回放 retriever 得到 top score `0.7802826136942801`，top docs 为 `ZT02_阿弥陀佛是谁_大白话版.md` 和 `ZT03_阿弥陀佛名号与无量光寿.md`。
+
+结论：第一阶段 Opus framed-v1 上行已完成到 ASR/RAG/LLM/TTS 的本地完整链路验证。当前瓶颈不是 Opus 解码，`opus_decode_ms=6`；端到端主要耗时在 ASR 和 LLM/TTS 首包前。
