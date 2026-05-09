@@ -1,0 +1,34 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.greenunion
+    restart: unless-stopped
+    command: uvicorn src.app:app --host 0.0.0.0 --port 8010
+    env_file:
+      - ${GREENUNION_ENV_FILE:-/home/ubuntu/religion_demo_shared/.env}
+    volumes:
+      - ${GREENUNION_DATA_DIR:-/home/ubuntu/religion_demo_shared/data}:/app/data
+      - ${GREENUNION_INDICES_DIR:-/home/ubuntu/religion_demo_shared/indices}:/app/indices
+    ports:
+      - "80:8010"
+    depends_on:
+      - redis
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.greenunion
+    restart: unless-stopped
+    command: rq worker -u redis://redis:6379/0 religion_tasks
+    env_file:
+      - ${GREENUNION_ENV_FILE:-/home/ubuntu/religion_demo_shared/.env}
+    volumes:
+      - ${GREENUNION_DATA_DIR:-/home/ubuntu/religion_demo_shared/data}:/app/data
+      - ${GREENUNION_INDICES_DIR:-/home/ubuntu/religion_demo_shared/indices}:/app/indices
+    depends_on:
+      - redis

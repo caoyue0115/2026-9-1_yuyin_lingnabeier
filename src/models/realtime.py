@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel
+
+
+class RealtimeTrace(BaseModel):
+    asr_ms: int | None = None
+    retrieval_ms: int | None = None
+    first_llm_chunk_ms: int | None = None
+    first_tts_chunk_ms: int | None = None
+    first_audio_byte_ms: int | None = None
+    done_ms: int | None = None
+    tts_warmup_ms: int | None = None
+    tts_warmup_failed: bool | None = None
+    llm_chunk_count: int | None = None
+    tts_segment_count: int | None = None
+    segment_ready_ms: list[int] | None = None
+    audio_chunk_count: int | None = None
+    audio_bytes: int | None = None
+    audio_duration_ms: int | None = None
+    audio_stream_wall_ms: int | None = None
+    audio_max_chunk_gap_ms: int | None = None
+    production_ratio: float | None = None
+
+
+class RealtimeSessionAcceptedResponse(BaseModel):
+    status: Literal["accepted"]
+    session_id: str
+    received_at: str
+    audio_stream_url: str
+
+
+class RealtimeSessionStatusResponse(BaseModel):
+    session_id: str
+    status: Literal["accepted", "running", "done", "failed"]
+    step: Literal["accepted", "asr", "retrieval", "llm", "tts", "streaming", "done", "failed"]
+    final_reason: Literal["completed_answer", "completed_reject", "failed"] | None = None
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    question_text: str | None = None
+    answer_text: str | None = None
+    audio_stream_url: str
+    trace: RealtimeTrace
+    error_code: str | None = None
+    error_message: str | None = None

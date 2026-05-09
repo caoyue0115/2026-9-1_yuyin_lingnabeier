@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+data/incoming/
+data/output/
+data/tasks.db
+indices/
+tmp/
+bug*.txt
+
+# Local build/dependency artifacts and handoff archives.
+esp_idf_demo/managed_components/
+esp_idf_demo_handoff_*/
+*.tar.gz
