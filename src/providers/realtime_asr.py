@@ -405,9 +405,9 @@ class VolcengineRealtimeAsrSession:
             f"X-Api-Connect-Id: {connect_id}",
         ]
         try:
+            self._started_at = time.perf_counter()
             self._ws = websocket.create_connection(self._endpoint, header=headers, timeout=self._timeout)
             self._ws.settimeout(min(2.0, self._timeout))
-            self._started_at = time.perf_counter()
             self._ws.send_binary(
                 _build_volcengine_initial_request(sample_rate=self._sample_rate, model_name=self._model_name)
             )

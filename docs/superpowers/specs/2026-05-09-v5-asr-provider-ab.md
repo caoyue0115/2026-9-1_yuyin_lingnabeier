@@ -148,3 +148,76 @@ ASR final：
 P2 证明 v5 可以在同一个 streaming Opus 上行链路中通过配置切换 ASR provider。火山 ASR 值得继续作为可选 provider 深入评估，尤其适合佛学专有词准确率方向。
 
 但当前还不能直接判定“切火山整体更快”：本轮只替换 ASR，后续 RAG/LLM/TTS 仍复用 v5 现有链路，且个别 full-chain 样本存在明显抖动。下一步应固定 LLM/TTS 输出长度与并发状态，重复 A/B，并单独拆出 ASR-only 稳定性矩阵。
+
+## P2.1 Provider Lifecycle 复测
+
+P2.1 解决 P2 发现的火山 ASR 建连阻塞首帧问题。实现后，provider start 在后台线程中执行；首帧到达时服务端立即解码和 ack，provider 未 ready 期间只缓存 PCM，ready 后按序 flush。
+
+新增字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `provider_start_abs_ms` | provider start 发起时间 |
+| `provider_ready_abs_ms` | provider 可接收 PCM 时间 |
+| `provider_start_duration_ms` | provider 建连/启动耗时 |
+| `first_pcm_decoded_abs_ms` | 服务端首个 PCM 解码时间 |
+| `first_pcm_sent_to_provider_abs_ms` | 首个 PCM 实际送入 provider 时间 |
+| `first_provider_result_abs_ms` | 首个非空 provider 结果时间 |
+| `provider_log_id` | provider log/request id |
+| `provider_error_code` | provider 层错误码 |
+| `provider_error_message` | provider 层错误摘要 |
+
+### 单条复测
+
+输入：`/tmp/volc_asr_eval/amitabha.wav`
+
+| case | first_frame_server_abs_ms | provider_start_duration_ms | provider_ready_abs_ms | first_pcm_sent_to_provider_abs_ms | first_provider_result_abs_ms | asr_final_abs_ms | first_audio_byte_abs_ms | done_abs_ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| P0 no ASR | 4 | N/A | N/A | N/A | N/A | N/A | N/A | 4848 |
+| DashScope | 8 | 62 | 69 | 69 | 3649 | 5604 | 9807 | 15302 |
+| Volcengine | 4 | 1900 | 1904 | 1904 | 4959 | 5585 | 11882 | 17143 |
+
+火山单条 ASR final：
+
+```text
+请解释阿弥陀佛是什么意思？
+```
+
+结论：火山 `first_frame_server_abs_ms` 从 P2 的约 `1542ms` 降到 `4ms`，说明建连已不再阻塞首帧处理。provider 建连耗时仍存在，本条为 `1900ms`。
+
+### P2.1 9 条 A/B 汇总
+
+命令：
+
+```bash
+python scripts/v5_streaming_latency_eval.py --audio-dir /tmp/volc_asr_eval --base-url http://127.0.0.1:8010 --target streaming --provider-matrix dashscope,volcengine --output /tmp/v5_asr_provider_ab_p21.jsonl --markdown /tmp/v5_asr_provider_ab_p21.md --max-polls 180 --status-timeout 30 --timeout 30
+```
+
+结果文件只保存在 `/tmp`，不入库。
+
+| provider | cases | successful | term_hits | mean_provider_start_duration_ms | mean_first_pcm_sent_to_provider_abs_ms | mean_first_provider_result_abs_ms | mean_asr_final_abs_ms | mean_first_audio_byte_abs_ms | mean_done_abs_ms | mean_audio_duration_ms | mean_answer_chars |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dashscope | 9 | 9 | 7/9 | 70.8 | 70.6 | 2980.7 | 5590.8 | 9875.0 | 14434.4 | 14471.1 | 48.3 |
+| volcengine | 9 | 9 | 9/9 | 1831.3 | 1831.3 | 4090.2 | 4740.7 | 8625.7 | 13397.7 | 14266.7 | 46.7 |
+
+逐词：
+
+| term | dashscope hit/text | volcengine hit/text |
+| --- | --- | --- |
+| 阿弥陀佛 | Y / 阿弥陀佛命中，但仍有“情解释”错字 | Y / 请解释阿弥陀佛是什么意思？ |
+| 四十八愿 | N / 48愿和净土宗有什么关系？ | Y / 四十八愿和净土宗有什么关系？ |
+| 净土宗 | Y / 净土宗为什么重视信愿行？ | Y / 净土宗为什么重视信愿行？ |
+| 无量寿经 | Y / 无量寿经讲了什么？ | Y / 无量寿经讲了什么？ |
+| 金刚经 | Y / 金刚经的核心意思是什么？ | Y / 金刚经的核心意思是什么？ |
+| 般若 | Y / 佛教里般若是什么意思？ | Y / 佛教里般若是什么意思？ |
+| 慧远 | N / 慧云大师和东林寺有什么关系？ | Y / 慧远大师和东林寺有什么关系？ |
+| 善导 | Y / 善导大师如何解释念佛？ | Y / 善导大师如何解释念佛？ |
+| 东林寺 | Y / 东林寺和净土宗有什么关系？ | Y / 东林寺和净土宗有什么关系？ |
+
+P2.1 判断：
+
+- 火山 ASR 建连已被单独拆账，且不再阻塞首帧 ack。
+- 火山 provider start 均值约 `1831.3ms`，明显慢于 DashScope 的 `70.8ms`。
+- 即便计入建连，火山 ASR final 均值仍优于 DashScope：`4740.7ms` vs `5590.8ms`。
+- 火山佛学词精确命中保持 `9/9`，DashScope 仍为 `7/9`。
+- 本轮 full-chain 火山 mean 首音频和 total 也优于 DashScope，但这不是 ASR-only 结论；后段仍可能受 LLM/TTS 抖动影响。

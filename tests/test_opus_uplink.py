@@ -5,6 +5,8 @@ import importlib.util
 import json
 import sys
 import tempfile
+import time
+import types
 import unittest
 import wave
 from pathlib import Path
@@ -95,14 +97,18 @@ class _FakeStreamingAsrAdapter:
         text: str | None = "请解释阿弥陀佛是什么意思",
         error_code: str | None = None,
         request_id: str = "req-test",
+        start_delay_seconds: float = 0.0,
     ) -> None:
         self.text = text
         self.error_code = error_code
         self.request_id = request_id
+        self.start_delay_seconds = start_delay_seconds
         self.started = False
         self.pcm_chunks: list[bytes] = []
 
     def start(self) -> None:
+        if self.start_delay_seconds:
+            time.sleep(self.start_delay_seconds)
         self.started = True
 
     def send_pcm_chunk(self, pcm_chunk: bytes) -> list:
@@ -184,6 +190,41 @@ class OpusUplinkProviderTests(unittest.TestCase):
         self.assertEqual(metrics["uplink_frame_count"], len(inner_packets))
         self.assertGreater(metrics["uplink_opus_bytes"], 0)
         self.assertEqual(metrics["uplink_pcm_bytes"], len(decoded))
+
+    def test_volcengine_asr_start_elapsed_includes_connect_time(self) -> None:
+        from src.providers import realtime_asr
+
+        class _FakeVolcengineWebSocket:
+            def settimeout(self, _timeout: float) -> None:
+                return None
+
+            def send_binary(self, _payload: bytes) -> None:
+                return None
+
+        def _fake_create_connection(*_args, **_kwargs):
+            time.sleep(0.03)
+            return _FakeVolcengineWebSocket()
+
+        fake_websocket_module = types.SimpleNamespace(create_connection=_fake_create_connection)
+
+        def _fake_env_value(key: str, default: str = "") -> str:
+            values = {
+                "VOLCENGINE_SPEECH_APP_ID": "app-id",
+                "VOLCENGINE_SPEECH_ACCESS_TOKEN": "access-token",
+                "VOLCENGINE_ASR_RESOURCE_ID": "resource-id",
+                "VOLCENGINE_ASR_MODEL_NAME": "bigmodel",
+                "VOLCENGINE_ASR_ENDPOINT": "wss://example.invalid/asr",
+                "VOLCENGINE_ASR_TIMEOUT": "1",
+            }
+            return values.get(key, default)
+
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket_module}), mock.patch.object(
+            realtime_asr, "_env_value", side_effect=_fake_env_value
+        ):
+            session = realtime_asr.VolcengineRealtimeAsrSession(sample_rate=16000)
+            session.start()
+
+        self.assertGreaterEqual(time.perf_counter() - session._started_at, 0.025)
 
 
 class OpusUplinkEndpointTests(unittest.TestCase):
@@ -398,6 +439,120 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertLessEqual(done_payload["first_asr_partial_abs_ms"], done_payload["asr_final_abs_ms"])
         self.assertLessEqual(done_payload["asr_final_abs_ms"], done_payload["done_abs_ms"])
         self.assertFalse(done_payload["session_started"])
+
+    def test_stream_opus_realtime_session_provider_start_does_not_block_first_ack(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        class _TimedWebSocket(_FakeWebSocket):
+            def __init__(self, incoming: list[dict]) -> None:
+                super().__init__(incoming)
+                self.sent_times: list[tuple[str, float]] = []
+
+            async def send_json(self, payload: dict) -> None:
+                self.sent_times.append((str(payload.get("type")), time.perf_counter()))
+                await super().send_json(payload)
+
+        pcm = b"\x00\x00" * 1920
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _TimedWebSocket(
+            [{"type": "websocket.receive", "text": json.dumps({"type": "start", "run_asr": True})}]
+            + [
+                {"type": "websocket.receive", "bytes": _outer_frame(index, packet)}
+                for index, packet in enumerate(inner_packets)
+            ]
+            + [{"type": "websocket.receive", "text": json.dumps({"type": "end"})}]
+        )
+        fake_asr = _FakeStreamingAsrAdapter(start_delay_seconds=0.2)
+
+        started_at = time.perf_counter()
+        with mock.patch.object(realtime_api, "create_realtime_asr_session", return_value=fake_asr):
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        first_ack_time = next(sent_at for payload_type, sent_at in websocket.sent_times if payload_type == "ack")
+        self.assertLess(first_ack_time - started_at, 0.15)
+        self.assertTrue(fake_asr.started)
+        self.assertEqual(len(fake_asr.pcm_chunks), len(inner_packets))
+        done_payload = websocket.sent_json[-1]
+        self.assertEqual(done_payload["type"], "done")
+        self.assertIsInstance(done_payload["provider_start_duration_ms"], int)
+        self.assertIsInstance(done_payload["provider_start_abs_ms"], int)
+        self.assertIsInstance(done_payload["provider_ready_abs_ms"], int)
+        self.assertIsInstance(done_payload["first_pcm_decoded_abs_ms"], int)
+        self.assertIsInstance(done_payload["first_pcm_sent_to_provider_abs_ms"], int)
+        self.assertIsInstance(done_payload["first_provider_result_abs_ms"], int)
+        self.assertLessEqual(done_payload["first_frame_server_abs_ms"], done_payload["first_pcm_decoded_abs_ms"])
+        self.assertLessEqual(done_payload["provider_start_abs_ms"], done_payload["provider_ready_abs_ms"])
+        self.assertLessEqual(
+            done_payload["provider_ready_abs_ms"],
+            done_payload["first_pcm_sent_to_provider_abs_ms"],
+        )
+
+    def test_stream_opus_realtime_session_provider_ready_timeout_reports_error(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 960
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [{"type": "websocket.receive", "text": json.dumps({"type": "start", "run_asr": True})}]
+            + [{"type": "websocket.receive", "bytes": _outer_frame(0, inner_packets[0])}]
+            + [{"type": "websocket.receive", "text": json.dumps({"type": "end"})}]
+        )
+        fake_asr = _FakeStreamingAsrAdapter(start_delay_seconds=0.05)
+
+        with mock.patch.object(realtime_api, "ASR_PROVIDER_READY_TIMEOUT_SECONDS", 0.001), mock.patch.object(
+            realtime_api, "create_realtime_asr_session", return_value=fake_asr
+        ):
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        self.assertEqual(websocket.sent_json[-1]["type"], "error")
+        self.assertEqual(websocket.sent_json[-1]["error_code"], "asr_provider_ready_timeout")
+        self.assertEqual(websocket.close_code, 1011)
 
     def test_stream_opus_realtime_session_run_full_chain_starts_session_from_asr_text(self) -> None:
         from src.api import realtime as realtime_api
@@ -654,7 +809,13 @@ class V5StreamingLatencyEvalScriptTests(unittest.TestCase):
 
         done_payload = {
             "type": "done",
+            "provider_start_abs_ms": 1,
+            "provider_ready_abs_ms": 3,
+            "provider_start_duration_ms": 2,
             "first_frame_server_abs_ms": 4,
+            "first_pcm_decoded_abs_ms": 5,
+            "first_pcm_sent_to_provider_abs_ms": 6,
+            "first_provider_result_abs_ms": 2823,
             "first_pcm_to_asr_abs_ms": 4,
             "first_asr_partial_abs_ms": 2823,
             "asr_final_abs_ms": 5675,
@@ -686,7 +847,13 @@ class V5StreamingLatencyEvalScriptTests(unittest.TestCase):
         )
 
         self.assertEqual(record["path_type"], "streaming")
+        self.assertEqual(record["provider_start_abs_ms"], 0)
+        self.assertEqual(record["provider_ready_abs_ms"], 0)
+        self.assertEqual(record["provider_start_duration_ms"], 2)
         self.assertEqual(record["first_frame_server_abs_ms"], 0)
+        self.assertEqual(record["first_pcm_decoded_abs_ms"], 1)
+        self.assertEqual(record["first_pcm_sent_to_provider_abs_ms"], 2)
+        self.assertEqual(record["first_provider_result_abs_ms"], 2819)
         self.assertEqual(record["first_pcm_to_asr_abs_ms"], 0)
         self.assertEqual(record["first_asr_partial_abs_ms"], 2819)
         self.assertEqual(record["asr_final_abs_ms"], 5671)

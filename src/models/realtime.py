@@ -37,6 +37,15 @@ class RealtimeTrace(BaseModel):
     asr_log_id: str | None = None
     asr_error_code: str | None = None
     asr_error_message: str | None = None
+    provider_start_abs_ms: int | None = None
+    provider_ready_abs_ms: int | None = None
+    provider_start_duration_ms: int | None = None
+    first_pcm_decoded_abs_ms: int | None = None
+    first_pcm_sent_to_provider_abs_ms: int | None = None
+    first_provider_result_abs_ms: int | None = None
+    provider_log_id: str | None = None
+    provider_error_code: str | None = None
+    provider_error_message: str | None = None
     retrieval_top_score: float | None = None
     stream_to_session_start_abs_ms: int | None = None
     server_stream_accept_abs_ms: int | None = None

@@ -597,3 +597,85 @@ python scripts/v5_streaming_latency_eval.py --audio-dir /tmp/volc_asr_eval --bas
 
 - `python -m pytest -q`：118 passed, 1 warning
 - 本地 uvicorn 已停止
+
+## 2026-05-09 P2.1：ASR Provider 建连预热与计时拆账
+
+目标：拆清 ASR provider lifecycle 时间，修正火山 ASR WebSocket 建连阻塞首帧处理的问题。默认 provider 仍是 `dashscope`。
+
+新增/更新：
+
+- `src/api/realtime.py`
+- `src/providers/realtime_asr.py`
+- `src/models/realtime.py`
+- `src/storage/realtime_store.py`
+- `scripts/v5_streaming_latency_eval.py`
+- `tests/test_opus_uplink.py`
+- `docs/superpowers/specs/2026-05-09-v5-streaming-opus-uplink-design.md`
+- `docs/superpowers/specs/2026-05-09-v5-asr-provider-ab.md`
+
+实现口径：
+
+- 收到 start control 后，如果 `run_asr=true`，服务端创建 provider 并用后台线程异步执行 `provider.start()`。
+- 不再等待 provider ready 才接收首个 binary Opus frame。
+- provider 未 ready 期间，服务端继续解码 Opus 为 PCM，并把 PCM chunk 暂存在内存队列。
+- provider ready 后按顺序 flush 缓存 PCM，再继续边收边送。
+- 缓存队列设置上限；provider ready 超时返回 `asr_provider_ready_timeout`。
+- P0 不启用 ASR 时不启动 provider。
+
+新增 lifecycle 字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `provider_start_abs_ms` | 服务端发起 provider start 的时间 |
+| `provider_ready_abs_ms` | provider start 完成、可接收 PCM 的时间 |
+| `provider_start_duration_ms` | provider 建连/启动耗时 |
+| `first_pcm_decoded_abs_ms` | 服务端解出首个 PCM chunk 的时间 |
+| `first_pcm_sent_to_provider_abs_ms` | 首个 PCM chunk 实际送入 provider 的时间 |
+| `first_provider_result_abs_ms` | provider 首个非空识别事件/结果时间 |
+| `provider_log_id` | provider request/log id |
+| `provider_error_code` | provider 层错误码 |
+| `provider_error_message` | provider 层错误摘要 |
+
+重启本地 uvicorn 后的单条回归：
+
+| case | first_frame_server_abs_ms | provider_start_duration_ms | provider_ready_abs_ms | first_pcm_sent_to_provider_abs_ms | first_provider_result_abs_ms | asr_final_abs_ms | first_audio_byte_abs_ms | done_abs_ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| P0 no ASR | 4 | N/A | N/A | N/A | N/A | N/A | N/A | 4848 |
+| DashScope | 8 | 62 | 69 | 69 | 3649 | 5604 | 9807 | 15302 |
+| Volcengine | 4 | 1900 | 1904 | 1904 | 4959 | 5585 | 11882 | 17143 |
+
+火山 ASR final：
+
+```text
+请解释阿弥陀佛是什么意思？
+```
+
+P2.1 有效 A/B 矩阵：
+
+```bash
+python scripts/v5_streaming_latency_eval.py --audio-dir /tmp/volc_asr_eval --base-url http://127.0.0.1:8010 --target streaming --provider-matrix dashscope,volcengine --output /tmp/v5_asr_provider_ab_p21.jsonl --markdown /tmp/v5_asr_provider_ab_p21.md --max-polls 180 --status-timeout 30 --timeout 30
+```
+
+| provider | successful | term_hits | mean_provider_start_duration_ms | mean_first_pcm_sent_to_provider_abs_ms | mean_first_provider_result_abs_ms | mean_asr_final_abs_ms | mean_first_audio_byte_abs_ms | mean_done_abs_ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dashscope | 9/9 | 7/9 | 70.8 | 70.6 | 2980.7 | 5590.8 | 9875.0 | 14434.4 |
+| volcengine | 9/9 | 9/9 | 1831.3 | 1831.3 | 4090.2 | 4740.7 | 8625.7 | 13397.7 |
+
+错词：
+
+- DashScope：`四十八愿 -> 48愿`、`慧远 -> 慧云`。
+- Volcengine：9 条佛学词均命中。
+
+阶段判断：
+
+- 火山 `first_frame_server_abs_ms` 已从 P2 单条约 `1542ms` 降到 `4ms`，provider 建连不再阻塞首帧处理。
+- 火山 provider 建连仍明显慢，P2.1 矩阵均值约 `1831.3ms`；这部分现在已单独拆账。
+- 在包含 provider 建连耗时后，火山 ASR final 均值仍快于 DashScope：`4740.7ms` vs `5590.8ms`，并且专有词命中率为 `9/9`。
+- 本轮 full-chain 中火山 mean 首音频和 total 也优于 DashScope，但差距较小且仍受 LLM/TTS 抖动影响；不建议仅凭一次矩阵替换默认 provider。
+
+验证：
+
+- `python -m pytest -q`：121 passed, 1 warning
+- `.env` 已由 `.gitignore` 忽略，未入库
+- 凭据扫描未命中真实凭据
+- 本地 uvicorn 已停止

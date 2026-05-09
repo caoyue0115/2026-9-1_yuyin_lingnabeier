@@ -449,3 +449,68 @@ docs/superpowers/specs/2026-05-09-v5-asr-provider-ab.md
 - full-chain 首音频和 total 未同步更优，主要受后续 LLM/TTS 抖动影响；这不是 ASR provider 层失败。
 - 当前 A/B 矩阵沿用 P1.5 的 first-frame 归一化口径，未单独计入火山 ASR WebSocket 建连等待；后续需要补 raw first-frame / provider-start 指标。
 - 下一步建议跑 ASR-only 重复矩阵，隔离 ASR 稳定性，再固定 LLM/TTS 输出长度做 full-chain 复测。
+
+## 2026-05-09 P2.1：Provider Lifecycle 拆账
+
+P2.1 修正了 P2 的计时盲点：火山 ASR provider 建连不应阻塞首个 binary Opus frame 的服务端处理。
+
+### Endpoint 行为
+
+`WS /api/v5/realtime/opus-stream` 保持默认 `dashscope`。当 start control 中 `run_asr=true` 时：
+
+1. 服务端创建指定 ASR provider。
+2. `provider.start()` 在后台线程任务中异步执行。
+3. 服务端继续接收 binary framed-v1 Opus frame，并立即解码 PCM。
+4. 如果 provider 尚未 ready，PCM chunk 暂存到受限内存队列。
+5. provider ready 后，按原始顺序 flush 缓存 PCM，然后继续边收边送。
+6. provider ready 超时返回 `asr_provider_ready_timeout`。
+
+P0 不启用 ASR 时不启动 provider。
+
+### Lifecycle 字段
+
+| 字段 | 含义 |
+| --- | --- |
+| `provider_start_abs_ms` | 发起 provider start 的服务端时间 |
+| `provider_ready_abs_ms` | provider start 完成的服务端时间 |
+| `provider_start_duration_ms` | provider 启动/建连耗时 |
+| `first_pcm_decoded_abs_ms` | 首个 PCM chunk 解码完成时间 |
+| `first_pcm_sent_to_provider_abs_ms` | 首个 PCM chunk 实际送入 ASR provider 的时间 |
+| `first_provider_result_abs_ms` | provider 首个非空识别事件/结果时间 |
+| `provider_log_id` | provider request/log id |
+| `provider_error_code` | provider 层错误码 |
+| `provider_error_message` | provider 层错误摘要 |
+
+矩阵脚本继续把 `*_abs_ms` 归一化到 `first_frame_server_abs_ms` 为零点；`provider_start_duration_ms` 是阶段耗时，不参与零点平移。
+
+### 单条验证
+
+重启本地 uvicorn 后，`/tmp/volc_asr_eval/amitabha.wav` 单条结果：
+
+| case | first_frame_server_abs_ms | provider_start_duration_ms | provider_ready_abs_ms | first_pcm_sent_to_provider_abs_ms | first_provider_result_abs_ms | asr_final_abs_ms | first_audio_byte_abs_ms | done_abs_ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| P0 no ASR | 4 | N/A | N/A | N/A | N/A | N/A | N/A | 4848 |
+| DashScope | 8 | 62 | 69 | 69 | 3649 | 5604 | 9807 | 15302 |
+| Volcengine | 4 | 1900 | 1904 | 1904 | 4959 | 5585 | 11882 | 17143 |
+
+P2 单条火山 `first_frame_server_abs_ms` 曾约 `1542ms`；P2.1 后降到 `4ms`，证明 provider 建连已从首帧处理路径中拆出。
+
+### 9 条 A/B
+
+有效输出：
+
+```text
+/tmp/v5_asr_provider_ab_p21.jsonl
+/tmp/v5_asr_provider_ab_p21.md
+```
+
+| provider | successful | term_hits | mean_provider_start_duration_ms | mean_first_provider_result_abs_ms | mean_asr_final_abs_ms | mean_first_audio_byte_abs_ms | mean_done_abs_ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dashscope | 9/9 | 7/9 | 70.8 | 2980.7 | 5590.8 | 9875.0 | 14434.4 |
+| volcengine | 9/9 | 9/9 | 1831.3 | 4090.2 | 4740.7 | 8625.7 | 13397.7 |
+
+结论：
+
+- 火山 ASR provider 建连仍显著慢于 DashScope，但不再阻塞上行首帧 ack。
+- 包含 provider 建连耗时后，火山 ASR final 均值仍快于 DashScope，并保持 9/9 佛学词命中。
+- full-chain 首音频和 total 本轮火山也更快，但这部分仍受 RAG/LLM/TTS 抖动影响，需要重复矩阵确认。

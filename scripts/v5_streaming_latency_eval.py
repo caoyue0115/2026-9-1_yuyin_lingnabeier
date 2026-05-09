@@ -27,7 +27,12 @@ CASES = [
 ]
 
 TIMELINE_FIELDS = [
+    "provider_start_abs_ms",
+    "provider_ready_abs_ms",
     "first_frame_server_abs_ms",
+    "first_pcm_decoded_abs_ms",
+    "first_pcm_sent_to_provider_abs_ms",
+    "first_provider_result_abs_ms",
     "first_pcm_to_asr_abs_ms",
     "first_asr_partial_abs_ms",
     "asr_final_abs_ms",
@@ -77,6 +82,8 @@ def build_streaming_latency_record(
     asr_log_id = (
         done_payload.get("asr_log_id")
         or trace.get("asr_log_id")
+        or done_payload.get("provider_log_id")
+        or trace.get("provider_log_id")
         or done_payload.get("realtime_asr_request_id")
         or trace.get("realtime_asr_request_id")
     )
@@ -95,6 +102,11 @@ def build_streaming_latency_record(
         "session_id": status_payload.get("session_id") or done_payload.get("session_id"),
         "asr_log_id": asr_log_id,
         "log_id": asr_log_id,
+        "provider_start_duration_ms": done_payload.get("provider_start_duration_ms")
+        or trace.get("provider_start_duration_ms"),
+        "provider_log_id": done_payload.get("provider_log_id") or trace.get("provider_log_id"),
+        "provider_error_code": done_payload.get("provider_error_code") or trace.get("provider_error_code"),
+        "provider_error_message": done_payload.get("provider_error_message") or trace.get("provider_error_message"),
     }
     source_payload = dict(done_payload)
     source_payload.update(trace)
@@ -127,6 +139,10 @@ def build_error_record(
         "session_id": None,
         "asr_log_id": None,
         "log_id": None,
+        "provider_start_duration_ms": None,
+        "provider_log_id": None,
+        "provider_error_code": error_code,
+        "provider_error_message": error_message,
     }
     for field in TIMELINE_FIELDS:
         record[field] = None
@@ -264,21 +280,29 @@ def write_markdown(records: list[dict], markdown_path: str | Path) -> None:
         f"- providers: {', '.join(providers) if providers else 'N/A'}",
         f"- successful: {len(ok_records)}",
         f"- term_hits: {hit_count}/{len(ok_records) if ok_records else 0}",
+        f"- mean_provider_start_duration_ms: {_mean(ok_records, 'provider_start_duration_ms')}",
+        f"- mean_first_frame_server_abs_ms: {_mean(ok_records, 'first_frame_server_abs_ms')}",
+        f"- mean_first_pcm_sent_to_provider_abs_ms: {_mean(ok_records, 'first_pcm_sent_to_provider_abs_ms')}",
+        f"- mean_first_provider_result_abs_ms: {_mean(ok_records, 'first_provider_result_abs_ms')}",
         f"- mean_asr_final_abs_ms: {_mean(ok_records, 'asr_final_abs_ms')}",
         f"- mean_first_audio_byte_abs_ms: {_mean(ok_records, 'first_audio_byte_abs_ms')}",
         f"- mean_done_abs_ms: {_mean(ok_records, 'done_abs_ms')}",
         "",
         "## Details",
         "",
-        "| term | provider | hit | asr_final_abs_ms | first_audio_byte_abs_ms | done_abs_ms | audio_duration_ms | answer_chars | error_code | session_id | log_id |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
+        "| term | provider | hit | provider_start_duration_ms | first_frame_server_abs_ms | first_pcm_sent_to_provider_abs_ms | first_provider_result_abs_ms | asr_final_abs_ms | first_audio_byte_abs_ms | done_abs_ms | audio_duration_ms | answer_chars | error_code | session_id | log_id |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
     ]
     for record in records:
         lines.append(
-            "| {term} | {provider} | {hit} | {asr} | {first_audio} | {done} | {audio_duration} | {answer_chars} | {error} | {session} | {log_id} |".format(
+            "| {term} | {provider} | {hit} | {provider_start} | {first_frame} | {first_pcm_sent} | {first_provider_result} | {asr} | {first_audio} | {done} | {audio_duration} | {answer_chars} | {error} | {session} | {log_id} |".format(
                 term=record["term"],
                 provider=record.get("asr_provider") or "",
                 hit="Y" if record.get("term_hit") else "N",
+                provider_start=record.get("provider_start_duration_ms"),
+                first_frame=record.get("first_frame_server_abs_ms"),
+                first_pcm_sent=record.get("first_pcm_sent_to_provider_abs_ms"),
+                first_provider_result=record.get("first_provider_result_abs_ms"),
                 asr=record.get("asr_final_abs_ms"),
                 first_audio=record.get("first_audio_byte_abs_ms"),
                 done=record.get("done_abs_ms"),
