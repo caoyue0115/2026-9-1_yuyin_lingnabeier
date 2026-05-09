@@ -56,6 +56,16 @@ def _load_opus_uplink_stream_script():
     return module
 
 
+def _load_v5_streaming_latency_eval_script():
+    script_path = ROOT / "scripts" / "v5_streaming_latency_eval.py"
+    spec = importlib.util.spec_from_file_location("v5_streaming_latency_eval", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["v5_streaming_latency_eval"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class _FakeWebSocket:
     def __init__(self, incoming: list[dict]) -> None:
         self._incoming = list(incoming)
@@ -370,6 +380,16 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertEqual(done_payload["type"], "done")
         self.assertEqual(done_payload["question_text"], "请解释阿弥陀佛是什么意思")
         self.assertEqual(done_payload["asr_final_ms"], 123)
+        self.assertEqual(done_payload["server_stream_accept_abs_ms"], 0)
+        self.assertIsInstance(done_payload["first_frame_server_abs_ms"], int)
+        self.assertIsInstance(done_payload["first_pcm_to_asr_abs_ms"], int)
+        self.assertIsInstance(done_payload["first_asr_partial_abs_ms"], int)
+        self.assertIsInstance(done_payload["asr_final_abs_ms"], int)
+        self.assertIsInstance(done_payload["done_abs_ms"], int)
+        self.assertLessEqual(done_payload["server_stream_accept_abs_ms"], done_payload["first_frame_server_abs_ms"])
+        self.assertLessEqual(done_payload["first_frame_server_abs_ms"], done_payload["first_pcm_to_asr_abs_ms"])
+        self.assertLessEqual(done_payload["first_asr_partial_abs_ms"], done_payload["asr_final_abs_ms"])
+        self.assertLessEqual(done_payload["asr_final_abs_ms"], done_payload["done_abs_ms"])
         self.assertFalse(done_payload["session_started"])
 
     def test_stream_opus_realtime_session_run_full_chain_starts_session_from_asr_text(self) -> None:
@@ -527,3 +547,70 @@ class OpusUplinkSmokeScriptTests(unittest.TestCase):
             json.loads(payload),
             {"type": "start", "run_asr": True, "run_full_chain": True},
         )
+
+
+class V5StreamingLatencyEvalScriptTests(unittest.TestCase):
+    def test_build_streaming_latency_record_normalizes_to_first_frame(self) -> None:
+        module = _load_v5_streaming_latency_eval_script()
+
+        done_payload = {
+            "type": "done",
+            "first_frame_server_abs_ms": 4,
+            "first_pcm_to_asr_abs_ms": 4,
+            "first_asr_partial_abs_ms": 2823,
+            "asr_final_abs_ms": 5675,
+            "done_abs_ms": 5923,
+            "question_text": "情解释阿弥陀佛是什么意思？",
+            "error_code": None,
+            "session_id": "session-1",
+            "realtime_asr_request_id": "request-1",
+        }
+        status_payload = {
+            "session_id": "session-1",
+            "status": "done",
+            "answer_text": "阿弥陀佛是西方极乐世界教主。",
+            "trace": {
+                "retrieval_done_abs_ms": 6342,
+                "first_llm_chunk_abs_ms": 8588,
+                "first_tts_chunk_abs_ms": 10180,
+                "first_audio_byte_abs_ms": 10180,
+                "done_abs_ms": 13914,
+                "audio_duration_ms": 14160,
+            },
+        }
+
+        record = module.build_streaming_latency_record(
+            term="阿弥陀佛",
+            audio_path="/tmp/volc_asr_eval/amitabha.wav",
+            done_payload=done_payload,
+            status_payload=status_payload,
+        )
+
+        self.assertEqual(record["path_type"], "streaming")
+        self.assertEqual(record["first_frame_server_abs_ms"], 0)
+        self.assertEqual(record["first_pcm_to_asr_abs_ms"], 0)
+        self.assertEqual(record["first_asr_partial_abs_ms"], 2819)
+        self.assertEqual(record["asr_final_abs_ms"], 5671)
+        self.assertEqual(record["retrieval_done_abs_ms"], 6338)
+        self.assertEqual(record["first_audio_byte_abs_ms"], 10176)
+        self.assertEqual(record["done_abs_ms"], 13910)
+        self.assertTrue(record["term_hit"])
+        self.assertEqual(record["answer_chars"], 14)
+        self.assertEqual(record["session_id"], "session-1")
+        self.assertEqual(record["log_id"], "request-1")
+
+    def test_build_error_record_preserves_case_and_error(self) -> None:
+        module = _load_v5_streaming_latency_eval_script()
+
+        record = module.build_error_record(
+            term="金刚经",
+            audio_path="/tmp/volc_asr_eval/diamond_sutra.wav",
+            path_type="streaming",
+            error_code="smoke_failed",
+            error_message="connection refused",
+        )
+
+        self.assertEqual(record["term"], "金刚经")
+        self.assertEqual(record["path_type"], "streaming")
+        self.assertEqual(record["error_code"], "smoke_failed")
+        self.assertEqual(record["error_message"], "connection refused")

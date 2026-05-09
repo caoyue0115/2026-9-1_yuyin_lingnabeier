@@ -34,6 +34,17 @@ class RealtimeTrace(BaseModel):
     asr_final_ms: int | None = None
     realtime_asr_request_id: str | None = None
     retrieval_top_score: float | None = None
+    stream_to_session_start_abs_ms: int | None = None
+    server_stream_accept_abs_ms: int | None = None
+    first_frame_server_abs_ms: int | None = None
+    first_pcm_to_asr_abs_ms: int | None = None
+    first_asr_partial_abs_ms: int | None = None
+    asr_final_abs_ms: int | None = None
+    retrieval_done_abs_ms: int | None = None
+    first_llm_chunk_abs_ms: int | None = None
+    first_tts_chunk_abs_ms: int | None = None
+    first_audio_byte_abs_ms: int | None = None
+    done_abs_ms: int | None = None
 
 
 class RealtimeSessionAcceptedResponse(BaseModel):

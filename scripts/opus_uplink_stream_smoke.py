@@ -100,20 +100,58 @@ def poll_session_until_terminal(
     raise TimeoutError(f"session {session_id} did not finish after {max_polls} polls")
 
 
-def _print_server_payload(payload: dict, *, started: float, extra: dict | None = None) -> None:
+def _client_elapsed_ms(started: float) -> int:
+    return int(round((time.perf_counter() - started) * 1000))
+
+
+def _add_client_timeline(
+    payload: dict,
+    *,
+    client_first_frame_sent_ms: int | None,
+    client_last_frame_sent_ms: int | None,
+    client_end_sent_ms: int | None,
+    client_done_received_ms: int | None,
+) -> dict:
+    output = dict(payload)
+    output.update(
+        {
+            "client_stream_start_ms": 0,
+            "client_first_frame_sent_ms": client_first_frame_sent_ms,
+            "client_last_frame_sent_ms": client_last_frame_sent_ms,
+            "client_end_sent_ms": client_end_sent_ms,
+            "client_done_received_ms": client_done_received_ms,
+        }
+    )
+    return output
+
+
+def _print_server_payload(
+    payload: dict,
+    *,
+    started: float,
+    extra: dict | None = None,
+    emit_trace: bool = True,
+) -> None:
+    if not emit_trace:
+        return
     output = dict(payload)
     output["event"] = output.get("type")
-    output["client_elapsed_ms"] = int(round((time.perf_counter() - started) * 1000))
+    output["client_elapsed_ms"] = _client_elapsed_ms(started)
     if extra:
         output.update(extra)
     print(json.dumps(output, ensure_ascii=False))
 
 
-def _recv_until_ack(websocket, *, started: float, frame_index: int) -> dict:
+def _recv_until_ack(websocket, *, started: float, frame_index: int, emit_trace: bool) -> dict:
     while True:
         raw_payload = websocket.recv()
         payload = json.loads(raw_payload)
-        _print_server_payload(payload, started=started, extra={"frame_index": frame_index} if payload.get("type") == "ack" else None)
+        _print_server_payload(
+            payload,
+            started=started,
+            extra={"frame_index": frame_index} if payload.get("type") == "ack" else None,
+            emit_trace=emit_trace,
+        )
         if payload.get("type") in {"ack", "error"}:
             return payload
 
@@ -131,6 +169,7 @@ def run_stream_smoke(
     poll_interval: float,
     max_polls: int,
     status_timeout: float,
+    emit_trace: bool = True,
 ) -> dict:
     from websocket import create_connection
 
@@ -140,20 +179,25 @@ def run_stream_smoke(
         original_pcm_bytes=int(local_metrics["uplink_pcm_bytes"] or 0),
     )
     url = _websocket_url(base_url)
-    print(
-        json.dumps(
-            {
-                "event": "start",
-                "url": url,
-                "frame_ms": frame_ms,
-                "realtime": realtime,
-                "local_uplink": local_metrics,
-            },
-            ensure_ascii=False,
+    if emit_trace:
+        print(
+            json.dumps(
+                {
+                    "event": "start",
+                    "url": url,
+                    "frame_ms": frame_ms,
+                    "realtime": realtime,
+                    "local_uplink": local_metrics,
+                },
+                ensure_ascii=False,
+            )
         )
-    )
     started = time.perf_counter()
     last_payload: dict | None = None
+    client_first_frame_sent_ms: int | None = None
+    client_last_frame_sent_ms: int | None = None
+    client_end_sent_ms: int | None = None
+    client_done_received_ms: int | None = None
     websocket = create_connection(
         url,
         timeout=timeout,
@@ -163,8 +207,11 @@ def run_stream_smoke(
         if run_asr or run_full_chain:
             websocket.send(build_start_control(run_asr=run_asr or run_full_chain, run_full_chain=run_full_chain))
         for frame_index, message in enumerate(messages):
+            if client_first_frame_sent_ms is None:
+                client_first_frame_sent_ms = _client_elapsed_ms(started)
             websocket.send_binary(message)
-            ack = _recv_until_ack(websocket, started=started, frame_index=frame_index)
+            client_last_frame_sent_ms = _client_elapsed_ms(started)
+            ack = _recv_until_ack(websocket, started=started, frame_index=frame_index, emit_trace=emit_trace)
             last_payload = ack
             if ack.get("type") == "error":
                 break
@@ -172,6 +219,7 @@ def run_stream_smoke(
                 time.sleep(frame_ms / 1000)
 
         stream_done_at = time.perf_counter()
+        client_end_sent_ms = _client_elapsed_ms(started)
         websocket.send(
             json.dumps(
                 {
@@ -185,7 +233,16 @@ def run_stream_smoke(
         while True:
             raw_payload = websocket.recv()
             payload = json.loads(raw_payload)
-            _print_server_payload(payload, started=started)
+            if payload.get("type") in {"done", "error"}:
+                client_done_received_ms = _client_elapsed_ms(started)
+                payload = _add_client_timeline(
+                    payload,
+                    client_first_frame_sent_ms=client_first_frame_sent_ms,
+                    client_last_frame_sent_ms=client_last_frame_sent_ms,
+                    client_end_sent_ms=client_end_sent_ms,
+                    client_done_received_ms=client_done_received_ms,
+                )
+            _print_server_payload(payload, started=started, emit_trace=emit_trace)
             last_payload = payload
             if payload.get("type") in {"done", "error"}:
                 break
@@ -202,25 +259,27 @@ def run_stream_smoke(
             max_polls=max_polls,
             timeout=status_timeout,
         )
-        print(
-            json.dumps(
-                {
-                    "event": "status",
-                    "session_id": status["session_id"],
-                    "status": status["status"],
-                    "step": status.get("step"),
-                    "final_reason": status.get("final_reason"),
-                    "question_text": status.get("question_text"),
-                    "answer_text": status.get("answer_text"),
-                    "error_code": status.get("error_code"),
-                    "error_message": status.get("error_message"),
-                    "trace": status.get("trace"),
-                },
-                ensure_ascii=False,
+        if emit_trace:
+            print(
+                json.dumps(
+                    {
+                        "event": "status",
+                        "session_id": status["session_id"],
+                        "status": status["status"],
+                        "step": status.get("step"),
+                        "final_reason": status.get("final_reason"),
+                        "question_text": status.get("question_text"),
+                        "answer_text": status.get("answer_text"),
+                        "error_code": status.get("error_code"),
+                        "error_message": status.get("error_message"),
+                        "trace": status.get("trace"),
+                    },
+                    ensure_ascii=False,
+                )
             )
-        )
+        last_payload = dict(last_payload)
+        last_payload["session_status"] = status
         if status["status"] == "failed":
-            last_payload = dict(last_payload)
             last_payload["type"] = "error"
             last_payload["error_code"] = status.get("error_code")
     return last_payload

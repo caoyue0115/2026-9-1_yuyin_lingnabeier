@@ -80,6 +80,11 @@ def _set_trace_default(trace: dict, key: str, value):
         trace[key] = value
 
 
+def _set_abs_trace(trace: dict, key: str, offset_ms: int | None, relative_ms: int | None) -> None:
+    if offset_ms is not None and relative_ms is not None:
+        trace[key] = offset_ms + relative_ms
+
+
 def _compact_reference_text(text: str, max_chars: int) -> str:
     normalized = "".join(str(text or "").split())
     if max_chars <= 0 or len(normalized) <= max_chars:
@@ -251,6 +256,7 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
     )
     if not updated:
         return
+    stream_to_session_start_abs_ms = updated["trace"].get("stream_to_session_start_abs_ms")
 
     if pretranscribed_question:
         question_text = pretranscribed_question
@@ -288,6 +294,13 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
         store.fail_audio(session_id, "retrieval_failed")
         return
     updated["trace"]["retrieval_ms"] = _elapsed_ms(retrieval_started)
+    if stream_to_session_start_abs_ms is not None:
+        _set_abs_trace(
+            updated["trace"],
+            "retrieval_done_abs_ms",
+            stream_to_session_start_abs_ms,
+            _elapsed_ms(overall_started),
+        )
     updated["trace"]["retrieval_top_score"] = top_score
     threshold = settings.min_top_score if is_buddhist_question(question_text) else settings.min_top_score_no_keyword
     is_reject = (not references) or top_score < threshold
@@ -295,6 +308,12 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
     if is_reject:
         answer_text = "佛说不可曰"
         updated["trace"]["first_llm_chunk_ms"] = _elapsed_ms(overall_started)
+        _set_abs_trace(
+            updated["trace"],
+            "first_llm_chunk_abs_ms",
+            stream_to_session_start_abs_ms,
+            updated["trace"]["first_llm_chunk_ms"],
+        )
     else:
         llm_references = references
         prepared_tts_session: PreparedRealtimeTtsSession | None = None
@@ -328,6 +347,12 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
                         continue
                     if updated["trace"]["first_llm_chunk_ms"] is None:
                         updated["trace"]["first_llm_chunk_ms"] = _elapsed_ms(overall_started)
+                        _set_abs_trace(
+                            updated["trace"],
+                            "first_llm_chunk_abs_ms",
+                            stream_to_session_start_abs_ms,
+                            updated["trace"]["first_llm_chunk_ms"],
+                        )
                     answer_parts.append(chunk)
                     pending_answer += "".join(chunk.split())
                     ready_segments, pending_answer = _split_stream_buffer(
@@ -363,8 +388,20 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
     )
     if is_reject:
         updated["trace"]["first_tts_chunk_ms"] = _elapsed_ms(overall_started)
+        _set_abs_trace(
+            updated["trace"],
+            "first_tts_chunk_abs_ms",
+            stream_to_session_start_abs_ms,
+            updated["trace"]["first_tts_chunk_ms"],
+        )
         store.update_session(session_id, step="streaming", trace=updated["trace"])
         updated["trace"]["first_audio_byte_ms"] = _elapsed_ms(overall_started)
+        _set_abs_trace(
+            updated["trace"],
+            "first_audio_byte_abs_ms",
+            stream_to_session_start_abs_ms,
+            updated["trace"]["first_audio_byte_ms"],
+        )
         store.update_session(
             session_id,
             trace=updated["trace"],
@@ -390,6 +427,12 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
                                 continue
                             if updated["trace"]["first_llm_chunk_ms"] is None:
                                 updated["trace"]["first_llm_chunk_ms"] = _elapsed_ms(overall_started)
+                                _set_abs_trace(
+                                    updated["trace"],
+                                    "first_llm_chunk_abs_ms",
+                                    stream_to_session_start_abs_ms,
+                                    updated["trace"]["first_llm_chunk_ms"],
+                                )
                             updated["trace"]["llm_chunk_count"] = (updated["trace"].get("llm_chunk_count") or 0) + 1
                             answer_parts.append(chunk)
                             pending_answer += "".join(chunk.split())
@@ -455,8 +498,20 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
                     updated["trace"]["audio_max_chunk_gap_ms"] = audio_max_chunk_gap_ms
                     if not started_streaming:
                         updated["trace"]["first_tts_chunk_ms"] = _elapsed_ms(overall_started)
+                        _set_abs_trace(
+                            updated["trace"],
+                            "first_tts_chunk_abs_ms",
+                            stream_to_session_start_abs_ms,
+                            updated["trace"]["first_tts_chunk_ms"],
+                        )
                         store.update_session(session_id, step="streaming", trace=updated["trace"])
                         updated["trace"]["first_audio_byte_ms"] = _elapsed_ms(overall_started)
+                        _set_abs_trace(
+                            updated["trace"],
+                            "first_audio_byte_abs_ms",
+                            stream_to_session_start_abs_ms,
+                            updated["trace"]["first_audio_byte_ms"],
+                        )
                         store.update_session(
                             session_id,
                             trace=updated["trace"],
@@ -499,8 +554,20 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
                     updated["trace"]["audio_max_chunk_gap_ms"] = audio_max_chunk_gap_ms
                     if not started_streaming:
                         updated["trace"]["first_tts_chunk_ms"] = _elapsed_ms(overall_started)
+                        _set_abs_trace(
+                            updated["trace"],
+                            "first_tts_chunk_abs_ms",
+                            stream_to_session_start_abs_ms,
+                            updated["trace"]["first_tts_chunk_ms"],
+                        )
                         store.update_session(session_id, step="streaming", trace=updated["trace"])
                         updated["trace"]["first_audio_byte_ms"] = _elapsed_ms(overall_started)
+                        _set_abs_trace(
+                            updated["trace"],
+                            "first_audio_byte_abs_ms",
+                            stream_to_session_start_abs_ms,
+                            updated["trace"]["first_audio_byte_ms"],
+                        )
                         store.update_session(
                             session_id,
                             trace=updated["trace"],
@@ -534,11 +601,14 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
         _set_trace_default(updated["trace"], "audio_max_chunk_gap_ms", audio_max_chunk_gap_ms)
         store.update_session(session_id, trace=updated["trace"])
     store.finish_audio(session_id)
+    done_ms = _elapsed_ms(overall_started)
+    _set_abs_trace(updated["trace"], "done_abs_ms", stream_to_session_start_abs_ms, done_ms)
+    store.update_session(session_id, trace=updated["trace"])
     done_session = store.mark_done(
         session_id,
         final_reason="completed_reject" if is_reject else "completed_answer",
         answer_text=answer_text,
-        done_ms=_elapsed_ms(overall_started),
+        done_ms=done_ms,
     )
     if done_session is not None:
         _log_realtime_session_terminal(done_session)

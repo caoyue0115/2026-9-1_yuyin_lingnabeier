@@ -347,3 +347,44 @@ full-chain session trace：
 
 - `python -m pytest -q`：113 passed, 1 warning
 - 本地 uvicorn 已停止
+
+## 2026-05-09 P1.5：统一时间轴与矩阵
+
+P1.5 增加两类输出：
+
+- 客户端发送时间：`client_stream_start_ms`、`client_first_frame_sent_ms`、`client_last_frame_sent_ms`、`client_end_sent_ms`、`client_done_received_ms`。
+- 服务端绝对时间：`server_stream_accept_abs_ms`、`first_frame_server_abs_ms`、`first_pcm_to_asr_abs_ms`、`first_asr_partial_abs_ms`、`asr_final_abs_ms`、`retrieval_done_abs_ms`、`first_llm_chunk_abs_ms`、`first_tts_chunk_abs_ms`、`first_audio_byte_abs_ms`、`done_abs_ms`。
+
+服务端原始绝对时间以 WebSocket accept 为零点。矩阵脚本为了对外比较，会统一减去 `first_frame_server_abs_ms`，因此 `/tmp/v5_streaming_latency_eval.jsonl` 和 Markdown 表中的 `*_abs_ms` 表示从第一帧发送附近起算的链路时间。RAG/LLM/TTS 的绝对时间由 `stream_to_session_start_abs_ms + session 内相对耗时` 计算，原有 `retrieval_ms`、`first_llm_chunk_ms`、`first_tts_chunk_ms` 等阶段耗时继续保留。
+
+新增矩阵脚本：
+
+```bash
+python scripts/v5_streaming_latency_eval.py --audio-dir /tmp/volc_asr_eval --base-url http://127.0.0.1:8010 --target streaming --output /tmp/v5_streaming_latency_eval.jsonl --markdown /tmp/v5_streaming_latency_eval.md
+```
+
+本轮 9 条 streaming + ASR + full-chain 结果：
+
+| 指标 | 值 |
+| --- | ---: |
+| cases | 9 |
+| successful | 9 |
+| term_hits | 7/9 |
+| mean_first_asr_partial_abs_ms | 2724.7 |
+| mean_asr_final_abs_ms | 4724.3 |
+| mean_first_audio_byte_abs_ms | 8482.4 |
+| mean_done_abs_ms | 12982.2 |
+| mean_audio_duration_ms | 14524.4 |
+| mean_answer_chars | 49.1 |
+
+错词：
+
+- `四十八愿` 识别为 `48愿和净土宗有什么关系？`，语义基本接近，但按关键词精确命中记为失败。
+- `慧远` 识别为 `慧云大师和东林寺有什么关系？`，属于实体错词。
+
+阶段判断：
+
+- P1.5 已验证统一时间轴采集可以覆盖 ASR/RAG/LLM/TTS。
+- 9 条全部成功完成 full-chain，没有接口错误。
+- 当前首音频均值约 8.5 秒，total 均值约 13.0 秒；本轮仍不做 ASR partial 提前 LLM，因此这是保守链路口径。
+- 下一步建议补 v5 HTTP body Opus 完整上传和 v3 原链路同题矩阵，形成同时间轴横向对比。

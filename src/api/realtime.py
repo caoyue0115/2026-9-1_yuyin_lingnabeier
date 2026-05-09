@@ -216,6 +216,7 @@ async def stream_opus_realtime_session(
     run_asr = False
     run_full_chain = False
     realtime_asr = None
+    asr_started_server_ms: int | None = None
     first_pcm_to_asr_ms: int | None = None
     asr_result = None
 
@@ -281,6 +282,7 @@ async def stream_opus_realtime_session(
                                 sample_rate=x_opus_sample_rate,
                                 audio_format="pcm",
                             )
+                            asr_started_server_ms = int(round((time.perf_counter() - accepted_at) * 1000))
                             realtime_asr.start()
                         except RealtimeAsrError as exc:
                             await _send_stream_error(websocket, exc.code, close_code=1011)
@@ -322,6 +324,16 @@ async def stream_opus_realtime_session(
     if realtime_asr is not None:
         asr_result = await asyncio.to_thread(realtime_asr.finish)
         await _send_asr_events(websocket, realtime_asr.drain_events())
+        first_asr_partial_abs_ms = (
+            asr_started_server_ms + asr_result.first_asr_partial_ms
+            if asr_started_server_ms is not None and asr_result.first_asr_partial_ms is not None
+            else None
+        )
+        asr_final_abs_ms = (
+            asr_started_server_ms + asr_result.asr_final_ms
+            if asr_started_server_ms is not None and asr_result.asr_final_ms is not None
+            else None
+        )
         if asr_result.error_code or not asr_result.text:
             await websocket.send_json(
                 {
@@ -331,6 +343,9 @@ async def stream_opus_realtime_session(
                     "first_pcm_to_asr_ms": first_pcm_to_asr_ms,
                     "first_asr_partial_ms": asr_result.first_asr_partial_ms,
                     "asr_final_ms": asr_result.asr_final_ms,
+                    "first_pcm_to_asr_abs_ms": first_pcm_to_asr_ms,
+                    "first_asr_partial_abs_ms": first_asr_partial_abs_ms,
+                    "asr_final_abs_ms": asr_final_abs_ms,
                     "request_id": asr_result.request_id,
                 }
             )
@@ -342,9 +357,14 @@ async def stream_opus_realtime_session(
                 "text": asr_result.text,
                 "first_asr_partial_ms": asr_result.first_asr_partial_ms,
                 "asr_final_ms": asr_result.asr_final_ms,
+                "first_asr_partial_abs_ms": first_asr_partial_abs_ms,
+                "asr_final_abs_ms": asr_final_abs_ms,
                 "request_id": asr_result.request_id,
             }
         )
+    else:
+        first_asr_partial_abs_ms = None
+        asr_final_abs_ms = None
 
     record_end_to_reconstruct_done_ms = (
         int(round((reconstruct_done_at - end_received_at) * 1000))
@@ -355,6 +375,16 @@ async def stream_opus_realtime_session(
         last_frame_server_ms - first_frame_server_ms
         if first_frame_server_ms is not None and last_frame_server_ms is not None
         else None
+    )
+    websocket_done_abs_ms = max(
+        value
+        for value in [
+            int(round((time.perf_counter() - accepted_at) * 1000)),
+            first_pcm_to_asr_ms,
+            first_asr_partial_abs_ms,
+            asr_final_abs_ms,
+        ]
+        if value is not None
     )
     done_payload = {
         "type": "done",
@@ -373,6 +403,12 @@ async def stream_opus_realtime_session(
         "first_pcm_to_asr_ms": first_pcm_to_asr_ms,
         "first_asr_partial_ms": asr_result.first_asr_partial_ms if asr_result is not None else None,
         "asr_final_ms": asr_result.asr_final_ms if asr_result is not None else None,
+        "server_stream_accept_abs_ms": 0,
+        "first_frame_server_abs_ms": first_frame_server_ms,
+        "first_pcm_to_asr_abs_ms": first_pcm_to_asr_ms,
+        "first_asr_partial_abs_ms": first_asr_partial_abs_ms,
+        "asr_final_abs_ms": asr_final_abs_ms,
+        "done_abs_ms": websocket_done_abs_ms,
         "question_text": asr_result.text if asr_result is not None else None,
         "realtime_asr_request_id": asr_result.request_id if asr_result is not None else None,
         "error_code": None,
@@ -381,6 +417,7 @@ async def stream_opus_realtime_session(
     }
 
     if run_full_chain and asr_result is not None and asr_result.text:
+        stream_to_session_start_abs_ms = int(round((time.perf_counter() - accepted_at) * 1000))
         session = store.create_session(device_id=x_device_id, input_wav_path=str(wav_path))
         session_trace = session["trace"]
         session_trace.update(
@@ -396,6 +433,12 @@ async def stream_opus_realtime_session(
                 "asr_final_ms": asr_result.asr_final_ms,
                 "asr_ms": asr_result.asr_final_ms,
                 "realtime_asr_request_id": asr_result.request_id,
+                "stream_to_session_start_abs_ms": stream_to_session_start_abs_ms,
+                "server_stream_accept_abs_ms": 0,
+                "first_frame_server_abs_ms": first_frame_server_ms,
+                "first_pcm_to_asr_abs_ms": first_pcm_to_asr_ms,
+                "first_asr_partial_abs_ms": first_asr_partial_abs_ms,
+                "asr_final_abs_ms": asr_final_abs_ms,
             }
         )
         store.update_session(session["session_id"], trace=session_trace, question_text=asr_result.text)
@@ -408,6 +451,7 @@ async def stream_opus_realtime_session(
             }
         )
     elif run_session_after_stream:
+        stream_to_session_start_abs_ms = int(round((time.perf_counter() - accepted_at) * 1000))
         session = store.create_session(device_id=x_device_id, input_wav_path=str(wav_path))
         session_trace = session["trace"]
         session_trace.update(
@@ -418,6 +462,9 @@ async def stream_opus_realtime_session(
                 "uplink_frame_count": expected_sequence,
                 "opus_decode_ms": int(round(decode_seconds * 1000)),
                 "reconstructed_audio_ms": reconstructed_audio_ms,
+                "stream_to_session_start_abs_ms": stream_to_session_start_abs_ms,
+                "server_stream_accept_abs_ms": 0,
+                "first_frame_server_abs_ms": first_frame_server_ms,
             }
         )
         store.update_session(session["session_id"], trace=session_trace)

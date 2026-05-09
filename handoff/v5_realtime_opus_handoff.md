@@ -430,3 +430,88 @@ full-chain session：`eeacb3be-eeac-4762-b9a0-74efed6658dd`，`status=done`，`f
 
 - `python -m pytest -q`：113 passed, 1 warning
 - 本地 uvicorn 已停止
+
+## 2026-05-09 P1.5：统一时间轴 + 9 条佛学词矩阵
+
+新增/更新：
+
+- `scripts/v5_streaming_latency_eval.py`
+- `scripts/opus_uplink_stream_smoke.py`
+- `src/api/realtime.py`
+- `src/services/realtime_session.py`
+- `src/models/realtime.py`
+- `src/storage/realtime_store.py`
+- `tests/test_opus_uplink.py`
+- `docs/superpowers/specs/2026-05-09-v5-streaming-latency-matrix.md`
+
+时间轴口径：
+
+- WebSocket done payload 新增 `client_stream_start_ms`、`client_first_frame_sent_ms`、`client_last_frame_sent_ms`、`client_end_sent_ms`、`client_done_received_ms`。
+- 服务端原始 `*_abs_ms` 以 stream accept 为零点。
+- 矩阵脚本输出的 `*_abs_ms` 统一减去 `first_frame_server_abs_ms`，作为“从客户端发送第一帧附近起算”的对外比较口径。
+- `retrieval_done_abs_ms`、`first_llm_chunk_abs_ms`、`first_tts_chunk_abs_ms`、`first_audio_byte_abs_ms`、`done_abs_ms` 由 `stream_to_session_start_abs_ms + session 内相对耗时` 得出。
+
+单条回归：
+
+```bash
+python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url http://127.0.0.1:8010 --frame-ms 60 --realtime --run-asr --run-full-chain --max-polls 120 --status-timeout 20 --timeout 30
+```
+
+| 指标 | 结果 |
+| --- | ---: |
+| client_first_frame_sent_ms | 8 |
+| client_last_frame_sent_ms | 4783 |
+| client_end_sent_ms | 4844 |
+| client_done_received_ms | 5791 |
+| first_frame_server_abs_ms | 6 |
+| first_pcm_to_asr_abs_ms | 6 |
+| first_asr_partial_abs_ms | 2768 |
+| asr_final_abs_ms | 5529 |
+| retrieval_done_abs_ms | 6503 |
+| first_llm_chunk_abs_ms | 8668 |
+| first_tts_chunk_abs_ms | 10048 |
+| first_audio_byte_abs_ms | 10048 |
+| done_abs_ms | 15854 |
+
+ASR final：
+
+```text
+情解释阿弥陀佛是什么意思？
+```
+
+9 条矩阵：
+
+```bash
+python scripts/v5_streaming_latency_eval.py --audio-dir /tmp/volc_asr_eval --base-url http://127.0.0.1:8010 --target streaming --output /tmp/v5_streaming_latency_eval.jsonl --markdown /tmp/v5_streaming_latency_eval.md
+```
+
+| 汇总指标 | 结果 |
+| --- | ---: |
+| cases | 9 |
+| successful | 9 |
+| term_hits | 7/9 |
+| mean_first_asr_partial_abs_ms | 2724.7 |
+| mean_asr_final_abs_ms | 4724.3 |
+| mean_first_audio_byte_abs_ms | 8482.4 |
+| mean_done_abs_ms | 12982.2 |
+| mean_audio_duration_ms | 14524.4 |
+| mean_answer_chars | 49.1 |
+
+| term | hit | recognized_text | asr_final_abs_ms | first_audio_byte_abs_ms | done_abs_ms |
+| --- | --- | --- | ---: | ---: | ---: |
+| 阿弥陀佛 | Y | 情解释阿弥陀佛是什么意思？ | 5242 | 9176 | 13562 |
+| 四十八愿 | N | 48愿和净土宗有什么关系？ | 5061 | 8193 | 13327 |
+| 净土宗 | Y | 净土宗为什么重视信愿行？ | 5667 | 10584 | 15806 |
+| 无量寿经 | Y | 无量寿经讲了什么？ | 4801 | 8150 | 12525 |
+| 金刚经 | Y | 金刚经的核心意思是什么？ | 3392 | 6886 | 11295 |
+| 般若 | Y | 佛教里般若是什么意思？ | 3671 | 7558 | 10932 |
+| 慧远 | N | 慧云大师和东林寺有什么关系？ | 4163 | 8227 | 12882 |
+| 善导 | Y | 善导大师如何解释念佛？ | 4049 | 7869 | 11925 |
+| 东林寺 | Y | 东林寺和净土宗有什么关系？ | 6473 | 9699 | 14586 |
+
+阶段判断：
+
+- P1.5 证明同一时间轴可以稳定采集；9 条均完整进入 ASR/RAG/LLM/TTS。
+- ASR 佛学词命中率为 7/9。错词为“四十八愿”数字化成“48愿”，以及“慧远”错为“慧云”。
+- mean 首音频约 8.5 秒，mean total 约 13.0 秒；当前未做 partial 提前 LLM，因此不是最终优化上限。
+- 下一步建议补 v5 HTTP body Opus 基线和 v3 原链路同 9 条对照，再讨论是否进入 ESP32-S3 端上行迁移。
