@@ -171,23 +171,27 @@ def pack_framed_v1_packets(payloads: Iterable[bytes]) -> Iterator[bytes]:
         sequence += 1
 
 
-def parse_framed_v1_packets(body: bytes) -> list[tuple[int, bytes]]:
+def parse_framed_v1_packets(
+    body: bytes,
+    *,
+    expected_sequence: int = 0,
+) -> list[tuple[int, bytes]]:
     packets: list[tuple[int, bytes]] = []
     offset = 0
-    expected_sequence = 0
+    next_sequence = expected_sequence
     while offset < len(body):
         if len(body) - offset < 8:
             raise OpusError("framed_packet_truncated")
         sequence = int.from_bytes(body[offset : offset + 4], "big")
         payload_len = int.from_bytes(body[offset + 4 : offset + 8], "big")
         offset += 8
-        if sequence != expected_sequence:
+        if sequence != next_sequence:
             raise OpusError("framed_sequence_gap")
         if len(body) - offset < payload_len:
             raise OpusError("framed_packet_truncated")
         packets.append((sequence, body[offset : offset + payload_len]))
         offset += payload_len
-        expected_sequence += 1
+        next_sequence += 1
     return packets
 
 

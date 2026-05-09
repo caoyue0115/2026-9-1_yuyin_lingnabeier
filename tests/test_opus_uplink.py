@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -45,12 +46,51 @@ def _load_opus_uplink_script():
     return module
 
 
+def _load_opus_uplink_stream_script():
+    script_path = ROOT / "scripts" / "opus_uplink_stream_smoke.py"
+    spec = importlib.util.spec_from_file_location("opus_uplink_stream_smoke", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["opus_uplink_stream_smoke"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class _FakeWebSocket:
+    def __init__(self, incoming: list[dict]) -> None:
+        self._incoming = list(incoming)
+        self.accepted = False
+        self.sent_json: list[dict] = []
+        self.close_code: int | None = None
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    async def receive(self) -> dict:
+        if self._incoming:
+            return self._incoming.pop(0)
+        return {"type": "websocket.disconnect"}
+
+    async def send_json(self, payload: dict) -> None:
+        self.sent_json.append(payload)
+
+    async def close(self, code: int = 1000) -> None:
+        self.close_code = code
+
+
 class OpusUplinkProviderTests(unittest.TestCase):
     def test_parse_framed_v1_packets_rejects_truncated_packet(self) -> None:
         from src.providers.opus import OpusError, parse_framed_v1_packets
 
         with self.assertRaisesRegex(OpusError, "framed_packet_truncated"):
             parse_framed_v1_packets(b"\x00\x00\x00\x00\x00\x00\x00\x04ab")
+
+    def test_parse_framed_v1_packets_accepts_expected_sequence_offset(self) -> None:
+        from src.providers.opus import parse_framed_v1_packets
+
+        packets = parse_framed_v1_packets(_outer_frame(2, b"payload"), expected_sequence=2)
+
+        self.assertEqual(packets, [(2, b"payload")])
 
     def test_decode_framed_opus_to_pcm_rejects_truncated_inner_packet(self) -> None:
         from src.providers.opus import OpusError, decode_framed_opus_to_pcm
@@ -173,6 +213,83 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertEqual(exc.exception.status_code, 400)
         self.assertEqual(exc.exception.detail, "invalid_packetization")
 
+    def test_stream_opus_realtime_session_acks_frames_and_returns_done_summary(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 1920
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        framed_messages = [_outer_frame(index, packet) for index, packet in enumerate(inner_packets)]
+        websocket = _FakeWebSocket(
+            [{"type": "websocket.receive", "bytes": message} for message in framed_messages]
+            + [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps({"type": "end", "client_stream_duration_ms": 120}),
+                }
+            ]
+        )
+
+        asyncio.run(
+            realtime_api.stream_opus_realtime_session(
+                websocket,
+                x_device_id="pc-stream",
+                x_audio_packetization="framed-v1",
+                x_audio_format="opus",
+                x_opus_sample_rate=16000,
+                x_opus_channels=1,
+                x_opus_frame_duration_ms=60,
+                x_original_pcm_bytes=len(pcm),
+            )
+        )
+
+        self.assertTrue(websocket.accepted)
+        ack_payloads = [payload for payload in websocket.sent_json if payload["type"] == "ack"]
+        done_payload = websocket.sent_json[-1]
+        self.assertEqual(len(ack_payloads), len(inner_packets))
+        self.assertEqual(ack_payloads[-1]["frame_count"], len(inner_packets))
+        self.assertEqual(done_payload["type"], "done")
+        self.assertEqual(done_payload["uplink_frame_count"], len(inner_packets))
+        self.assertEqual(done_payload["uplink_pcm_bytes"], len(pcm))
+        self.assertEqual(done_payload["reconstructed_audio_ms"], 120)
+        self.assertEqual(done_payload["client_stream_duration_ms"], 120)
+        self.assertEqual(done_payload["error_code"], None)
+        self.assertIsInstance(done_payload["opus_decode_ms"], int)
+
+    def test_stream_opus_realtime_session_reports_bad_frame_error(self) -> None:
+        from src.api import realtime as realtime_api
+
+        websocket = _FakeWebSocket([{"type": "websocket.receive", "bytes": b"\x00\x00"}])
+
+        asyncio.run(
+            realtime_api.stream_opus_realtime_session(
+                websocket,
+                x_device_id="pc-stream",
+                x_audio_packetization="framed-v1",
+                x_audio_format="opus",
+                x_opus_sample_rate=16000,
+                x_opus_channels=1,
+                x_opus_frame_duration_ms=60,
+                x_original_pcm_bytes=None,
+            )
+        )
+
+        self.assertTrue(websocket.accepted)
+        self.assertEqual(websocket.sent_json[-1]["type"], "error")
+        self.assertEqual(websocket.sent_json[-1]["error_code"], "framed_packet_truncated")
+        self.assertEqual(websocket.close_code, 1003)
+
 
 class OpusUplinkSmokeScriptTests(unittest.TestCase):
     def test_load_wav_pcm_request_requires_16k_16bit_mono(self) -> None:
@@ -205,3 +322,22 @@ class OpusUplinkSmokeScriptTests(unittest.TestCase):
         self.assertGreater(len(body), 8)
         self.assertEqual(metrics["uplink_frame_count"], 1)
         self.assertGreater(metrics["uplink_opus_bytes"], 0)
+
+    def test_build_stream_uplink_messages_uses_one_framed_message_per_opus_packet(self) -> None:
+        module = _load_opus_uplink_stream_script()
+        from src.providers.opus import opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        wav_path = _write_test_wav(b"\x00\x00" * 1920)
+        try:
+            messages, metrics = module.build_stream_uplink_messages(wav_path, frame_ms=60)
+        finally:
+            Path(wav_path).unlink(missing_ok=True)
+
+        self.assertEqual(metrics["uplink_frame_count"], len(messages))
+        self.assertEqual(metrics["uplink_pcm_bytes"], 3840)
+        self.assertEqual(metrics["reconstructed_audio_ms"], 120)
+        self.assertGreater(metrics["uplink_opus_bytes"], 0)
+        self.assertGreater(len(messages[0]), 8)

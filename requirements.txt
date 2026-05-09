@@ -8,6 +8,8 @@ openai==1.99.9
 dashscope>=1.20.0,<2
 requests==2.32.5
 httpx==0.28.1
+websocket-client>=1.8,<2
+websockets>=13,<16
 numpy==2.3.2
 faiss-cpu==1.11.0.post1
 jieba==0.42.1

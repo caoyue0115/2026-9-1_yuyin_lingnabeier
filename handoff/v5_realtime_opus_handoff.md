@@ -260,3 +260,58 @@ RAG 回放结果（同一 ASR 文本，本地 retriever 复算）：
 
 - `python -m pytest -q`：104 passed, 1 warning
 - 本地 uvicorn 已停止
+
+## 2026-05-09 真流式 Opus 上行进展
+
+已新增 v5 真流式上行实验链路：
+
+- 设计文档：`docs/superpowers/specs/2026-05-09-v5-streaming-opus-uplink-design.md`
+- 服务端接口：`WS /api/v5/realtime/opus-stream`
+- PC 模拟脚本：`scripts/opus_uplink_stream_smoke.py`
+- 测试更新：`tests/test_opus_uplink.py`
+
+本轮只验证上行流式，不接 ASR partial，不接火山 ASR，不改 ASR provider。既有完整 body 基线 `POST /api/v5/realtime/opus-sessions` 行为保持不变。
+
+WebSocket 协议：
+
+- binary message 使用同一套 framed-v1：`4 bytes sequence + 4 bytes payload length + payload`
+- payload 继续为 `2 bytes opus packet length + opus packet`
+- PC 模拟器默认一帧一个 binary message，并按真实时间节奏发送
+- 客户端最后发送 `{"type":"end"}`
+- 服务端逐帧返回 `ack`，完成后返回 `done`
+
+新增依赖：
+
+- `websocket-client`：PC smoke 脚本使用
+- `websockets`：uvicorn 本地 WebSocket server 支持
+
+本地 smoke：
+
+```bash
+python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url http://127.0.0.1:8010 --frame-ms 60 --realtime
+```
+
+结果：流式上行通过，服务端 ack 从 frame 1 持续增长到 frame 79，end 后重建音频。本轮没有启动 ASR/RAG/LLM/TTS。
+
+| 指标 | 结果 |
+| --- | ---: |
+| stream_accept_ms | 0 |
+| first_frame_server_ms | 4 |
+| last_frame_server_ms | 4778 |
+| client_stream_duration_ms | 4841 |
+| server_receive_duration_ms | 4774 |
+| uplink_frame_count | 79 |
+| uplink_opus_bytes | 13415 |
+| uplink_pcm_bytes | 150156 |
+| uplink_compression_ratio | 11.193 |
+| opus_decode_ms | 12 |
+| reconstructed_audio_ms | 4692 |
+| record_end_to_reconstruct_done_ms | 2 |
+| error_code | null |
+
+结论：v5 已从“完整 body 内部 framed-v1”推进到“真正 WebSocket 流式上行”。服务端可以边收边解码/聚合，Opus 压缩率与完整 body 基线一致，解码耗时仍很低。下一步建议跑 `--no-realtime` 快发、弱网模拟和 `--run-session-after-stream` 完整链路对照，再评估 ESP32-S3 上行迁移。
+
+验证：
+
+- `python -m pytest -q`：108 passed, 1 warning
+- 本地 uvicorn 已停止

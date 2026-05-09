@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
 from src.models.realtime import RealtimeSessionAcceptedResponse, RealtimeSessionStatusResponse
 from src.providers.opus import (
+    LibOpusDecoder,
     OpusError,
     decode_framed_opus_to_pcm,
     encode_pcm_stream_to_framed_opus,
     opus_available,
+    parse_framed_v1_packets,
 )
 from src.services.realtime_session import start_realtime_session
 from src.settings import settings
@@ -35,6 +38,36 @@ def _frame_audio_packets(chunks):
             continue
         yield sequence.to_bytes(4, "big") + len(chunk).to_bytes(4, "big") + chunk
         sequence += 1
+
+
+def _opus_error_detail(exc: OpusError) -> str:
+    return str(exc).split(":", 1)[0] or "opus_decode_failed"
+
+
+async def _send_stream_error(websocket: WebSocket, error_code: str, *, close_code: int = 1003) -> None:
+    await websocket.send_json(
+        {
+            "type": "error",
+            "error_code": error_code,
+            "error_message": error_code,
+        }
+    )
+    await websocket.close(code=close_code)
+
+
+def _decode_stream_opus_payload(
+    decoder: LibOpusDecoder,
+    payload: bytes,
+    *,
+    frame_size: int,
+) -> tuple[bytes, int]:
+    if len(payload) < 2:
+        raise OpusError("opus_packet_truncated")
+    packet_len = int.from_bytes(payload[:2], "big")
+    packet = payload[2:]
+    if len(packet) != packet_len:
+        raise OpusError("opus_packet_truncated")
+    return decoder.decode_packet(packet, frame_size=frame_size), len(packet)
 
 
 @router.post("/api/v3/realtime/sessions", response_model=RealtimeSessionAcceptedResponse, status_code=202)
@@ -127,6 +160,173 @@ async def create_opus_realtime_session(
         received_at=session["created_at"],
         audio_stream_url=session["audio_stream_url"],
     )
+
+
+@router.websocket("/api/v5/realtime/opus-stream")
+async def stream_opus_realtime_session(
+    websocket: WebSocket,
+    x_device_id: str = Header(default="pc-opus-uplink-stream-001"),
+    x_audio_packetization: str = Header(default="framed-v1"),
+    x_audio_format: str = Header(default="opus"),
+    x_opus_sample_rate: int = Header(default=settings.realtime_audio_opus_sample_rate),
+    x_opus_channels: int = Header(default=settings.realtime_audio_opus_channels),
+    x_opus_frame_duration_ms: int = Header(default=settings.realtime_audio_opus_frame_duration_ms),
+    x_original_pcm_bytes: int | None = Header(default=None),
+) -> None:
+    accept_started = time.perf_counter()
+    await websocket.accept()
+    accepted_at = time.perf_counter()
+    stream_accept_ms = int(round((accepted_at - accept_started) * 1000))
+
+    if x_audio_packetization != "framed-v1":
+        await _send_stream_error(websocket, "invalid_packetization", close_code=1008)
+        return
+    if x_audio_format != "opus":
+        await _send_stream_error(websocket, "invalid_audio_format", close_code=1008)
+        return
+
+    frame_size = x_opus_sample_rate * x_opus_frame_duration_ms // 1000
+    if frame_size <= 0:
+        await _send_stream_error(websocket, "invalid_opus_frame_size")
+        return
+
+    expected_sequence = 0
+    opus_bytes = 0
+    decoded = bytearray()
+    decode_seconds = 0.0
+    first_frame_server_ms: int | None = None
+    last_frame_server_ms: int | None = None
+    client_stream_duration_ms: int | None = None
+    end_received_at: float | None = None
+    run_session_after_stream = False
+
+    try:
+        with LibOpusDecoder(sample_rate=x_opus_sample_rate, channels=x_opus_channels) as decoder:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    await _send_stream_error(websocket, "stream_disconnected", close_code=1000)
+                    return
+
+                message_bytes = message.get("bytes")
+                if message_bytes is not None:
+                    if first_frame_server_ms is None:
+                        first_frame_server_ms = int(round((time.perf_counter() - accepted_at) * 1000))
+                    outer_packets = parse_framed_v1_packets(
+                        message_bytes,
+                        expected_sequence=expected_sequence,
+                    )
+                    for sequence, payload in outer_packets:
+                        decode_started = time.perf_counter()
+                        pcm_chunk, packet_bytes = _decode_stream_opus_payload(
+                            decoder,
+                            payload,
+                            frame_size=frame_size,
+                        )
+                        decode_seconds += time.perf_counter() - decode_started
+                        decoded.extend(pcm_chunk)
+                        opus_bytes += packet_bytes
+                        expected_sequence = sequence + 1
+                        last_frame_server_ms = int(round((time.perf_counter() - accepted_at) * 1000))
+                        await websocket.send_json(
+                            {
+                                "type": "ack",
+                                "frame_count": expected_sequence,
+                                "received_opus_bytes": opus_bytes,
+                                "decoded_pcm_bytes": len(decoded),
+                            }
+                        )
+                    continue
+
+                message_text = message.get("text")
+                if message_text is None:
+                    continue
+                try:
+                    control = json.loads(message_text)
+                except json.JSONDecodeError:
+                    await _send_stream_error(websocket, "invalid_control_json", close_code=1003)
+                    return
+                if control.get("type") != "end":
+                    await _send_stream_error(websocket, "invalid_control_type", close_code=1003)
+                    return
+                raw_client_duration = control.get("client_stream_duration_ms")
+                if isinstance(raw_client_duration, int):
+                    client_stream_duration_ms = raw_client_duration
+                run_session_after_stream = bool(control.get("run_session_after_stream", False))
+                end_received_at = time.perf_counter()
+                break
+    except OpusError as exc:
+        await _send_stream_error(websocket, _opus_error_detail(exc))
+        return
+
+    if not decoded:
+        await _send_stream_error(websocket, "empty_decoded_audio")
+        return
+    if x_original_pcm_bytes is not None:
+        if x_original_pcm_bytes <= 0 or x_original_pcm_bytes > len(decoded):
+            await _send_stream_error(websocket, "invalid_original_pcm_bytes")
+            return
+        decoded = decoded[:x_original_pcm_bytes]
+
+    byte_rate = x_opus_sample_rate * x_opus_channels * 2
+    reconstructed_audio_ms = int(round((len(decoded) / byte_rate) * 1000)) if byte_rate else 0
+    compression_ratio = round(len(decoded) / opus_bytes, 3) if opus_bytes else None
+    wav_path = save_pcm_as_wav(bytes(decoded), x_opus_sample_rate, 16, x_opus_channels)
+    reconstruct_done_at = time.perf_counter()
+    record_end_to_reconstruct_done_ms = (
+        int(round((reconstruct_done_at - end_received_at) * 1000))
+        if end_received_at is not None
+        else None
+    )
+    server_receive_duration_ms = (
+        last_frame_server_ms - first_frame_server_ms
+        if first_frame_server_ms is not None and last_frame_server_ms is not None
+        else None
+    )
+    done_payload = {
+        "type": "done",
+        "stream_accept_ms": stream_accept_ms,
+        "first_frame_server_ms": first_frame_server_ms,
+        "last_frame_server_ms": last_frame_server_ms,
+        "client_stream_duration_ms": client_stream_duration_ms,
+        "server_receive_duration_ms": server_receive_duration_ms,
+        "uplink_frame_count": expected_sequence,
+        "uplink_opus_bytes": opus_bytes,
+        "uplink_pcm_bytes": len(decoded),
+        "uplink_compression_ratio": compression_ratio,
+        "opus_decode_ms": int(round(decode_seconds * 1000)),
+        "reconstructed_audio_ms": reconstructed_audio_ms,
+        "record_end_to_reconstruct_done_ms": record_end_to_reconstruct_done_ms,
+        "error_code": None,
+        "error_message": None,
+        "session_started": False,
+    }
+
+    if run_session_after_stream:
+        session = store.create_session(device_id=x_device_id, input_wav_path=str(wav_path))
+        session_trace = session["trace"]
+        session_trace.update(
+            {
+                "uplink_opus_bytes": opus_bytes,
+                "uplink_pcm_bytes": len(decoded),
+                "uplink_compression_ratio": compression_ratio,
+                "uplink_frame_count": expected_sequence,
+                "opus_decode_ms": int(round(decode_seconds * 1000)),
+                "reconstructed_audio_ms": reconstructed_audio_ms,
+            }
+        )
+        store.update_session(session["session_id"], trace=session_trace)
+        start_realtime_session(store, session["session_id"])
+        done_payload.update(
+            {
+                "session_started": True,
+                "session_id": session["session_id"],
+                "audio_stream_url": session["audio_stream_url"],
+            }
+        )
+
+    await websocket.send_json(done_payload)
+    await websocket.close(code=1000)
 
 
 @router.get("/api/v3/realtime/sessions/{session_id}", response_model=RealtimeSessionStatusResponse)

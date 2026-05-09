@@ -35,11 +35,20 @@ def install_dependency_stubs() -> None:
 
                 return decorator
 
+            def websocket(self, *_args, **_kwargs):
+                def decorator(fn):
+                    return fn
+
+                return decorator
+
         class HTTPException(Exception):
             def __init__(self, status_code: int, detail: str) -> None:
                 super().__init__(detail)
                 self.status_code = status_code
                 self.detail = detail
+
+        class WebSocket:
+            pass
 
         class Request:
             async def body(self) -> bytes:
@@ -52,6 +61,7 @@ def install_dependency_stubs() -> None:
         module.APIRouter = APIRouter
         module.HTTPException = HTTPException
         module.Request = Request
+        module.WebSocket = WebSocket
         module.Header = Header
         sys.modules["fastapi"] = module
 
