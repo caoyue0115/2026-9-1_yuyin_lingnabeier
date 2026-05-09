@@ -146,3 +146,49 @@ v5 必须新增或采集以下指标：
 4. 先写 PC 模拟器：读取 WAV，编码/封包/上传 Opus framed-v1。
 5. 云端新增实验接口，接收并解码上行 Opus。
 6. 成功后再迁移到 ESP-VoCat 板端。
+
+## 2026-05-09 P0 实验接口进展
+
+已新增 v5 第一阶段 PC 模拟器和云端实验接口：
+
+- 设计文档：`docs/superpowers/specs/2026-05-08-v5-opus-uplink-design.md`
+- 服务端接口：`POST /api/v5/realtime/opus-sessions`
+- PC 模拟脚本：`scripts/opus_uplink_smoke.py`
+- 测试：`tests/test_opus_uplink.py`
+
+协议口径：
+
+- 外层复用 framed-v1：`4 bytes sequence + 4 bytes payload length + payload`
+- payload 复用现有 Opus provider 输出：`2 bytes opus packet length + opus packet`
+- PC 模拟器要求输入 WAV 为 16 kHz / 16-bit / mono
+- `X-Original-Pcm-Bytes` 用于裁剪 Opus 最后一帧补零产生的尾部静音
+
+本地 smoke：
+
+```bash
+python scripts/opus_uplink_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url http://127.0.0.1:8010 --max-polls 80
+```
+
+关键结果：
+
+| 指标 | 结果 |
+| --- | ---: |
+| endpoint HTTP | 202 Accepted |
+| uplink_frame_count | 79 |
+| uplink_opus_bytes | 13415 |
+| uplink_pcm_bytes | 150156 |
+| uplink_compression_ratio | 11.193 |
+| reconstructed_audio_ms | 4692 |
+| opus_decode_ms | 5 |
+
+后续 realtime session 当前失败在 `asr_not_configured`，原因是 v5 本地环境未配置 DashScope ASR 凭据；Opus 上行接收、解析、解码和 WAV 重建已进入业务流程。
+
+验证结果：
+
+- `python -m pytest -q`：104 passed, 1 warning
+
+下一步：
+
+1. 在 v5 本地 `.env` 配置与 v3 同口径的 DashScope ASR/LLM/TTS 最小凭据后，重跑 `opus_uplink_smoke.py`，采集完整 ASR/RAG/LLM/TTS trace。
+2. 若完整 session 成功，再跑 9 条佛学 WAV 对比原 PCM 上传与 Opus 上行的上传体积、解码耗时和端到端指标。
+3. 仍不接板端；等 PC 模拟矩阵稳定后，再设计 ESP-VoCat v1.2 的上行迁移。

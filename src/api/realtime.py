@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from src.models.realtime import RealtimeSessionAcceptedResponse, RealtimeSessionStatusResponse
-from src.providers.opus import OpusError, encode_pcm_stream_to_framed_opus, opus_available
+from src.providers.opus import (
+    OpusError,
+    decode_framed_opus_to_pcm,
+    encode_pcm_stream_to_framed_opus,
+    opus_available,
+)
 from src.services.realtime_session import start_realtime_session
 from src.settings import settings
 from src.storage.files import save_pcm_as_wav
@@ -50,6 +56,70 @@ async def create_realtime_session(
 
     wav_path = save_pcm_as_wav(body, x_sample_rate, x_sample_width, x_channels)
     session = store.create_session(device_id=x_device_id, input_wav_path=str(wav_path))
+    start_realtime_session(store, session["session_id"])
+    return RealtimeSessionAcceptedResponse(
+        status="accepted",
+        session_id=session["session_id"],
+        received_at=session["created_at"],
+        audio_stream_url=session["audio_stream_url"],
+    )
+
+
+@router.post("/api/v5/realtime/opus-sessions", response_model=RealtimeSessionAcceptedResponse, status_code=202)
+async def create_opus_realtime_session(
+    request: Request,
+    x_device_id: str = Header(...),
+    x_audio_packetization: str = Header(default="framed-v1"),
+    x_audio_format: str = Header(default="opus"),
+    x_opus_sample_rate: int = Header(default=settings.realtime_audio_opus_sample_rate),
+    x_opus_channels: int = Header(default=settings.realtime_audio_opus_channels),
+    x_opus_frame_duration_ms: int = Header(default=settings.realtime_audio_opus_frame_duration_ms),
+    x_original_pcm_bytes: int | None = Header(default=None),
+) -> RealtimeSessionAcceptedResponse:
+    if request.headers.get("content-type") != "application/octet-stream":
+        raise HTTPException(status_code=400, detail="invalid_request")
+    if x_audio_packetization != "framed-v1":
+        raise HTTPException(status_code=400, detail="invalid_packetization")
+    if x_audio_format != "opus":
+        raise HTTPException(status_code=400, detail="invalid_audio_format")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty_opus_body")
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    if len(body) > max_bytes:
+        raise HTTPException(status_code=413, detail="audio_too_large")
+
+    decode_started = time.perf_counter()
+    try:
+        pcm, uplink_trace = decode_framed_opus_to_pcm(
+            [body],
+            sample_rate=x_opus_sample_rate,
+            channels=x_opus_channels,
+            frame_duration_ms=x_opus_frame_duration_ms,
+        )
+    except OpusError as exc:
+        detail = str(exc).split(":", 1)[0] or "opus_decode_failed"
+        status_code = 400 if detail.startswith(("framed_", "opus_packet_", "invalid_")) else 500
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+    if not pcm:
+        raise HTTPException(status_code=400, detail="empty_decoded_audio")
+    if x_original_pcm_bytes is not None:
+        if x_original_pcm_bytes <= 0 or x_original_pcm_bytes > len(pcm):
+            raise HTTPException(status_code=400, detail="invalid_original_pcm_bytes")
+        pcm = pcm[:x_original_pcm_bytes]
+        uplink_trace["uplink_pcm_bytes"] = len(pcm)
+        opus_bytes = uplink_trace.get("uplink_opus_bytes") or 0
+        uplink_trace["uplink_compression_ratio"] = round(len(pcm) / opus_bytes, 3) if opus_bytes else None
+        byte_rate = x_opus_sample_rate * x_opus_channels * 2
+        uplink_trace["reconstructed_audio_ms"] = int(round((len(pcm) / byte_rate) * 1000)) if byte_rate else 0
+
+    uplink_trace["opus_decode_ms"] = int(round((time.perf_counter() - decode_started) * 1000))
+    wav_path = save_pcm_as_wav(pcm, x_opus_sample_rate, 16, x_opus_channels)
+    session = store.create_session(device_id=x_device_id, input_wav_path=str(wav_path))
+    session_trace = session["trace"]
+    session_trace.update(uplink_trace)
+    store.update_session(session["session_id"], trace=session_trace)
     start_realtime_session(store, session["session_id"])
     return RealtimeSessionAcceptedResponse(
         status="accepted",

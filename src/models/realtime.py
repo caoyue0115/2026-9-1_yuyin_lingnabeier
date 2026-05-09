@@ -23,6 +23,12 @@ class RealtimeTrace(BaseModel):
     audio_stream_wall_ms: int | None = None
     audio_max_chunk_gap_ms: int | None = None
     production_ratio: float | None = None
+    uplink_opus_bytes: int | None = None
+    uplink_pcm_bytes: int | None = None
+    uplink_compression_ratio: float | None = None
+    uplink_frame_count: int | None = None
+    opus_decode_ms: int | None = None
+    reconstructed_audio_ms: int | None = None
 
 
 class RealtimeSessionAcceptedResponse(BaseModel):
