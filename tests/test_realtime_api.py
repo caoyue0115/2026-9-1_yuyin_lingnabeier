@@ -1438,6 +1438,52 @@ class RealtimeSchemaTests(unittest.TestCase):
 
         thread_cls.assert_called_once()
 
+    def test_realtime_session_from_pretranscribed_question_skips_file_asr(self) -> None:
+        from src.services import realtime_session as realtime_session_service
+        from src.storage.realtime_store import InMemoryRealtimeSessionStore
+
+        wav_path = _write_test_wav(b"\x01\x00\x02\x00")
+        store = InMemoryRealtimeSessionStore(base_url="http://testserver")
+        session = store.create_session(device_id="esp-1")
+        question_text = "请解释阿弥陀佛是什么意思"
+        store.update_session(session["session_id"], question_text=question_text)
+
+        try:
+            with mock.patch.object(
+                realtime_session_service,
+                "transcribe_wav_result",
+            ) as transcribe_wav_result, mock.patch.object(
+                realtime_session_service,
+                "retrieve_references",
+                return_value=([{"source_title": "阿弥陀佛", "snippet": "无量光寿", "text": "无量光寿"}], 0.9),
+            ) as retrieve_references, mock.patch.object(
+                realtime_session_service,
+                "is_buddhist_question",
+                return_value=True,
+            ), mock.patch.object(
+                realtime_session_service,
+                "stream_answer_text",
+                return_value=iter(["阿弥陀佛是无量光寿。"]),
+            ), mock.patch.object(
+                realtime_session_service,
+                "realtime_tts_health",
+                return_value=False,
+            ), mock.patch.object(
+                realtime_session_service,
+                "synthesize_audio",
+                return_value=(wav_path, None),
+            ):
+                realtime_session_service.run_stub_realtime_session(store, session["session_id"])
+        finally:
+            Path(wav_path).unlink(missing_ok=True)
+
+        transcribe_wav_result.assert_not_called()
+        retrieve_references.assert_called_once_with(question_text, top_k=mock.ANY)
+        updated = store.get_session(session["session_id"])
+        self.assertEqual(updated["status"], "done")
+        self.assertEqual(updated["question_text"], question_text)
+        self.assertEqual(updated["trace"]["retrieval_top_score"], 0.9)
+
 
 if __name__ == "__main__":
     unittest.main()

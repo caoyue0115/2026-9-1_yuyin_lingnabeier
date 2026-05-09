@@ -29,6 +29,11 @@ class RealtimeTrace(BaseModel):
     uplink_frame_count: int | None = None
     opus_decode_ms: int | None = None
     reconstructed_audio_ms: int | None = None
+    first_pcm_to_asr_ms: int | None = None
+    first_asr_partial_ms: int | None = None
+    asr_final_ms: int | None = None
+    realtime_asr_request_id: str | None = None
+    retrieval_top_score: float | None = None
 
 
 class RealtimeSessionAcceptedResponse(BaseModel):

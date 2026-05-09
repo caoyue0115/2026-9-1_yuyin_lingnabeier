@@ -221,3 +221,129 @@ WebSocket 流式上行第一版达成 P0 验收：
 
 - `python -m pytest -q`：108 passed, 1 warning
 - 本地 uvicorn 已停止
+
+## 2026-05-09 P1：接入 DashScope Realtime ASR
+
+P1 在 `WS /api/v5/realtime/opus-stream` 上增加可选 ASR/full-chain 模式。默认行为仍保持 P0：不发 `start` config 或不启用 ASR 时，只做上行流式 smoke。
+
+启用方式：
+
+```json
+{"type":"start","run_asr":true,"run_full_chain":true}
+```
+
+随后继续发送 binary framed-v1 Opus frame，最后发送：
+
+```json
+{"type":"end"}
+```
+
+服务端行为：
+
+- 每个 Opus frame 解码出 PCM 后，立即送入 DashScope `paraformer-realtime-v2` realtime websocket。
+- ASR partial 只作为事件回传和记录，不触发 LLM。
+- ASR final 出来后，才使用 final text 启动既有 RAG / LLM / TTS session。
+- 不接火山 ASR，不做 partial 提前 LLM，不做打断。
+
+新增关键指标：
+
+| 指标 | 含义 |
+| --- | --- |
+| `first_pcm_to_asr_ms` | 服务端收到首个 decoded PCM 后送入 ASR 的时间 |
+| `first_asr_partial_ms` | DashScope realtime ASR 首个非空 partial 时间 |
+| `asr_final_ms` | DashScope realtime ASR final 时间 |
+| `realtime_asr_request_id` | DashScope realtime ASR request id |
+| `retrieval_top_score` | final text 进入 RAG 后的 top score |
+
+P0 回归命令：
+
+```bash
+python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url http://127.0.0.1:8010 --frame-ms 60 --realtime
+```
+
+P0 回归结果：
+
+| 指标 | 值 |
+| --- | ---: |
+| first_frame_server_ms | 3 |
+| server_receive_duration_ms | 4781 |
+| client_stream_duration_ms | 4848 |
+| uplink_frame_count | 79 |
+| uplink_opus_bytes | 13415 |
+| uplink_pcm_bytes | 150156 |
+| uplink_compression_ratio | 11.193 |
+| opus_decode_ms | 12 |
+| reconstructed_audio_ms | 4692 |
+| record_end_to_reconstruct_done_ms | 1 |
+| error_code | null |
+
+P1 命令：
+
+```bash
+python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url http://127.0.0.1:8010 --frame-ms 60 --realtime --run-asr --run-full-chain --max-polls 120 --status-timeout 20 --timeout 30
+```
+
+P1 上行 + ASR 结果：
+
+| 指标 | 值 |
+| --- | ---: |
+| first_frame_server_ms | 4 |
+| first_pcm_to_asr_ms | 4 |
+| first_asr_partial_ms | 2823 |
+| asr_final_ms | 5675 |
+| server_receive_duration_ms | 4776 |
+| client_stream_duration_ms | 4843 |
+| uplink_frame_count | 79 |
+| uplink_opus_bytes | 13415 |
+| uplink_pcm_bytes | 150156 |
+| uplink_compression_ratio | 11.193 |
+| opus_decode_ms | 12 |
+| reconstructed_audio_ms | 4692 |
+| record_end_to_reconstruct_done_ms | 1 |
+| error_code | null |
+
+ASR partial：有。示例 partial 包括 `情`、`请`、`请解`、`请解释。阿`、`请解释。阿弥`、`请解释。阿弥陀`。
+
+ASR request_id：`8ae9dc6f6473490b9a8bf5370be17455`。
+
+ASR final：
+
+```text
+情解释阿弥陀佛是什么意思？
+```
+
+该 final text 已启动后续 session `eeacb3be-eeac-4762-b9a0-74efed6658dd`，状态 `done`，`final_reason=completed_answer`。
+
+full-chain session trace：
+
+| 指标 | 值 |
+| --- | ---: |
+| asr_ms | 5675 |
+| retrieval_ms | 667 |
+| retrieval_top_score | 0.7802826136942801 |
+| first_llm_chunk_ms | 2913 |
+| first_tts_chunk_ms | 4505 |
+| first_audio_byte_ms | 4505 |
+| done_ms | 8239 |
+| audio_bytes | 453120 |
+| audio_duration_ms | 14160 |
+| audio_stream_wall_ms | 3463 |
+| production_ratio | 4.089 |
+
+回答：
+
+```text
+阿弥陀佛是西方极乐世界教主的名号，代表无量光明与寿命。此佛号蕴含着救度众生的大愿，令念佛者得生净土。
+```
+
+阶段判断：
+
+- P1 已证明：v5 服务端可以边收 Opus、边解码 PCM、边喂 DashScope realtime ASR，并在 ASR final 后复用既有 RAG/LLM/TTS。
+- P1 没有做 partial 提前 LLM，符合当前边界。
+- 当前主要问题是 DashScope realtime ASR final 仍约 6.9 秒，并且 ASR final 首字仍有错词：`情解释` 应为 `请解释`。
+- 下一步应优先做 9 条同音频矩阵，对比旧完整 WAV ASR 与新 realtime ASR 的 `asr_ms/asr_final_ms`、错词率和稳定性，再决定是否进入板端迁移。
+
+验证：
+
+- `python -m pytest -q`：113 passed, 1 warning
+- 本地 uvicorn 已停止

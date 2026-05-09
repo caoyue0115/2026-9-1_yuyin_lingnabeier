@@ -238,38 +238,43 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
     if not session:
         return
     input_wav_path = session.get("input_wav_path")
-    if not input_wav_path:
+    pretranscribed_question = str(session.get("question_text") or "").strip()
+    if not input_wav_path and not pretranscribed_question:
         store.mark_failed(session_id, "asr_input_missing", "missing input_wav_path")
         return
 
     updated = store.update_session(
         session_id,
         status="running",
-        step="asr",
+        step="retrieval" if pretranscribed_question else "asr",
         started_at=session["created_at"],
     )
     if not updated:
         return
 
-    asr_started = time.perf_counter()
-    asr_result = transcribe_wav_result(input_wav_path)
-    updated["trace"]["asr_ms"] = _elapsed_ms(asr_started)
-    if asr_result.error_code or not asr_result.text:
-        store.mark_failed(
-            session_id,
-            asr_result.error_code or "asr_empty_text",
-            asr_result.error_message or "ASR failed",
-        )
-        store.fail_audio(session_id, asr_result.error_code or "asr_empty_text")
-        return
+    if pretranscribed_question:
+        question_text = pretranscribed_question
+        store.update_session(session_id, question_text=question_text, step="retrieval", trace=updated["trace"])
+    else:
+        asr_started = time.perf_counter()
+        asr_result = transcribe_wav_result(input_wav_path)
+        updated["trace"]["asr_ms"] = _elapsed_ms(asr_started)
+        if asr_result.error_code or not asr_result.text:
+            store.mark_failed(
+                session_id,
+                asr_result.error_code or "asr_empty_text",
+                asr_result.error_message or "ASR failed",
+            )
+            store.fail_audio(session_id, asr_result.error_code or "asr_empty_text")
+            return
 
-    question_text = asr_result.text
-    store.update_session(
-        session_id,
-        question_text=question_text,
-        step="retrieval",
-        trace=updated["trace"],
-    )
+        question_text = asr_result.text
+        store.update_session(
+            session_id,
+            question_text=question_text,
+            step="retrieval",
+            trace=updated["trace"],
+        )
 
     retrieval_started = time.perf_counter()
     try:
@@ -283,6 +288,7 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
         store.fail_audio(session_id, "retrieval_failed")
         return
     updated["trace"]["retrieval_ms"] = _elapsed_ms(retrieval_started)
+    updated["trace"]["retrieval_top_score"] = top_score
     threshold = settings.min_top_score if is_buddhist_question(question_text) else settings.min_top_score_no_keyword
     is_reject = (not references) or top_score < threshold
     store.update_session(session_id, step="llm", trace=updated["trace"])
@@ -545,3 +551,12 @@ def start_realtime_session(store: InMemoryRealtimeSessionStore, session_id: str)
         daemon=True,
     )
     thread.start()
+
+
+def start_realtime_session_from_question(
+    store: InMemoryRealtimeSessionStore,
+    session_id: str,
+    question_text: str,
+) -> None:
+    store.update_session(session_id, question_text=question_text)
+    start_realtime_session(store, session_id)

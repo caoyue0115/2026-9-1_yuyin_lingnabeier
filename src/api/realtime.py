@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -17,7 +18,8 @@ from src.providers.opus import (
     opus_available,
     parse_framed_v1_packets,
 )
-from src.services.realtime_session import start_realtime_session
+from src.providers.realtime_asr import RealtimeAsrError, RealtimeAsrEvent, create_realtime_asr_session
+from src.services.realtime_session import start_realtime_session, start_realtime_session_from_question
 from src.settings import settings
 from src.storage.files import save_pcm_as_wav
 from src.storage.realtime_store import InMemoryRealtimeSessionStore
@@ -53,6 +55,18 @@ async def _send_stream_error(websocket: WebSocket, error_code: str, *, close_cod
         }
     )
     await websocket.close(code=close_code)
+
+
+async def _send_asr_events(websocket: WebSocket, events: list[RealtimeAsrEvent]) -> None:
+    for event in events:
+        await websocket.send_json(
+            {
+                "type": event.event_type,
+                "text": event.text,
+                "elapsed_ms": event.elapsed_ms,
+                "request_id": event.request_id,
+            }
+        )
 
 
 def _decode_stream_opus_payload(
@@ -199,6 +213,11 @@ async def stream_opus_realtime_session(
     client_stream_duration_ms: int | None = None
     end_received_at: float | None = None
     run_session_after_stream = False
+    run_asr = False
+    run_full_chain = False
+    realtime_asr = None
+    first_pcm_to_asr_ms: int | None = None
+    asr_result = None
 
     try:
         with LibOpusDecoder(sample_rate=x_opus_sample_rate, channels=x_opus_channels) as decoder:
@@ -227,6 +246,10 @@ async def stream_opus_realtime_session(
                         decoded.extend(pcm_chunk)
                         opus_bytes += packet_bytes
                         expected_sequence = sequence + 1
+                        if realtime_asr is not None:
+                            if first_pcm_to_asr_ms is None:
+                                first_pcm_to_asr_ms = int(round((time.perf_counter() - accepted_at) * 1000))
+                            await _send_asr_events(websocket, realtime_asr.send_pcm_chunk(pcm_chunk))
                         last_frame_server_ms = int(round((time.perf_counter() - accepted_at) * 1000))
                         await websocket.send_json(
                             {
@@ -246,6 +269,23 @@ async def stream_opus_realtime_session(
                 except json.JSONDecodeError:
                     await _send_stream_error(websocket, "invalid_control_json", close_code=1003)
                     return
+                if control.get("type") == "start":
+                    if expected_sequence != 0 or decoded:
+                        await _send_stream_error(websocket, "invalid_start_order", close_code=1003)
+                        return
+                    run_asr = bool(control.get("run_asr", False))
+                    run_full_chain = bool(control.get("run_full_chain", False))
+                    if run_asr:
+                        try:
+                            realtime_asr = create_realtime_asr_session(
+                                sample_rate=x_opus_sample_rate,
+                                audio_format="pcm",
+                            )
+                            realtime_asr.start()
+                        except RealtimeAsrError as exc:
+                            await _send_stream_error(websocket, exc.code, close_code=1011)
+                            return
+                    continue
                 if control.get("type") != "end":
                     await _send_stream_error(websocket, "invalid_control_type", close_code=1003)
                     return
@@ -253,10 +293,15 @@ async def stream_opus_realtime_session(
                 if isinstance(raw_client_duration, int):
                     client_stream_duration_ms = raw_client_duration
                 run_session_after_stream = bool(control.get("run_session_after_stream", False))
+                if bool(control.get("run_full_chain", False)):
+                    run_full_chain = True
                 end_received_at = time.perf_counter()
                 break
     except OpusError as exc:
         await _send_stream_error(websocket, _opus_error_detail(exc))
+        return
+    except RealtimeAsrError as exc:
+        await _send_stream_error(websocket, exc.code, close_code=1011)
         return
 
     if not decoded:
@@ -273,6 +318,34 @@ async def stream_opus_realtime_session(
     compression_ratio = round(len(decoded) / opus_bytes, 3) if opus_bytes else None
     wav_path = save_pcm_as_wav(bytes(decoded), x_opus_sample_rate, 16, x_opus_channels)
     reconstruct_done_at = time.perf_counter()
+
+    if realtime_asr is not None:
+        asr_result = await asyncio.to_thread(realtime_asr.finish)
+        await _send_asr_events(websocket, realtime_asr.drain_events())
+        if asr_result.error_code or not asr_result.text:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "error_code": asr_result.error_code or "asr_empty_text",
+                    "error_message": asr_result.error_message or "ASR failed",
+                    "first_pcm_to_asr_ms": first_pcm_to_asr_ms,
+                    "first_asr_partial_ms": asr_result.first_asr_partial_ms,
+                    "asr_final_ms": asr_result.asr_final_ms,
+                    "request_id": asr_result.request_id,
+                }
+            )
+            await websocket.close(code=1011)
+            return
+        await websocket.send_json(
+            {
+                "type": "asr_final",
+                "text": asr_result.text,
+                "first_asr_partial_ms": asr_result.first_asr_partial_ms,
+                "asr_final_ms": asr_result.asr_final_ms,
+                "request_id": asr_result.request_id,
+            }
+        )
+
     record_end_to_reconstruct_done_ms = (
         int(round((reconstruct_done_at - end_received_at) * 1000))
         if end_received_at is not None
@@ -297,12 +370,44 @@ async def stream_opus_realtime_session(
         "opus_decode_ms": int(round(decode_seconds * 1000)),
         "reconstructed_audio_ms": reconstructed_audio_ms,
         "record_end_to_reconstruct_done_ms": record_end_to_reconstruct_done_ms,
+        "first_pcm_to_asr_ms": first_pcm_to_asr_ms,
+        "first_asr_partial_ms": asr_result.first_asr_partial_ms if asr_result is not None else None,
+        "asr_final_ms": asr_result.asr_final_ms if asr_result is not None else None,
+        "question_text": asr_result.text if asr_result is not None else None,
+        "realtime_asr_request_id": asr_result.request_id if asr_result is not None else None,
         "error_code": None,
         "error_message": None,
         "session_started": False,
     }
 
-    if run_session_after_stream:
+    if run_full_chain and asr_result is not None and asr_result.text:
+        session = store.create_session(device_id=x_device_id, input_wav_path=str(wav_path))
+        session_trace = session["trace"]
+        session_trace.update(
+            {
+                "uplink_opus_bytes": opus_bytes,
+                "uplink_pcm_bytes": len(decoded),
+                "uplink_compression_ratio": compression_ratio,
+                "uplink_frame_count": expected_sequence,
+                "opus_decode_ms": int(round(decode_seconds * 1000)),
+                "reconstructed_audio_ms": reconstructed_audio_ms,
+                "first_pcm_to_asr_ms": first_pcm_to_asr_ms,
+                "first_asr_partial_ms": asr_result.first_asr_partial_ms,
+                "asr_final_ms": asr_result.asr_final_ms,
+                "asr_ms": asr_result.asr_final_ms,
+                "realtime_asr_request_id": asr_result.request_id,
+            }
+        )
+        store.update_session(session["session_id"], trace=session_trace, question_text=asr_result.text)
+        start_realtime_session_from_question(store, session["session_id"], asr_result.text)
+        done_payload.update(
+            {
+                "session_started": True,
+                "session_id": session["session_id"],
+                "audio_stream_url": session["audio_stream_url"],
+            }
+        )
+    elif run_session_after_stream:
         session = store.create_session(device_id=x_device_id, input_wav_path=str(wav_path))
         session_trace = session["trace"]
         session_trace.update(

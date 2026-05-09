@@ -78,6 +78,36 @@ class _FakeWebSocket:
         self.close_code = code
 
 
+class _FakeStreamingAsrAdapter:
+    def __init__(self, *, text: str | None = "请解释阿弥陀佛是什么意思", error_code: str | None = None) -> None:
+        self.text = text
+        self.error_code = error_code
+        self.started = False
+        self.pcm_chunks: list[bytes] = []
+
+    def start(self) -> None:
+        self.started = True
+
+    def send_pcm_chunk(self, pcm_chunk: bytes) -> list:
+        self.pcm_chunks.append(pcm_chunk)
+        return []
+
+    def drain_events(self) -> list:
+        return []
+
+    def finish(self):
+        from src.providers.realtime_asr import RealtimeAsrResult
+
+        return RealtimeAsrResult(
+            text=self.text,
+            error_code=self.error_code,
+            error_message=self.error_code,
+            first_asr_partial_ms=33 if self.text else None,
+            asr_final_ms=123 if self.text else None,
+            request_id="req-test",
+        )
+
+
 class OpusUplinkProviderTests(unittest.TestCase):
     def test_parse_framed_v1_packets_rejects_truncated_packet(self) -> None:
         from src.providers.opus import OpusError, parse_framed_v1_packets
@@ -290,6 +320,152 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertEqual(websocket.sent_json[-1]["error_code"], "framed_packet_truncated")
         self.assertEqual(websocket.close_code, 1003)
 
+    def test_stream_opus_realtime_session_run_asr_sends_each_pcm_chunk_to_adapter(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 1920
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [{"type": "websocket.receive", "text": json.dumps({"type": "start", "run_asr": True})}]
+            + [
+                {"type": "websocket.receive", "bytes": _outer_frame(index, packet)}
+                for index, packet in enumerate(inner_packets)
+            ]
+            + [{"type": "websocket.receive", "text": json.dumps({"type": "end"})}]
+        )
+        fake_asr = _FakeStreamingAsrAdapter()
+
+        with mock.patch.object(realtime_api, "create_realtime_asr_session", return_value=fake_asr):
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        self.assertTrue(fake_asr.started)
+        self.assertEqual(len(fake_asr.pcm_chunks), len(inner_packets))
+        self.assertEqual(sum(len(chunk) for chunk in fake_asr.pcm_chunks), 3840)
+        payload_types = [payload["type"] for payload in websocket.sent_json]
+        self.assertIn("asr_final", payload_types)
+        done_payload = websocket.sent_json[-1]
+        self.assertEqual(done_payload["type"], "done")
+        self.assertEqual(done_payload["question_text"], "请解释阿弥陀佛是什么意思")
+        self.assertEqual(done_payload["asr_final_ms"], 123)
+        self.assertFalse(done_payload["session_started"])
+
+    def test_stream_opus_realtime_session_run_full_chain_starts_session_from_asr_text(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 960
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps({"type": "start", "run_asr": True, "run_full_chain": True}),
+                },
+                {"type": "websocket.receive", "bytes": _outer_frame(0, inner_packets[0])},
+                {"type": "websocket.receive", "text": json.dumps({"type": "end"})},
+            ]
+        )
+        fake_asr = _FakeStreamingAsrAdapter()
+
+        with mock.patch.object(
+            realtime_api, "create_realtime_asr_session", return_value=fake_asr
+        ), mock.patch.object(realtime_api, "start_realtime_session_from_question") as start_from_question:
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        done_payload = websocket.sent_json[-1]
+        self.assertEqual(done_payload["type"], "done")
+        self.assertTrue(done_payload["session_started"])
+        self.assertIn("session_id", done_payload)
+        start_from_question.assert_called_once()
+        self.assertEqual(start_from_question.call_args.args[2], "请解释阿弥陀佛是什么意思")
+
+    def test_stream_opus_realtime_session_reports_asr_failure(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 960
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [{"type": "websocket.receive", "text": json.dumps({"type": "start", "run_asr": True})}]
+            + [{"type": "websocket.receive", "bytes": _outer_frame(0, inner_packets[0])}]
+            + [{"type": "websocket.receive", "text": json.dumps({"type": "end"})}]
+        )
+        fake_asr = _FakeStreamingAsrAdapter(text=None, error_code="asr_request_failed")
+
+        with mock.patch.object(realtime_api, "create_realtime_asr_session", return_value=fake_asr):
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        self.assertEqual(websocket.sent_json[-1]["type"], "error")
+        self.assertEqual(websocket.sent_json[-1]["error_code"], "asr_request_failed")
+        self.assertEqual(websocket.close_code, 1011)
+
 
 class OpusUplinkSmokeScriptTests(unittest.TestCase):
     def test_load_wav_pcm_request_requires_16k_16bit_mono(self) -> None:
@@ -341,3 +517,13 @@ class OpusUplinkSmokeScriptTests(unittest.TestCase):
         self.assertEqual(metrics["reconstructed_audio_ms"], 120)
         self.assertGreater(metrics["uplink_opus_bytes"], 0)
         self.assertGreater(len(messages[0]), 8)
+
+    def test_build_start_control_enables_asr_and_full_chain(self) -> None:
+        module = _load_opus_uplink_stream_script()
+
+        payload = module.build_start_control(run_asr=True, run_full_chain=True)
+
+        self.assertEqual(
+            json.loads(payload),
+            {"type": "start", "run_asr": True, "run_full_chain": True},
+        )

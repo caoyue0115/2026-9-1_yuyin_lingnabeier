@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+import httpx
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -70,6 +72,52 @@ def build_stream_headers(*, frame_ms: int, original_pcm_bytes: int) -> dict[str,
     }
 
 
+def build_start_control(*, run_asr: bool, run_full_chain: bool) -> str:
+    return json.dumps(
+        {
+            "type": "start",
+            "run_asr": run_asr,
+            "run_full_chain": run_full_chain,
+        }
+    )
+
+
+def poll_session_until_terminal(
+    session_id: str,
+    *,
+    base_url: str,
+    interval_seconds: float,
+    max_polls: int,
+    timeout: float,
+) -> dict:
+    for _ in range(max_polls):
+        response = httpx.get(f"{base_url}/api/v3/realtime/sessions/{session_id}", timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if payload["status"] in {"done", "failed"}:
+            return payload
+        time.sleep(interval_seconds)
+    raise TimeoutError(f"session {session_id} did not finish after {max_polls} polls")
+
+
+def _print_server_payload(payload: dict, *, started: float, extra: dict | None = None) -> None:
+    output = dict(payload)
+    output["event"] = output.get("type")
+    output["client_elapsed_ms"] = int(round((time.perf_counter() - started) * 1000))
+    if extra:
+        output.update(extra)
+    print(json.dumps(output, ensure_ascii=False))
+
+
+def _recv_until_ack(websocket, *, started: float, frame_index: int) -> dict:
+    while True:
+        raw_payload = websocket.recv()
+        payload = json.loads(raw_payload)
+        _print_server_payload(payload, started=started, extra={"frame_index": frame_index} if payload.get("type") == "ack" else None)
+        if payload.get("type") in {"ack", "error"}:
+            return payload
+
+
 def run_stream_smoke(
     audio_path: str | Path,
     *,
@@ -78,6 +126,11 @@ def run_stream_smoke(
     realtime: bool,
     timeout: float,
     run_session_after_stream: bool,
+    run_asr: bool,
+    run_full_chain: bool,
+    poll_interval: float,
+    max_polls: int,
+    status_timeout: float,
 ) -> dict:
     from websocket import create_connection
 
@@ -107,14 +160,11 @@ def run_stream_smoke(
         header=[f"{key}: {value}" for key, value in headers.items()],
     )
     try:
+        if run_asr or run_full_chain:
+            websocket.send(build_start_control(run_asr=run_asr or run_full_chain, run_full_chain=run_full_chain))
         for frame_index, message in enumerate(messages):
             websocket.send_binary(message)
-            raw_ack = websocket.recv()
-            ack = json.loads(raw_ack)
-            ack["event"] = "ack"
-            ack["frame_index"] = frame_index
-            ack["client_elapsed_ms"] = int(round((time.perf_counter() - started) * 1000))
-            print(json.dumps(ack, ensure_ascii=False))
+            ack = _recv_until_ack(websocket, started=started, frame_index=frame_index)
             last_payload = ack
             if ack.get("type") == "error":
                 break
@@ -128,15 +178,14 @@ def run_stream_smoke(
                     "type": "end",
                     "client_stream_duration_ms": int(round((stream_done_at - started) * 1000)),
                     "run_session_after_stream": run_session_after_stream,
+                    "run_full_chain": run_full_chain,
                 }
             )
         )
         while True:
             raw_payload = websocket.recv()
             payload = json.loads(raw_payload)
-            payload["event"] = payload.get("type")
-            payload["client_elapsed_ms"] = int(round((time.perf_counter() - started) * 1000))
-            print(json.dumps(payload, ensure_ascii=False))
+            _print_server_payload(payload, started=started)
             last_payload = payload
             if payload.get("type") in {"done", "error"}:
                 break
@@ -145,6 +194,35 @@ def run_stream_smoke(
 
     if last_payload is None:
         raise RuntimeError("stream ended without server payload")
+    if run_full_chain and last_payload.get("type") == "done" and last_payload.get("session_id"):
+        status = poll_session_until_terminal(
+            last_payload["session_id"],
+            base_url=base_url,
+            interval_seconds=poll_interval,
+            max_polls=max_polls,
+            timeout=status_timeout,
+        )
+        print(
+            json.dumps(
+                {
+                    "event": "status",
+                    "session_id": status["session_id"],
+                    "status": status["status"],
+                    "step": status.get("step"),
+                    "final_reason": status.get("final_reason"),
+                    "question_text": status.get("question_text"),
+                    "answer_text": status.get("answer_text"),
+                    "error_code": status.get("error_code"),
+                    "error_message": status.get("error_message"),
+                    "trace": status.get("trace"),
+                },
+                ensure_ascii=False,
+            )
+        )
+        if status["status"] == "failed":
+            last_payload = dict(last_payload)
+            last_payload["type"] = "error"
+            last_payload["error_code"] = status.get("error_code")
     return last_payload
 
 
@@ -154,7 +232,12 @@ def main() -> None:
     parser.add_argument("--base-url", default=BASE_URL)
     parser.add_argument("--frame-ms", type=int, default=60)
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--status-timeout", type=float, default=10.0)
+    parser.add_argument("--poll-interval", type=float, default=0.3)
+    parser.add_argument("--max-polls", type=int, default=80)
     parser.add_argument("--run-session-after-stream", action="store_true")
+    parser.add_argument("--run-asr", action="store_true")
+    parser.add_argument("--run-full-chain", action="store_true")
     parser.add_argument("--realtime", dest="realtime", action="store_true")
     parser.add_argument("--no-realtime", dest="realtime", action="store_false")
     parser.set_defaults(realtime=True)
@@ -167,6 +250,11 @@ def main() -> None:
         realtime=args.realtime,
         timeout=args.timeout,
         run_session_after_stream=args.run_session_after_stream,
+        run_asr=args.run_asr,
+        run_full_chain=args.run_full_chain,
+        poll_interval=args.poll_interval,
+        max_polls=args.max_polls,
+        status_timeout=args.status_timeout,
     )
     if final_payload.get("type") == "error":
         raise SystemExit(1)
