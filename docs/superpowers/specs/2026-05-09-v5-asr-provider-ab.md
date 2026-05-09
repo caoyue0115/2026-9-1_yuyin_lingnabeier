@@ -342,3 +342,64 @@ python scripts/v5_full_chain_repeat_eval.py --audio-dir /tmp/volc_asr_eval --bas
 - 固定后段后，Volcengine 没有明确端到端均值延迟优势：mean 首音频比 DashScope 慢约 `299.2ms`，mean total 慢约 `255.1ms`；但 p95 total 略优。
 - 因为 `answer_chars` 和 `audio_duration_ms` 已接近，本轮不能把 full-chain 差异归因于回答更长；主要剩余变量是 provider 连接、ASR final 分布和 LLM/TTS 抖动。
 - 建议：Volcengine 已足以作为默认 ASR provider 候选，尤其在佛学专有词准确率优先时；但切换默认前应通过配置开关灰度，并保留 DashScope fallback。端到端“明显更快”暂不成立。
+
+## P2.4 配置开关与 fallback
+
+本阶段新增灰度切换配置，但不改变代码默认值：
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `ASR_PROVIDER` | `dashscope` | 未传 start config provider 时使用的默认 ASR provider |
+| `ASR_FALLBACK_PROVIDER` | 空 | 主 provider 失败、超时或空文本后的 fallback provider；可设为 `dashscope` 或 `none` |
+
+WebSocket start config 优先级：
+
+1. 显式 `asr_provider` 优先。
+2. 未传 `asr_provider` 时使用 `ASR_PROVIDER`。
+3. 显式 `asr_fallback_provider` 优先。
+4. 未传 fallback 时使用 `ASR_FALLBACK_PROVIDER`。
+5. `none` 或空值表示禁用 fallback。
+
+fallback 第一版是 end 后低风险 fallback：主 provider 仍按 streaming 接收 PCM；如果主 provider 失败或返回空文本，服务端用已缓存 PCM 在 end 后重跑 fallback provider。该路径保证可用性，但不作为实时低延迟数据使用。
+
+新增 trace 字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `asr_primary_provider` | 主 provider |
+| `asr_fallback_provider` | fallback provider |
+| `asr_provider_used` | 最终使用的 provider |
+| `asr_fallback_used` | 是否触发 fallback |
+| `asr_primary_error_code` | 主 provider 错误码 |
+| `asr_primary_error_message` | 主 provider 错误摘要 |
+
+脚本参数更新：
+
+```bash
+python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --run-asr --run-full-chain --answer-mode short
+python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --run-asr --run-full-chain --asr-provider dashscope --answer-mode short
+python scripts/v5_asr_only_repeat_eval.py --asr-fallback-provider dashscope
+python scripts/v5_full_chain_repeat_eval.py --asr-fallback-provider dashscope
+```
+
+其中第一条不传 `--asr-provider`，用于验证服务端环境默认；第二条用于验证 start config override。
+
+### P2.4 单条实测
+
+输入：
+
+```text
+/tmp/volc_asr_eval/amitabha.wav
+```
+
+| case | provider_used | fallback_used | question_text | asr_final_abs_ms | first_audio_byte_abs_ms | done_abs_ms | provider_start_duration_ms |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| env default | volcengine | false | 请解释阿弥陀佛是什么意思？ | 5487 | 10368 | 14993 | 1773 |
+| start override | dashscope | false | 情解释阿弥陀佛是什么意思？ | 5494 | 10682 | 15959 | 61 |
+
+验证结论：
+
+- 本地 `.env` 默认 provider 生效，未显式传 provider 时走 `volcengine`。
+- start config override 生效，显式 `--asr-provider dashscope` 时走 `dashscope`。
+- 两条均未触发 fallback。
+- DashScope adapter 已修正为只检查 DashScope key/model，不再因全局默认 `ASR_PROVIDER=volcengine` 被误判为未配置。

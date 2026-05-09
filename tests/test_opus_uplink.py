@@ -88,6 +88,16 @@ def _load_v5_full_chain_repeat_eval_script():
     return module
 
 
+def _load_v5_real_voice_eval_script():
+    script_path = ROOT / "scripts" / "v5_real_voice_eval.py"
+    spec = importlib.util.spec_from_file_location("v5_real_voice_eval", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["v5_real_voice_eval"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class _FakeWebSocket:
     def __init__(self, incoming: list[dict]) -> None:
         self._incoming = list(incoming)
@@ -245,6 +255,36 @@ class OpusUplinkProviderTests(unittest.TestCase):
             session.start()
 
         self.assertGreaterEqual(time.perf_counter() - session._started_at, 0.025)
+
+    def test_dashscope_realtime_adapter_ignores_global_default_provider(self) -> None:
+        from src.providers import realtime_asr
+
+        class _FakeRecognitionCallback:
+            pass
+
+        class _FakeRecognition:
+            def __init__(self, **_kwargs) -> None:
+                return None
+
+        fake_dashscope_audio_asr = types.SimpleNamespace(RecognitionCallback=_FakeRecognitionCallback)
+
+        with mock.patch.dict(
+            sys.modules,
+            {"dashscope.audio.asr": fake_dashscope_audio_asr},
+        ), mock.patch.object(
+            realtime_asr.settings, "asr_provider", "volcengine"
+        ), mock.patch.object(
+            realtime_asr.settings, "dashscope_api_key", "dash-key"
+        ), mock.patch.object(
+            realtime_asr.settings, "asr_model", "paraformer-realtime-v2"
+        ), mock.patch.object(
+            realtime_asr.wav_asr, "_configure_dashscope_sdk"
+        ), mock.patch.object(
+            realtime_asr.wav_asr, "_load_recognition_class", return_value=_FakeRecognition
+        ):
+            session = realtime_asr.DashScopeRealtimeAsrSession(sample_rate=16000)
+
+        self.assertIsInstance(session, realtime_asr.DashScopeRealtimeAsrSession)
 
 
 class OpusUplinkEndpointTests(unittest.TestCase):
@@ -734,6 +774,104 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertEqual(factory.call_args.kwargs["provider"], "dashscope")
         self.assertEqual(websocket.sent_json[-1]["asr_provider"], "dashscope")
 
+    def test_stream_opus_realtime_session_uses_env_provider_when_start_omits_provider(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 960
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [
+                {"type": "websocket.receive", "text": json.dumps({"type": "start", "run_asr": True})},
+                {"type": "websocket.receive", "bytes": _outer_frame(0, inner_packets[0])},
+                {"type": "websocket.receive", "text": json.dumps({"type": "end"})},
+            ]
+        )
+        fake_asr = _FakeStreamingAsrAdapter(request_id="volc-default")
+
+        with mock.patch.object(realtime_api.settings, "asr_provider", "volcengine"), mock.patch.object(
+            realtime_api, "create_realtime_asr_session", return_value=fake_asr
+        ) as factory:
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        factory.assert_called_once()
+        self.assertEqual(factory.call_args.kwargs["provider"], "volcengine")
+        self.assertEqual(websocket.sent_json[-1]["asr_provider"], "volcengine")
+        self.assertEqual(websocket.sent_json[-1]["asr_provider_used"], "volcengine")
+
+    def test_stream_opus_realtime_session_start_provider_overrides_env_provider(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 960
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {"type": "start", "run_asr": True, "asr_provider": "dashscope"}
+                    ),
+                },
+                {"type": "websocket.receive", "bytes": _outer_frame(0, inner_packets[0])},
+                {"type": "websocket.receive", "text": json.dumps({"type": "end"})},
+            ]
+        )
+        fake_asr = _FakeStreamingAsrAdapter(request_id="dash-override")
+
+        with mock.patch.object(realtime_api.settings, "asr_provider", "volcengine"), mock.patch.object(
+            realtime_api, "create_realtime_asr_session", return_value=fake_asr
+        ) as factory:
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        factory.assert_called_once()
+        self.assertEqual(factory.call_args.kwargs["provider"], "dashscope")
+        self.assertEqual(websocket.sent_json[-1]["asr_provider"], "dashscope")
+
     def test_stream_opus_realtime_session_selects_volcengine_provider(self) -> None:
         from src.api import realtime as realtime_api
         from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
@@ -824,6 +962,86 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertEqual(websocket.sent_json[-1]["error_code"], "asr_request_failed")
         self.assertEqual(websocket.close_code, 1011)
 
+    def test_stream_opus_realtime_session_fallback_on_empty_text_continues_full_chain(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 1920
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {
+                            "type": "start",
+                            "run_asr": True,
+                            "run_full_chain": True,
+                            "asr_provider": "volcengine",
+                            "asr_fallback_provider": "dashscope",
+                        }
+                    ),
+                }
+            ]
+            + [
+                {"type": "websocket.receive", "bytes": _outer_frame(index, packet)}
+                for index, packet in enumerate(inner_packets)
+            ]
+            + [{"type": "websocket.receive", "text": json.dumps({"type": "end"})}]
+        )
+        primary_asr = _FakeStreamingAsrAdapter(text=None, error_code="volcengine_asr_empty_text")
+        fallback_asr = _FakeStreamingAsrAdapter(
+            text="请解释阿弥陀佛是什么意思",
+            request_id="dash-fallback",
+        )
+
+        with mock.patch.object(
+            realtime_api,
+            "create_realtime_asr_session",
+            side_effect=[primary_asr, fallback_asr],
+        ) as factory, mock.patch.object(
+            realtime_api, "start_realtime_session_from_question"
+        ) as start_from_question:
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        self.assertEqual(factory.call_count, 2)
+        self.assertEqual(factory.call_args_list[0].kwargs["provider"], "volcengine")
+        self.assertEqual(factory.call_args_list[1].kwargs["provider"], "dashscope")
+        self.assertGreater(sum(len(chunk) for chunk in fallback_asr.pcm_chunks), 0)
+        done_payload = websocket.sent_json[-1]
+        self.assertEqual(done_payload["type"], "done")
+        self.assertTrue(done_payload["session_started"])
+        self.assertEqual(done_payload["asr_primary_provider"], "volcengine")
+        self.assertEqual(done_payload["asr_fallback_provider"], "dashscope")
+        self.assertEqual(done_payload["asr_provider_used"], "dashscope")
+        self.assertTrue(done_payload["asr_fallback_used"])
+        self.assertEqual(done_payload["asr_primary_error_code"], "volcengine_asr_empty_text")
+        self.assertEqual(done_payload["asr_log_id"], "dash-fallback")
+        start_from_question.assert_called_once()
+        self.assertEqual(start_from_question.call_args.args[2], "请解释阿弥陀佛是什么意思")
+
 
 class OpusUplinkSmokeScriptTests(unittest.TestCase):
     def test_load_wav_pcm_request_requires_16k_16bit_mono(self) -> None:
@@ -897,6 +1115,25 @@ class OpusUplinkSmokeScriptTests(unittest.TestCase):
         )
 
         self.assertEqual(json.loads(payload)["answer_mode"], "short")
+
+    def test_build_start_control_omits_provider_for_server_env_default(self) -> None:
+        module = _load_opus_uplink_stream_script()
+
+        payload = module.build_start_control(run_asr=True, run_full_chain=True, asr_provider=None)
+
+        self.assertNotIn("asr_provider", json.loads(payload))
+
+    def test_build_start_control_includes_fallback_provider_when_requested(self) -> None:
+        module = _load_opus_uplink_stream_script()
+
+        payload = module.build_start_control(
+            run_asr=True,
+            run_full_chain=True,
+            asr_provider="volcengine",
+            asr_fallback_provider="dashscope",
+        )
+
+        self.assertEqual(json.loads(payload)["asr_fallback_provider"], "dashscope")
 
 
 class V5StreamingLatencyEvalScriptTests(unittest.TestCase):
@@ -1006,6 +1243,13 @@ class V5AsrOnlyRepeatEvalScriptTests(unittest.TestCase):
         self.assertEqual(args.frame_ms, 60)
         self.assertFalse(args.realtime)
 
+    def test_parser_accepts_fallback_provider(self) -> None:
+        module = _load_v5_asr_only_repeat_eval_script()
+
+        args = module.build_parser().parse_args(["--asr-fallback-provider", "dashscope"])
+
+        self.assertEqual(args.asr_fallback_provider, "dashscope")
+
     def test_run_asr_only_case_does_not_enable_full_chain(self) -> None:
         module = _load_v5_asr_only_repeat_eval_script()
         calls: list[dict] = []
@@ -1041,6 +1285,7 @@ class V5AsrOnlyRepeatEvalScriptTests(unittest.TestCase):
         self.assertEqual(calls[0]["run_asr"], True)
         self.assertEqual(calls[0]["run_full_chain"], False)
         self.assertEqual(calls[0]["asr_provider"], "dashscope")
+        self.assertEqual(calls[0]["asr_fallback_provider"], None)
         self.assertEqual(record["repeat_index"], 2)
         self.assertTrue(record["term_hit"])
         self.assertEqual(record["question_text"], "请解释阿弥陀佛是什么意思？")
@@ -1143,6 +1388,13 @@ class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
         self.assertEqual(args.answer_mode, "short")
         self.assertFalse(args.realtime)
 
+    def test_parser_accepts_fallback_provider(self) -> None:
+        module = _load_v5_full_chain_repeat_eval_script()
+
+        args = module.build_parser().parse_args(["--asr-fallback-provider", "dashscope"])
+
+        self.assertEqual(args.asr_fallback_provider, "dashscope")
+
     def test_run_full_chain_case_enables_full_chain_and_short_mode(self) -> None:
         module = _load_v5_full_chain_repeat_eval_script()
         calls: list[dict] = []
@@ -1195,6 +1447,7 @@ class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
         self.assertEqual(calls[0]["run_asr"], True)
         self.assertEqual(calls[0]["run_full_chain"], True)
         self.assertEqual(calls[0]["asr_provider"], "volcengine")
+        self.assertEqual(calls[0]["asr_fallback_provider"], None)
         self.assertEqual(calls[0]["answer_mode"], "short")
         self.assertTrue(record["term_hit"])
         self.assertEqual(record["answer_mode"], "short")
@@ -1271,3 +1524,37 @@ class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
         self.assertIn("p95_done_abs_ms", content)
         self.assertIn("mean_answer_chars", content)
         self.assertIn("mean_audio_duration_ms", content)
+
+
+class V5RealVoiceEvalScriptTests(unittest.TestCase):
+    def test_parser_defaults_to_real_voice_tmp_dir_and_short_mode(self) -> None:
+        module = _load_v5_real_voice_eval_script()
+
+        args = module.build_parser().parse_args([])
+
+        self.assertEqual(args.audio_dir, "/tmp/v5_real_voice_eval")
+        self.assertEqual(args.answer_mode, "short")
+        self.assertEqual(args.providers, "dashscope,volcengine")
+
+    def test_discover_cases_accepts_numbered_real_voice_files(self) -> None:
+        module = _load_v5_real_voice_eval_script()
+        tmp_dir = Path(tempfile.mkdtemp())
+        try:
+            (tmp_dir / "amitabha_01.wav").write_bytes(b"wav")
+            (tmp_dir / "amitabha_02.wav").write_bytes(b"wav")
+            (tmp_dir / "huiyuan_01.wav").write_bytes(b"wav")
+
+            cases = module.discover_real_voice_cases(tmp_dir)
+        finally:
+            for path in tmp_dir.glob("*"):
+                path.unlink(missing_ok=True)
+            tmp_dir.rmdir()
+
+        self.assertEqual(
+            [(case["term"], case["speaker_index"], case["audio_path"].name) for case in cases],
+            [
+                ("阿弥陀佛", 1, "amitabha_01.wav"),
+                ("阿弥陀佛", 2, "amitabha_02.wav"),
+                ("慧远", 1, "huiyuan_01.wav"),
+            ],
+        )

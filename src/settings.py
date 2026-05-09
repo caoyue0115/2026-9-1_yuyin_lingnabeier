@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_max_tokens: int = 256
     asr_provider: str = "dashscope"
+    asr_fallback_provider: str = ""
     asr_model: str = "paraformer-realtime-v2"
     asr_timeout_seconds: float = 30.0
     asr_language_hints: str = "zh"

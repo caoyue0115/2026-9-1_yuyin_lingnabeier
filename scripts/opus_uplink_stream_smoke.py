@@ -76,15 +76,19 @@ def build_start_control(
     *,
     run_asr: bool,
     run_full_chain: bool,
-    asr_provider: str = "dashscope",
+    asr_provider: str | None = None,
+    asr_fallback_provider: str | None = None,
     answer_mode: str = "default",
 ) -> str:
     payload = {
         "type": "start",
         "run_asr": run_asr,
         "run_full_chain": run_full_chain,
-        "asr_provider": asr_provider,
     }
+    if asr_provider:
+        payload["asr_provider"] = asr_provider
+    if asr_fallback_provider:
+        payload["asr_fallback_provider"] = asr_fallback_provider
     if answer_mode and answer_mode != "default":
         payload["answer_mode"] = answer_mode
     return json.dumps(payload)
@@ -174,11 +178,12 @@ def run_stream_smoke(
     run_session_after_stream: bool,
     run_asr: bool,
     run_full_chain: bool,
-    asr_provider: str,
+    asr_provider: str | None,
     poll_interval: float,
     max_polls: int,
     status_timeout: float,
     answer_mode: str = "default",
+    asr_fallback_provider: str | None = None,
     emit_trace: bool = True,
 ) -> dict:
     from websocket import create_connection
@@ -198,6 +203,7 @@ def run_stream_smoke(
                     "frame_ms": frame_ms,
                     "realtime": realtime,
                     "asr_provider": asr_provider if run_asr or run_full_chain else None,
+                    "asr_fallback_provider": asr_fallback_provider if run_asr or run_full_chain else None,
                     "local_uplink": local_metrics,
                 },
                 ensure_ascii=False,
@@ -221,6 +227,7 @@ def run_stream_smoke(
                     run_asr=run_asr or run_full_chain,
                     run_full_chain=run_full_chain,
                     asr_provider=asr_provider,
+                    asr_fallback_provider=asr_fallback_provider,
                     answer_mode=answer_mode,
                 )
             )
@@ -322,7 +329,8 @@ def main() -> None:
     parser.add_argument("--run-session-after-stream", action="store_true")
     parser.add_argument("--run-asr", action="store_true")
     parser.add_argument("--run-full-chain", action="store_true")
-    parser.add_argument("--asr-provider", choices=["dashscope", "volcengine"], default="dashscope")
+    parser.add_argument("--asr-provider", choices=["dashscope", "volcengine"], default=None)
+    parser.add_argument("--asr-fallback-provider", choices=["dashscope", "volcengine", "none"], default=None)
     parser.add_argument("--answer-mode", choices=["default", "short"], default="default")
     parser.add_argument("--realtime", dest="realtime", action="store_true")
     parser.add_argument("--no-realtime", dest="realtime", action="store_false")
@@ -339,6 +347,7 @@ def main() -> None:
         run_asr=args.run_asr,
         run_full_chain=args.run_full_chain,
         asr_provider=args.asr_provider,
+        asr_fallback_provider=None if args.asr_fallback_provider == "none" else args.asr_fallback_provider,
         answer_mode=args.answer_mode,
         poll_interval=args.poll_interval,
         max_polls=args.max_polls,

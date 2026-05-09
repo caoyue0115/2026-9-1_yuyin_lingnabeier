@@ -90,6 +90,10 @@ def _is_sentence_final(result: Any, sentence: Any) -> bool:
     return sentence.get("end_time") is not None
 
 
+def _is_dashscope_realtime_configured() -> bool:
+    return bool(settings.dashscope_api_key and settings.asr_model)
+
+
 class _StreamingRecognitionCallback:
     def __init__(self) -> None:
         from dashscope.audio.asr import RecognitionCallback
@@ -199,7 +203,7 @@ class _StreamingRecognitionCallback:
 
 class DashScopeRealtimeAsrSession:
     def __init__(self, *, sample_rate: int, audio_format: str = "pcm") -> None:
-        if not wav_asr._is_asr_configured():
+        if not _is_dashscope_realtime_configured():
             raise RealtimeAsrError("asr_not_configured", "DashScope ASR is not fully configured")
         try:
             wav_asr._configure_dashscope_sdk()

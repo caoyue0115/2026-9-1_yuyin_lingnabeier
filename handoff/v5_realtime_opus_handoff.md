@@ -801,3 +801,90 @@ P2.3 判断：
 - 延迟上，固定后段后 Volcengine 没有取得明确端到端均值优势：mean 首音频比 DashScope 慢约 `299.2ms`，mean total 慢约 `255.1ms`；但 p95 total 略优。
 - 因为输出长度已接近，首音频/total 的小差异更可能来自 provider 连接、ASR final 分布和 LLM/TTS 抖动，而不是回答变长。
 - 当前证据足以支持“Volcengine 是默认 ASR provider 候选，准确率明显更好”；但不应宣称“端到端明显更快”。建议下一步用配置开关灰度切换，并保留 DashScope fallback，再跑真实人声/板端录音矩阵。
+
+## 2026-05-09 P2.4：配置开关与 DashScope fallback
+
+目标：把 P2.3 的结论落成可灰度的配置，不在代码层硬切默认 provider。代码默认仍安全使用 `dashscope`；v5 本地 `.env` 已设置非密钥开关：
+
+```text
+ASR_PROVIDER=volcengine
+ASR_FALLBACK_PROVIDER=dashscope
+```
+
+`.env` 已由 `.gitignore` 忽略，未入库。
+
+### 配置规则
+
+| 来源 | 规则 |
+| --- | --- |
+| 代码默认 | `ASR_PROVIDER=dashscope`，`ASR_FALLBACK_PROVIDER` 为空 |
+| 本地/环境变量 | 可设置 `ASR_PROVIDER=volcengine`、`ASR_FALLBACK_PROVIDER=dashscope` |
+| WebSocket start config | 显式 `asr_provider` 优先于环境变量 |
+| WebSocket fallback config | 显式 `asr_fallback_provider` 优先；`none` 表示禁用 fallback |
+
+`WS /api/v5/realtime/opus-stream` 未传 `asr_provider` 时会读取 `settings.asr_provider`。如果显式传入 `asr_provider`，则覆盖环境默认。
+
+### fallback 口径
+
+第一版 fallback 只在 end 后发生，目的是保证可用性，不宣称仍保持实时低延迟：
+
+1. 主 provider 真 streaming 接收 PCM。
+2. 若主 provider start 失败、ready 超时、finish 失败或返回空文本，记录 primary error。
+3. 若配置了 fallback provider，则用服务端已缓存/重建的 PCM 重新送入 fallback provider。
+4. fallback 成功后继续现有 RAG/LLM/TTS full-chain。
+5. fallback 失败且无可用文本时返回明确 error。
+
+summary/trace 新增字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `asr_primary_provider` | 本次主 provider |
+| `asr_fallback_provider` | 配置的 fallback provider |
+| `asr_provider_used` | 最终提供 question_text 的 provider |
+| `asr_fallback_used` | 是否实际触发 fallback |
+| `asr_primary_error_code` | 主 provider 错误码 |
+| `asr_primary_error_message` | 主 provider 错误摘要 |
+
+### 脚本更新
+
+- `scripts/opus_uplink_stream_smoke.py`
+  - `--asr-provider` 改为可选；不传则走服务端环境默认。
+  - 新增 `--asr-fallback-provider dashscope|volcengine|none`。
+- `scripts/v5_asr_only_repeat_eval.py`
+  - 新增 `--asr-fallback-provider`，JSONL 记录 fallback 字段。
+- `scripts/v5_full_chain_repeat_eval.py`
+  - 新增 `--asr-fallback-provider`，JSONL 记录 fallback 字段。
+- `scripts/v5_real_voice_eval.py`
+  - 新增真实人声/板端录音矩阵脚本，默认读取 `/tmp/v5_real_voice_eval/`。
+
+真实人声/板端录音规范见：
+
+```text
+docs/superpowers/specs/2026-05-09-v5-real-voice-eval.md
+```
+
+### P2.4 单条 smoke
+
+使用同一条输入：
+
+```text
+/tmp/volc_asr_eval/amitabha.wav
+```
+
+需要跑两条：
+
+```bash
+python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url http://127.0.0.1:8010 --frame-ms 60 --realtime --run-asr --run-full-chain --answer-mode short
+python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url http://127.0.0.1:8010 --frame-ms 60 --realtime --run-asr --run-full-chain --asr-provider dashscope --answer-mode short
+```
+
+第一条不显式传 provider，用本地 `.env` 默认 `volcengine`；第二条验证 start config override 到 `dashscope`。
+
+本轮实测结果：
+
+| case | provider_used | fallback_used | question_text | asr_final_abs_ms | first_audio_byte_abs_ms | done_abs_ms | provider_start_duration_ms |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| env default | volcengine | false | 请解释阿弥陀佛是什么意思？ | 5487 | 10368 | 14993 | 1773 |
+| start override | dashscope | false | 情解释阿弥陀佛是什么意思？ | 5494 | 10682 | 15959 | 61 |
+
+补充修复：DashScope realtime adapter 以前复用了全局 `settings.asr_provider == "dashscope"` 作为配置判断。P2.4 后本地 `.env` 默认 provider 是 `volcengine`，这会导致显式 `--asr-provider dashscope` 被误判为 `asr_not_configured`。已改为 DashScope adapter 只检查 DashScope API key 与 ASR model，不再依赖全局默认 provider。

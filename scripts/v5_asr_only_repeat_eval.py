@@ -84,6 +84,12 @@ def build_asr_only_record(
     )
     record: dict[str, Any] = {
         "provider": done_payload.get("asr_provider") or provider,
+        "asr_primary_provider": done_payload.get("asr_primary_provider") or provider,
+        "asr_fallback_provider": done_payload.get("asr_fallback_provider"),
+        "asr_provider_used": done_payload.get("asr_provider_used") or done_payload.get("asr_provider") or provider,
+        "asr_fallback_used": bool(done_payload.get("asr_fallback_used")),
+        "asr_primary_error_code": done_payload.get("asr_primary_error_code"),
+        "asr_primary_error_message": done_payload.get("asr_primary_error_message"),
         "term": term,
         "repeat_index": repeat_index,
         "audio_path": audio_path,
@@ -110,6 +116,12 @@ def build_error_record(
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "provider": provider,
+        "asr_primary_provider": provider,
+        "asr_fallback_provider": None,
+        "asr_provider_used": None,
+        "asr_fallback_used": False,
+        "asr_primary_error_code": None,
+        "asr_primary_error_message": None,
         "term": term,
         "repeat_index": repeat_index,
         "audio_path": audio_path,
@@ -135,6 +147,7 @@ def run_asr_only_case(
     frame_ms: int,
     realtime: bool,
     timeout: float,
+    asr_fallback_provider: str | None = None,
 ) -> dict[str, Any]:
     try:
         done_payload = run_stream_smoke(
@@ -147,6 +160,7 @@ def run_asr_only_case(
             run_asr=True,
             run_full_chain=False,
             asr_provider=provider,
+            asr_fallback_provider=asr_fallback_provider,
             poll_interval=0.3,
             max_polls=1,
             status_timeout=timeout,
@@ -196,6 +210,9 @@ def run_eval(args: argparse.Namespace) -> list[dict[str, Any]]:
                         frame_ms=args.frame_ms,
                         realtime=args.realtime,
                         timeout=args.timeout,
+                        asr_fallback_provider=None
+                        if args.asr_fallback_provider == "none"
+                        else args.asr_fallback_provider,
                     )
                 )
     return records
@@ -315,14 +332,18 @@ def write_markdown(records: list[dict[str, Any]], markdown_path: str | Path) -> 
             "",
             "## Details",
             "",
-            "| provider | term | repeat | hit | recognized_text | first_frame_server_abs_ms | provider_start_duration_ms | first_pcm_sent_to_provider_abs_ms | first_provider_result_abs_ms | first_asr_partial_abs_ms | asr_final_abs_ms | error_code | provider_log_id |",
-            "| --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+            "| provider | primary_provider | fallback_provider | provider_used | fallback_used | term | repeat | hit | recognized_text | first_frame_server_abs_ms | provider_start_duration_ms | first_pcm_sent_to_provider_abs_ms | first_provider_result_abs_ms | first_asr_partial_abs_ms | asr_final_abs_ms | primary_error | error_code | provider_log_id |",
+            "| --- | --- | --- | --- | --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
         ]
     )
     for record in records:
         lines.append(
-            "| {provider} | {term} | {repeat} | {hit} | {text} | {first_frame} | {start} | {sent} | {first_result} | {partial} | {final} | {error} | {log_id} |".format(
+            "| {provider} | {primary} | {fallback_provider} | {provider_used} | {fallback_used} | {term} | {repeat} | {hit} | {text} | {first_frame} | {start} | {sent} | {first_result} | {partial} | {final} | {primary_error} | {error} | {log_id} |".format(
                 provider=record.get("provider") or "",
+                primary=record.get("asr_primary_provider") or "",
+                fallback_provider=record.get("asr_fallback_provider") or "",
+                provider_used=record.get("asr_provider_used") or "",
+                fallback_used="Y" if record.get("asr_fallback_used") else "N",
                 term=record.get("term") or "",
                 repeat=record.get("repeat_index"),
                 hit="Y" if record.get("term_hit") else "N",
@@ -333,6 +354,7 @@ def write_markdown(records: list[dict[str, Any]], markdown_path: str | Path) -> 
                 first_result=record.get("first_provider_result_abs_ms"),
                 partial=record.get("first_asr_partial_abs_ms"),
                 final=record.get("asr_final_abs_ms"),
+                primary_error=record.get("asr_primary_error_code") or "",
                 error=record.get("error_code") or "",
                 log_id=record.get("provider_log_id") or "",
             )
@@ -348,6 +370,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--frame-ms", type=int, default=60)
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--asr-fallback-provider", choices=sorted(PROVIDER_CHOICES | {"none"}), default=None)
     parser.add_argument("--output", default="/tmp/v5_asr_only_repeat_eval.jsonl")
     parser.add_argument("--markdown", default="/tmp/v5_asr_only_repeat_eval.md")
     parser.add_argument("--realtime", dest="realtime", action="store_true")

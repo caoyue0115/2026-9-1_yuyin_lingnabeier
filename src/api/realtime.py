@@ -24,6 +24,7 @@ from src.providers.realtime_asr import (
     ASR_PROVIDER_CHOICES,
     RealtimeAsrError,
     RealtimeAsrEvent,
+    RealtimeAsrResult,
     create_realtime_asr_session,
 )
 from src.services.realtime_session import start_realtime_session, start_realtime_session_from_question
@@ -42,6 +43,8 @@ store = InMemoryRealtimeSessionStore(
 ASR_PROVIDER_READY_TIMEOUT_SECONDS = 8.0
 ASR_PROVIDER_PENDING_PCM_MAX_BYTES = 2 * 1024 * 1024
 ANSWER_MODE_CHOICES = {"default", "short"}
+ASR_FALLBACK_NONE = "none"
+ASR_FALLBACK_CHOICES = ASR_PROVIDER_CHOICES | {ASR_FALLBACK_NONE, ""}
 
 
 def _frame_audio_packets(chunks):
@@ -230,6 +233,12 @@ async def stream_opus_realtime_session(
     realtime_asr = None
     asr_start_task: asyncio.Task[None] | None = None
     asr_provider = ASR_PROVIDER_DASHSCOPE
+    asr_primary_provider = ASR_PROVIDER_DASHSCOPE
+    asr_fallback_provider: str | None = None
+    asr_provider_used: str | None = None
+    asr_fallback_used = False
+    asr_primary_error_code: str | None = None
+    asr_primary_error_message: str | None = None
     pending_asr_pcm: list[bytes] = []
     pending_asr_pcm_bytes = 0
     provider_start_abs_ms: int | None = None
@@ -243,12 +252,30 @@ async def stream_opus_realtime_session(
     provider_error_message: str | None = None
     asr_result = None
 
+    def _normalize_asr_provider(value: Any, *, default: str) -> str:
+        provider = str(value or default).strip().lower()
+        return provider or default
+
+    def _normalize_fallback_provider(value: Any) -> str | None:
+        provider = str(value or "").strip().lower()
+        if not provider:
+            provider = str(settings.asr_fallback_provider or "").strip().lower()
+        if provider in {"", ASR_FALLBACK_NONE}:
+            return None
+        return provider
+
     def _server_elapsed_ms() -> int:
         return int(round((time.perf_counter() - accepted_at) * 1000))
 
     def _provider_lifecycle_payload() -> dict[str, Any]:
         return {
-            "asr_provider": asr_provider if run_asr or asr_result is not None else None,
+            "asr_provider": asr_provider_used or (asr_provider if run_asr or asr_result is not None else None),
+            "asr_primary_provider": asr_primary_provider if run_asr or asr_result is not None else None,
+            "asr_fallback_provider": asr_fallback_provider,
+            "asr_provider_used": asr_provider_used,
+            "asr_fallback_used": asr_fallback_used,
+            "asr_primary_error_code": asr_primary_error_code,
+            "asr_primary_error_message": asr_primary_error_message,
             "provider_start_abs_ms": provider_start_abs_ms,
             "provider_ready_abs_ms": provider_ready_abs_ms,
             "provider_start_duration_ms": provider_start_duration_ms,
@@ -259,6 +286,78 @@ async def stream_opus_realtime_session(
             "provider_error_code": provider_error_code,
             "provider_error_message": provider_error_message,
         }
+
+    def _pcm_chunks_for_provider(pcm_bytes: bytes) -> list[bytes]:
+        chunk_bytes = max(1, frame_size * x_opus_channels * 2)
+        return [pcm_bytes[index : index + chunk_bytes] for index in range(0, len(pcm_bytes), chunk_bytes)]
+
+    async def _run_cached_pcm_asr(provider: str, pcm_bytes: bytes) -> RealtimeAsrResult:
+        nonlocal provider_start_abs_ms, provider_ready_abs_ms, provider_start_duration_ms
+        nonlocal first_pcm_to_asr_ms, first_pcm_sent_to_provider_abs_ms, first_provider_result_abs_ms
+
+        cached_asr = create_realtime_asr_session(
+            sample_rate=x_opus_sample_rate,
+            audio_format="pcm",
+            provider=provider,
+        )
+        provider_start_abs_ms = _server_elapsed_ms()
+        await asyncio.to_thread(cached_asr.start)
+        provider_ready_abs_ms = _server_elapsed_ms()
+        provider_start_duration_ms = provider_ready_abs_ms - provider_start_abs_ms
+        for pcm_chunk in _pcm_chunks_for_provider(pcm_bytes):
+            if first_pcm_to_asr_ms is None:
+                first_pcm_to_asr_ms = _server_elapsed_ms()
+            if first_pcm_sent_to_provider_abs_ms is None:
+                first_pcm_sent_to_provider_abs_ms = _server_elapsed_ms()
+            events = await asyncio.to_thread(cached_asr.send_pcm_chunk, pcm_chunk)
+            if events and first_provider_result_abs_ms is None:
+                first_provider_result_abs_ms = _server_elapsed_ms()
+            await _send_asr_events(websocket, events)
+        result = await asyncio.to_thread(cached_asr.finish)
+        await _send_asr_events(websocket, cached_asr.drain_events())
+        if first_provider_result_abs_ms is None and result.first_asr_partial_ms is not None:
+            first_provider_result_abs_ms = provider_start_abs_ms + result.first_asr_partial_ms
+        return result
+
+    async def _send_asr_terminal_error(result: RealtimeAsrResult | None) -> None:
+        error_code = (
+            result.error_code
+            if result is not None and result.error_code
+            else asr_primary_error_code or "asr_empty_text"
+        )
+        error_message = (
+            result.error_message
+            if result is not None and result.error_message
+            else asr_primary_error_message or "ASR failed"
+        )
+        await websocket.send_json(
+            {
+                "type": "error",
+                "error_code": error_code,
+                "error_message": error_message,
+                "first_pcm_to_asr_ms": first_pcm_to_asr_ms,
+                "first_asr_partial_ms": result.first_asr_partial_ms if result is not None else None,
+                "asr_final_ms": result.asr_final_ms if result is not None else None,
+                "first_pcm_to_asr_abs_ms": first_pcm_to_asr_ms,
+                "first_asr_partial_abs_ms": (
+                    (provider_start_abs_ms or 0) + result.first_asr_partial_ms
+                    if result is not None and result.first_asr_partial_ms is not None
+                    else None
+                ),
+                "asr_final_abs_ms": (
+                    (provider_start_abs_ms or 0) + result.asr_final_ms
+                    if result is not None and result.asr_final_ms is not None
+                    else None
+                ),
+                "asr_log_id": result.request_id if result is not None else None,
+                "asr_error_code": error_code,
+                "asr_error_message": error_message,
+                "provider_log_id": result.request_id if result is not None else None,
+                **_provider_lifecycle_payload(),
+                "request_id": result.request_id if result is not None else None,
+            }
+        )
+        await websocket.close(code=1011)
 
     async def _wait_for_asr_provider_ready(*, timeout_seconds: float) -> None:
         nonlocal provider_ready_abs_ms, provider_start_duration_ms, provider_error_code, provider_error_message
@@ -385,11 +484,22 @@ async def stream_opus_realtime_session(
                         return
                     run_asr = bool(control.get("run_asr", False))
                     run_full_chain = bool(control.get("run_full_chain", False))
-                    requested_provider = str(control.get("asr_provider") or ASR_PROVIDER_DASHSCOPE).strip().lower()
+                    requested_provider = _normalize_asr_provider(
+                        control.get("asr_provider"),
+                        default=str(settings.asr_provider or ASR_PROVIDER_DASHSCOPE).strip().lower(),
+                    )
                     if requested_provider not in ASR_PROVIDER_CHOICES:
                         await _send_stream_error(websocket, "invalid_asr_provider", close_code=1008)
                         return
                     asr_provider = requested_provider
+                    asr_primary_provider = requested_provider
+                    requested_fallback = _normalize_fallback_provider(control.get("asr_fallback_provider"))
+                    if requested_fallback is not None and requested_fallback not in ASR_FALLBACK_CHOICES:
+                        await _send_stream_error(websocket, "invalid_asr_fallback_provider", close_code=1008)
+                        return
+                    asr_fallback_provider = requested_fallback
+                    if asr_fallback_provider == asr_primary_provider:
+                        asr_fallback_provider = None
                     requested_answer_mode = str(control.get("answer_mode") or "default").strip().lower()
                     if requested_answer_mode not in ANSWER_MODE_CHOICES:
                         await _send_stream_error(websocket, "invalid_answer_mode", close_code=1008)
@@ -405,8 +515,15 @@ async def stream_opus_realtime_session(
                             provider_start_abs_ms = _server_elapsed_ms()
                             asr_start_task = asyncio.create_task(asyncio.to_thread(realtime_asr.start))
                         except RealtimeAsrError as exc:
-                            await _send_stream_error(websocket, exc.code, close_code=1011)
-                            return
+                            provider_error_code = exc.code
+                            provider_error_message = exc.message
+                            asr_primary_error_code = exc.code
+                            asr_primary_error_message = exc.message
+                            if asr_fallback_provider is None:
+                                await _send_stream_error(websocket, exc.code, close_code=1011)
+                                return
+                            realtime_asr = None
+                            asr_start_task = None
                     continue
                 if control.get("type") != "end":
                     await _send_stream_error(websocket, "invalid_control_type", close_code=1003)
@@ -441,21 +558,20 @@ async def stream_opus_realtime_session(
     wav_path = save_pcm_as_wav(bytes(decoded), x_opus_sample_rate, 16, x_opus_channels)
     reconstruct_done_at = time.perf_counter()
 
+    if run_asr and realtime_asr is None and asr_primary_error_code is None:
+        asr_primary_error_code = "asr_provider_not_started"
+        asr_primary_error_message = "ASR provider was not started"
+
     if realtime_asr is not None:
         try:
             await _flush_pending_asr_pcm(block_until_ready=True)
             asr_result = await asyncio.to_thread(realtime_asr.finish)
         except RealtimeAsrError as exc:
-            await websocket.send_json(
-                {
-                    "type": "error",
-                    "error_code": exc.code,
-                    "error_message": exc.message,
-                    **_provider_lifecycle_payload(),
-                }
+            asr_result = RealtimeAsrResult(
+                text=None,
+                error_code=exc.code,
+                error_message=exc.message,
             )
-            await websocket.close(code=1011)
-            return
         await _send_asr_events(websocket, realtime_asr.drain_events())
         if first_provider_result_abs_ms is None and asr_result.first_asr_partial_ms is not None:
             first_provider_result_abs_ms = (
@@ -474,28 +590,53 @@ async def stream_opus_realtime_session(
         provider_error_code = asr_result.error_code
         provider_error_message = asr_result.error_message
         if asr_result.error_code or not asr_result.text:
-            await websocket.send_json(
-                {
-                    "type": "error",
-                    "error_code": asr_result.error_code or "asr_empty_text",
-                    "error_message": asr_result.error_message or "ASR failed",
-                    "first_pcm_to_asr_ms": first_pcm_to_asr_ms,
-                    "first_asr_partial_ms": asr_result.first_asr_partial_ms,
-                    "asr_final_ms": asr_result.asr_final_ms,
-                    "first_pcm_to_asr_abs_ms": first_pcm_to_asr_ms,
-                    "first_asr_partial_abs_ms": first_asr_partial_abs_ms,
-                    "asr_final_abs_ms": asr_final_abs_ms,
-                    "asr_provider": asr_provider,
-                    "asr_log_id": asr_result.request_id,
-                    "asr_error_code": asr_result.error_code,
-                    "asr_error_message": asr_result.error_message,
-                    "provider_log_id": asr_result.request_id,
-                    **_provider_lifecycle_payload(),
-                    "request_id": asr_result.request_id,
-                }
-            )
-            await websocket.close(code=1011)
+            asr_primary_error_code = asr_result.error_code or "asr_empty_text"
+            asr_primary_error_message = asr_result.error_message or "ASR failed"
+        else:
+            asr_provider_used = asr_provider
+
+    if run_asr and (asr_result is None or asr_result.error_code or not asr_result.text):
+        if asr_fallback_provider is not None:
+            asr_fallback_used = True
+            asr_provider = asr_fallback_provider
+            first_pcm_to_asr_ms = None
+            first_pcm_sent_to_provider_abs_ms = None
+            first_provider_result_abs_ms = None
+            provider_error_code = None
+            provider_error_message = None
+            try:
+                asr_result = await _run_cached_pcm_asr(asr_fallback_provider, bytes(decoded))
+            except RealtimeAsrError as exc:
+                provider_error_code = exc.code
+                provider_error_message = exc.message
+                asr_result = RealtimeAsrResult(
+                    text=None,
+                    error_code=exc.code,
+                    error_message=exc.message,
+                )
+            provider_error_code = asr_result.error_code
+            provider_error_message = asr_result.error_message
+            if asr_result.error_code or not asr_result.text:
+                await _send_asr_terminal_error(asr_result)
+                return
+            asr_provider_used = asr_fallback_provider
+        else:
+            await _send_asr_terminal_error(asr_result)
             return
+
+    if asr_result is not None and not asr_result.error_code and asr_result.text:
+        first_asr_partial_abs_ms = (
+            (provider_start_abs_ms or 0) + asr_result.first_asr_partial_ms
+            if asr_result.first_asr_partial_ms is not None
+            else None
+        )
+        asr_final_abs_ms = (
+            (provider_start_abs_ms or 0) + asr_result.asr_final_ms
+            if asr_result.asr_final_ms is not None
+            else None
+        )
+        if asr_provider_used is None:
+            asr_provider_used = asr_provider
         await websocket.send_json(
             {
                 "type": "asr_final",
@@ -504,7 +645,7 @@ async def stream_opus_realtime_session(
                 "asr_final_ms": asr_result.asr_final_ms,
                 "first_asr_partial_abs_ms": first_asr_partial_abs_ms,
                 "asr_final_abs_ms": asr_final_abs_ms,
-                "asr_provider": asr_provider,
+                "asr_provider": asr_provider_used,
                 "asr_log_id": asr_result.request_id,
                 "provider_log_id": asr_result.request_id,
                 **_provider_lifecycle_payload(),
@@ -560,7 +701,7 @@ async def stream_opus_realtime_session(
         "done_abs_ms": websocket_done_abs_ms,
         "question_text": asr_result.text if asr_result is not None else None,
         "realtime_asr_request_id": asr_result.request_id if asr_result is not None else None,
-        "asr_provider": asr_provider if asr_result is not None else None,
+        "asr_provider": asr_provider_used if asr_result is not None else None,
         "asr_log_id": asr_result.request_id if asr_result is not None else None,
         "asr_error_code": None,
         "asr_error_message": None,
@@ -588,7 +729,13 @@ async def stream_opus_realtime_session(
                 "asr_final_ms": asr_result.asr_final_ms,
                 "asr_ms": asr_result.asr_final_ms,
                 "realtime_asr_request_id": asr_result.request_id,
-                "asr_provider": asr_provider,
+                "asr_provider": asr_provider_used,
+                "asr_primary_provider": asr_primary_provider,
+                "asr_fallback_provider": asr_fallback_provider,
+                "asr_provider_used": asr_provider_used,
+                "asr_fallback_used": asr_fallback_used,
+                "asr_primary_error_code": asr_primary_error_code,
+                "asr_primary_error_message": asr_primary_error_message,
                 "asr_log_id": asr_result.request_id,
                 "asr_error_code": None,
                 "asr_error_message": None,
