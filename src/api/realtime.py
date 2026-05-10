@@ -320,16 +320,22 @@ async def stream_opus_realtime_session(
         return result
 
     async def _send_asr_terminal_error(result: RealtimeAsrResult | None) -> None:
-        error_code = (
+        provider_terminal_code = (
             result.error_code
             if result is not None and result.error_code
             else asr_primary_error_code or "asr_empty_text"
         )
-        error_message = (
+        provider_terminal_message = (
             result.error_message
             if result is not None and result.error_message
             else asr_primary_error_message or "ASR failed"
         )
+        if asr_fallback_used and asr_fallback_provider is not None:
+            error_code = "asr_all_providers_failed"
+            error_message = "Primary and fallback ASR providers failed"
+        else:
+            error_code = provider_terminal_code
+            error_message = provider_terminal_message
         await websocket.send_json(
             {
                 "type": "error",

@@ -1042,6 +1042,73 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         start_from_question.assert_called_once()
         self.assertEqual(start_from_question.call_args.args[2], "请解释阿弥陀佛是什么意思")
 
+    def test_stream_opus_realtime_session_reports_all_providers_failed_after_fallback(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 1920
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {
+                            "type": "start",
+                            "run_asr": True,
+                            "run_full_chain": True,
+                            "asr_provider": "volcengine",
+                            "asr_fallback_provider": "dashscope",
+                        }
+                    ),
+                }
+            ]
+            + [
+                {"type": "websocket.receive", "bytes": _outer_frame(index, packet)}
+                for index, packet in enumerate(inner_packets)
+            ]
+            + [{"type": "websocket.receive", "text": json.dumps({"type": "end"})}]
+        )
+        primary_asr = _FakeStreamingAsrAdapter(text=None, error_code="volcengine_asr_empty_text")
+        fallback_asr = _FakeStreamingAsrAdapter(text=None, error_code="asr_empty_text")
+
+        with mock.patch.object(
+            realtime_api,
+            "create_realtime_asr_session",
+            side_effect=[primary_asr, fallback_asr],
+        ), mock.patch.object(realtime_api, "start_realtime_session_from_question") as start_from_question:
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        self.assertEqual(websocket.sent_json[-1]["type"], "error")
+        self.assertEqual(websocket.sent_json[-1]["error_code"], "asr_all_providers_failed")
+        self.assertEqual(websocket.sent_json[-1]["asr_primary_error_code"], "volcengine_asr_empty_text")
+        self.assertEqual(websocket.sent_json[-1]["provider_error_code"], "asr_empty_text")
+        self.assertTrue(websocket.sent_json[-1]["asr_fallback_used"])
+        self.assertEqual(websocket.close_code, 1011)
+        start_from_question.assert_not_called()
+
 
 class OpusUplinkSmokeScriptTests(unittest.TestCase):
     def test_load_wav_pcm_request_requires_16k_16bit_mono(self) -> None:

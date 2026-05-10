@@ -124,9 +124,16 @@ payload:
 
 日志持续打印 `heap_free` 和 `psram_free` watermark，便于真机确认不会挤压下行 jitter buffer。
 
-## 错误 Fallback
+## 错误降级与 Fallback
 
-以下错误触发 fallback：
+P3.1 后 fallback 分层如下：
+
+- L0 正常：火山 ASR 成功，或火山失败后 DashScope fallback 成功，继续 v5 full-chain，云端返回 `audio_stream_url`，板端复用现有下行播放链路。
+- L1 云端 ASR 失败：火山和 DashScope 均失败、空文本或超时，云端返回 `type=error`，`error_code=asr_all_providers_failed` 或具体 ASR 错误码；板端播放本地“请重试/请重新按”提示并结束本轮，不跑旧 `/audio`。
+- L2 极端失败：WebSocket 连接失败、握手失败、协议错包、send frame 失败、等待 `done` 超时、服务器不可达；板端播放本地“请重试”提示并结束本轮。
+- L3 调试开关：只有开发者显式设置 `V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=1` 时，才允许回旧整段 `/audio` 路径。默认构建为 `0`。
+
+以下错误触发 L1/L2 行为降级：
 
 - WebSocket URL 构造或连接失败。
 - start control 发送失败。
@@ -135,13 +142,31 @@ payload:
 - 云端返回 `type=error`。
 - end 后未收到可用 `audio_stream_url`。
 
-若 `V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=true`，pipeline 明确打印 `fallback_to_legacy_audio`，然后调用旧的 `audio_in_record_after_speech_start()` + `cloud_client_submit_realtime_session()`。fallback 会重新从已打开的 microphone 继续录音；如果错误发生在已经消费大量音频后，第一版允许用户重说一遍，以换取最小侵入。
+默认行为是播放本地错误提示并结束本轮，日志必须包含：
+
+```text
+v5_uplink_failed
+error_code=<reason>
+fallback_behavior=local_prompt
+legacy_audio_fallback=false
+```
+
+若开发者显式启用 `V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=1`，pipeline 打印：
+
+```text
+legacy_audio_fallback=true
+fallback_reason=<reason>
+```
+
+然后才调用旧的 `audio_in_record_after_speech_start()` 或 `audio_in_record_fixed_duration()` + `cloud_client_submit_realtime_session()`。该路径仅用于开发调试，不是默认产品 fallback。
 
 ## 指标日志字段
 
 板端至少打印：
 
 - `v5_uplink_enabled`
+- `v5_uplink_fallback_legacy_audio`
+- `v5_uplink_behavior_fallback_enabled`
 - `touch_trigger_ms`
 - `prompt_play_start` / `prompt_play_end`
 - `speech_start_ms`
@@ -161,6 +186,7 @@ payload:
 - `uplink_pcm_bytes`
 - `compression_ratio`
 - `heap_free` / `psram_free` watermark
+- 失败时的 `fallback_behavior`、`legacy_audio_fallback`、`fallback_reason`
 
 ## 编译验证方式
 
@@ -208,4 +234,5 @@ idf.py -p /dev/ttyACM0 flash monitor
 - 确认 `first_ws_frame_sent_ms` 早于录音结束。
 - 确认 `asr_provider=volcengine`。
 - 确认 `done_received_ms` 后复用现有 `stream_audio` 下行日志。
-- 若 fallback，确认日志包含 `error_code` 和 `fallback_to_legacy_audio=true`。
+- 若 v5 失败且未显式开启 legacy 调试开关，确认日志包含 `v5_uplink_failed`、`fallback_behavior=local_prompt`、`legacy_audio_fallback=false`。
+- 只有显式构建 `V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=1` 时，才确认 `legacy_audio_fallback=true` 和 `fallback_reason=<reason>`。

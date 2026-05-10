@@ -899,16 +899,19 @@ python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --bas
 docs/superpowers/specs/2026-05-10-v5-esp32-opus-uplink-design.md
 ```
 
-板端新增配置宏，默认启用 v5 WS 上行并保留旧路径 fallback：
+板端配置宏：
 
 ```text
 V5_OPUS_UPLINK_WS_ENABLED=1
-V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=1
+V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=0
+V5_OPUS_UPLINK_BEHAVIOR_FALLBACK_ENABLED=1
 V5_OPUS_UPLINK_FRAME_MS=60
 V5_OPUS_UPLINK_ASR_PROVIDER="volcengine"
 V5_OPUS_UPLINK_ANSWER_MODE="short"
 V5_OPUS_UPLINK_BITRATE=24000
 ```
+
+P3 初版曾默认启用旧 `/audio` fallback；P3.1 已修正为默认行为降级，本地提示后结束本轮。旧 `/audio` 路径仅保留为显式开发调试开关。
 
 本轮代码边界：
 
@@ -925,8 +928,9 @@ V5_OPUS_UPLINK_BITRATE=24000
 fallback 行为：
 
 - WS URL/连接/start control、Opus encoder、binary send、云端 error/done 缺少 `audio_stream_url` 均记录 `error_code`。
-- 若 `V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=1`，日志打印 `fallback_to_legacy_audio=true` 并尝试旧整段录音提交路径。
-- 如果错误发生在 v5 streaming 已经消费完用户音频之后，fallback 可能需要用户重说；第一版以编译级改造和接口对齐为主，不伪装真机体验已稳定。
+- 默认 `V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=0`，失败后打印 `v5_uplink_failed error_code=<reason> fallback_behavior=local_prompt legacy_audio_fallback=false`，播放本地错误提示并结束本轮。
+- 只有显式设置 `V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=1` 时，日志打印 `legacy_audio_fallback=true fallback_reason=<reason>` 并尝试旧整段录音提交路径。该路径仅用于开发调试。
+- 云端 ASR 双 provider 均失败、空文本或超时时，`/api/v5/realtime/opus-stream` 返回 `type=error`，优先使用 `error_code=asr_all_providers_failed`，provider 细节保留在 `asr_primary_error_code` / `provider_error_code` 等字段。
 
 新增板端指标日志包括：
 
@@ -995,4 +999,38 @@ idf.py -p /dev/ttyACM0 flash monitor
 - `first_ws_frame_sent_ms` 出现在录音结束前
 - `asr_provider=volcengine`
 - `done_received_ms` 后进入现有 `stream_audio`
-- 若失败，确认 `fallback_to_legacy_audio=true` 和明确 `error_code`
+- 若 v5 失败且未显式启用 legacy 调试开关，确认 `v5_uplink_failed`、`fallback_behavior=local_prompt`、`legacy_audio_fallback=false` 和明确 `error_code`。
+- 只有显式构建 `V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=1` 时，才允许出现 `legacy_audio_fallback=true`。
+
+## 2026-05-10 P3.1：修正 ESP32 fallback 口径
+
+最新策略不是“v5 失败自动切旧协议”，而是“按错误层级切行为”：
+
+- L0：火山 ASR 成功，或火山失败后 DashScope 成功，正常 v5 full-chain。
+- L1：火山 + DashScope 均失败、空文本或超时，云端返回固定错误语义，板端播放本地“请重试/请重新按”并结束本轮。
+- L2：WS 连接失败、连续超时、协议错包、服务器不可达等极端失败，板端播放本地错误提示并结束本轮。
+- L3：legacy `/audio` fallback 只作为显式开发调试开关，默认关闭。
+
+本轮代码修正：
+
+- `V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO` 默认从 `1` 改为 `0`。
+- 新增 `V5_OPUS_UPLINK_BEHAVIOR_FALLBACK_ENABLED=1`，默认启用本地提示行为降级。
+- v5 上行失败默认日志为 `v5_uplink_failed error_code=<reason> fallback_behavior=local_prompt legacy_audio_fallback=false`，随后播放 `DEMO_RECORD_RETRY_ERROR_PROMPT_PATH` 并回到 idle。
+- 显式启用 legacy fallback 时，日志为 `legacy_audio_fallback=true fallback_reason=<reason>`，再走旧整段录音提交路径。
+- 云端双 ASR provider 都失败时，WS error 统一返回 `error_code=asr_all_providers_failed`，但保留 `asr_primary_error_code` 和 `provider_error_code` 便于排障。
+
+本轮验证：
+
+```bash
+python -m pytest -q
+```
+
+结果：通过，`145 passed, 1 warning`。
+
+```bash
+cd esp_idf_demo
+source /home/aitopia/esp/esp-idf-v5.5.4-full/export.sh
+idf.py build
+```
+
+结果：通过。构建产物 `build/esp_idf_demo.bin`，binary size `0x37c40`，factory partition 剩余约 89%。本轮未做真机烧录，未部署云端。

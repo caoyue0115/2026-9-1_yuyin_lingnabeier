@@ -141,6 +141,7 @@ static void app_log_runtime_config(void)
     ESP_LOGI(TAG, "  realtime_session_timeout_ms=%d", DEMO_REALTIME_SESSION_TIMEOUT_MS);
     ESP_LOGI(TAG, "  v5_uplink_enabled=%d", V5_OPUS_UPLINK_WS_ENABLED);
     ESP_LOGI(TAG, "  v5_uplink_fallback_legacy_audio=%d", V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO);
+    ESP_LOGI(TAG, "  v5_uplink_behavior_fallback_enabled=%d", V5_OPUS_UPLINK_BEHAVIOR_FALLBACK_ENABLED);
     ESP_LOGI(TAG, "  v5_uplink_frame_ms=%d", V5_OPUS_UPLINK_FRAME_MS);
     ESP_LOGI(TAG, "  v5_uplink_asr_provider=%s", V5_OPUS_UPLINK_ASR_PROVIDER);
     ESP_LOGI(TAG, "  v5_uplink_answer_mode=%s", V5_OPUS_UPLINK_ANSWER_MODE);
@@ -762,16 +763,36 @@ static esp_err_t run_trigger_pipeline(app_state_t *state)
                      record_metrics.voice_started,
                      (unsigned)record_metrics.max_level);
         } else if (V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO) {
+            const char *fallback_reason = opus_uplink_metrics.error_code[0] != '\0'
+                                              ? opus_uplink_metrics.error_code
+                                              : "v5_opus_uplink_failed";
             ESP_LOGW(TAG,
-                     "fallback_to_legacy_audio=true error_code=%s err=%s",
-                     opus_uplink_metrics.error_code[0] != '\0' ? opus_uplink_metrics.error_code : "v5_opus_uplink_failed",
+                     "legacy_audio_fallback=true fallback_to_legacy_audio=true fallback_reason=%s error_code=%s err=%s",
+                     fallback_reason,
+                     fallback_reason,
                      esp_err_to_name(ret));
             audio_in_deinit();
             speech_prefix_bytes = 0;
+        } else if (V5_OPUS_UPLINK_BEHAVIOR_FALLBACK_ENABLED) {
+            pipeline_error_code = opus_uplink_metrics.error_code[0] != '\0'
+                                      ? opus_uplink_metrics.error_code
+                                      : "v5_opus_uplink_failed";
+            ESP_LOGW(TAG,
+                     "v5_uplink_failed error_code=%s fallback_behavior=local_prompt legacy_audio_fallback=false err=%s",
+                     pipeline_error_code,
+                     esp_err_to_name(ret));
+            audio_in_deinit();
+            app_play_retry_prompt("v5_uplink_failed", DEMO_RECORD_RETRY_ERROR_PROMPT_PATH);
+            ret = ESP_OK;
+            goto cleanup;
         } else {
             pipeline_error_code = opus_uplink_metrics.error_code[0] != '\0'
                                       ? opus_uplink_metrics.error_code
                                       : "v5_opus_uplink_failed";
+            ESP_LOGE(TAG,
+                     "v5_uplink_failed error_code=%s fallback_behavior=disabled legacy_audio_fallback=false err=%s",
+                     pipeline_error_code,
+                     esp_err_to_name(ret));
             goto cleanup;
         }
     }
