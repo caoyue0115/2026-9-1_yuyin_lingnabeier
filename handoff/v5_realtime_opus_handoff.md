@@ -1152,3 +1152,104 @@ docker exec religion_demo_v5_realtime_opus-api-1 \
 - 本轮未改 nginx 主入口、未改云安全组。板端目标 base URL 是 `http://106.54.240.51:8020`，但需先放行公网 `8020/tcp` 后才能直连。
 
 部署中补充修正：`/healthz` 的旧 ASR 检查只接受 `ASR_PROVIDER=dashscope`。已最小修正为 Volcengine provider 下检查 Volcengine ASR app/token/resource，避免 v5 `.env` 正确但 healthz 误报 `asr=down`。
+
+## 2026-05-10 P4.1：greenunion-sh 端口切换尝试与回滚
+
+用户授权尝试让 v5 接管公网 80，并将 v3 改到 8020，目标是板端无需等待公网 8020 安全组放行即可访问 v5。
+
+切换前端口表：
+
+| service | before |
+| --- | --- |
+| v3 | `0.0.0.0:80 -> 8010` |
+| v5 | `0.0.0.0:8020 -> 8010` |
+
+切换前本机 healthz 均 ok：
+
+```text
+v3_80={"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+v5_8020={"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+```
+
+备份文件：
+
+```text
+/home/ubuntu/religion_demo_v3_greenunion_app/docker-compose.yml.bak.20260510_102825
+/app/religion_demo_v5_realtime_opus/deploy/greenunion/docker-compose.v5.yml.bak.20260510_102825
+```
+
+注：第一次备份命令因远端 `date` 变量被本地 shell 展开，额外生成了两个 `.bak.` 文件，也保留在云端作为冗余备份。
+
+已执行切换：
+
+- 停止 v3/v5 compose project。
+- v3 compose 改为 `8020:8010`。
+- v5 compose 改为 `${V5_PUBLIC_PORT:-80}:8010`。
+- 启动 v5，再启动 v3。
+
+切换后初次验证：
+
+```text
+v5 public healthz http://106.54.240.51/healthz:
+{"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+
+v5_80_local:
+{"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+
+v3_8020_local:
+{"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+```
+
+公网 80 full-chain Opus smoke：
+
+```bash
+python scripts/opus_uplink_stream_smoke.py \
+  /tmp/volc_asr_eval/amitabha.wav \
+  --base-url http://106.54.240.51 \
+  --frame-ms 60 \
+  --realtime \
+  --run-asr \
+  --run-full-chain \
+  --answer-mode short \
+  --timeout 20 \
+  --status-timeout 20 \
+  --max-polls 120
+```
+
+结果：stream `type=done`，session `status=done`，`final_reason=completed_answer`。关键指标：79 frames，Opus 13415 bytes，PCM 150156 bytes，compression ratio 11.193。火山 ASR 首选连接中断后 DashScope fallback 成功。
+
+发现问题：smoke 返回的 `audio_stream_url` 仍指向 `http://106.54.240.51:8020/...`，原因是 v5 `.env` 的 `PUBLIC_BASE_URL` 仍是切换前的 `http://106.54.240.51:8020`。
+
+为避免板端后续拉音频误走 8020，已将 v5 `.env` 脱敏更新为 `PUBLIC_BASE_URL=http://106.54.240.51` 并只重启 v5 API/worker。重启后 `http://106.54.240.51/healthz` 8 秒超时，本机 v5 healthz 也未及时返回，因此触发回滚。
+
+回滚动作：
+
+- v3 compose 恢复为 `80:8010`。
+- v5 compose 恢复为 `${V5_PUBLIC_PORT:-8020}:8010`。
+- v5 `.env` 的 `PUBLIC_BASE_URL` 恢复为 `http://106.54.240.51:8020`。
+- 重新创建 v3/v5 API 容器；未删除 `.env`、data、indices、SQLite 或索引文件。
+
+回滚后端口表：
+
+| service | current |
+| --- | --- |
+| v3 | `0.0.0.0:80 -> 8010` |
+| v5 | `0.0.0.0:8020 -> 8010` |
+
+回滚后验证：
+
+```text
+v3_80_local={"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+v5_8020_local={"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+public_80=http://106.54.240.51/healthz -> ok
+```
+
+当前 v5 容器：
+
+```text
+api    1799503 running
+worker 1797952 running
+redis  1797839 running
+```
+
+结论：本次端口切换已尝试但已回滚。当前 80 仍是 v3，8020 仍是 v5；是否继续 v5 接管 80，需要先定位 v5 在 `PUBLIC_BASE_URL=http://106.54.240.51` 后重启 healthz 超时的原因，或改为放行公网 8020。

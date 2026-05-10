@@ -197,3 +197,136 @@ http://106.54.240.51:8020
 python -m pytest tests/test_asr_provider.py::TranscribeWavTests::test_asr_health_accepts_volcengine_streaming_credentials -q
 python -m pytest tests/test_asr_provider.py tests/test_app_healthz.py -q
 ```
+
+## 2026-05-10 Port Swap Attempt And Rollback
+
+用户授权尝试让 v5 接管公网 80，并把 v3 移到 8020。执行前状态：
+
+| service | before host mapping | compose file |
+| --- | --- | --- |
+| v3 | `0.0.0.0:80 -> 8010` | `/home/ubuntu/religion_demo_v3_greenunion_app/docker-compose.yml` |
+| v5 | `0.0.0.0:8020 -> 8010` | `/app/religion_demo_v5_realtime_opus/deploy/greenunion/docker-compose.v5.yml` |
+
+切换前本机 healthz：
+
+```text
+v3_80={"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+v5_8020={"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+```
+
+正式备份文件：
+
+```text
+/home/ubuntu/religion_demo_v3_greenunion_app/docker-compose.yml.bak.20260510_102825
+/app/religion_demo_v5_realtime_opus/deploy/greenunion/docker-compose.v5.yml.bak.20260510_102825
+```
+
+另有一次命令变量展开错误生成的额外备份：
+
+```text
+/home/ubuntu/religion_demo_v3_greenunion_app/docker-compose.yml.bak.
+/app/religion_demo_v5_realtime_opus/deploy/greenunion/docker-compose.v5.yml.bak.
+```
+
+切换动作：
+
+- 停止 v3/v5 compose project。
+- 将 v3 compose 端口从 `80:8010` 改为 `8020:8010`。
+- 将 v5 compose 端口从 `${V5_PUBLIC_PORT:-8020}` 改为 `${V5_PUBLIC_PORT:-80}`。
+- 启动 v5，再启动 v3。
+
+切换后第一次验证：
+
+```text
+v5 public healthz http://106.54.240.51/healthz:
+{"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+
+v5_80_local:
+{"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+
+v3_8020_local:
+{"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+```
+
+随后用公网 80 跑 full-chain Opus smoke：
+
+```bash
+python scripts/opus_uplink_stream_smoke.py \
+  /tmp/volc_asr_eval/amitabha.wav \
+  --base-url http://106.54.240.51 \
+  --frame-ms 60 \
+  --realtime \
+  --run-asr \
+  --run-full-chain \
+  --answer-mode short \
+  --timeout 20 \
+  --status-timeout 20 \
+  --max-polls 120
+```
+
+结果：stream `type=done`，session `status=done`，`final_reason=completed_answer`，79 frames，Opus 13415 bytes，PCM 150156 bytes。火山 ASR 首选返回 `volcengine_asr_finish_failed` 后 DashScope fallback 成功。
+
+但 smoke 返回的 `audio_stream_url` 仍是：
+
+```text
+http://106.54.240.51:8020/api/v3/realtime/sessions/<session_id>/audio
+```
+
+原因是 v5 `.env` 的 `PUBLIC_BASE_URL` 仍是切换前的 `http://106.54.240.51:8020`。为避免板端后续拉音频误走 8020，将 v5 `.env` 脱敏更新为：
+
+```text
+PUBLIC_BASE_URL=http://106.54.240.51
+```
+
+并只重启 v5 API/worker。重启后 `http://106.54.240.51/healthz` 8 秒超时，本机 v5 healthz 也未及时返回。按用户要求，立即回滚。
+
+回滚动作：
+
+- v3 compose 恢复为 `80:8010`。
+- v5 compose 恢复为 `${V5_PUBLIC_PORT:-8020}:8010`。
+- v5 `.env` 的 `PUBLIC_BASE_URL` 恢复为 `http://106.54.240.51:8020`。
+- 重新创建 v3/v5 API 容器以恢复端口绑定。
+- 不删除 `.env`、data、indices、SQLite 或索引文件。
+
+回滚后当前状态：
+
+| service | current host mapping | healthz |
+| --- | --- | --- |
+| v3 | `0.0.0.0:80 -> 8010` | `http://127.0.0.1/healthz` ok，`http://106.54.240.51/healthz` ok |
+| v5 | `0.0.0.0:8020 -> 8010` | `http://127.0.0.1:8020/healthz` ok |
+
+当前 v5 容器状态：
+
+```text
+api    1799503 running
+worker 1797952 running
+redis  1797839 running
+```
+
+当前回滚命令：
+
+```bash
+cd /home/ubuntu/religion_demo_v3_greenunion_app
+python3 - <<'PY'
+from pathlib import Path
+p = Path("docker-compose.yml")
+p.write_text(p.read_text(encoding="utf-8").replace('"8020:8010"', '"80:8010"'), encoding="utf-8")
+PY
+docker compose -p religion_demo_v3_greenunion_app -f docker-compose.yml up -d --force-recreate api worker redis
+
+cd /app/religion_demo_v5_realtime_opus
+python3 - <<'PY'
+from pathlib import Path
+p = Path("deploy/greenunion/docker-compose.v5.yml")
+p.write_text(p.read_text(encoding="utf-8").replace(":-80}:8010", ":-8020}:8010"), encoding="utf-8")
+env = Path(".env")
+lines = []
+for line in env.read_text(encoding="utf-8").splitlines():
+    lines.append("PUBLIC_BASE_URL=http://106.54.240.51:8020" if line.startswith("PUBLIC_BASE_URL=") else line)
+env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+env.chmod(0o600)
+PY
+docker compose -p religion_demo_v5_realtime_opus -f deploy/greenunion/docker-compose.v5.yml up -d --force-recreate api worker redis
+```
+
+结论：本次端口切换已尝试，但因修正 `PUBLIC_BASE_URL` 后 v5 公网 80 healthz 失败，已按规则回滚。当前 80 仍是 v3，8020 仍是 v5；板端公网直连 v5 仍需后续解决 80 接管问题或放行 8020。
