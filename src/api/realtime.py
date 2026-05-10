@@ -296,7 +296,7 @@ async def stream_opus_realtime_session(
         }
 
     def _log_asr_fallback(session_id: str | None = None) -> None:
-        logger.info(
+        logger.warning(
             "event=v5_asr_fallback session_id=%s asr_primary_provider=%s "
             "asr_primary_error_code=%s asr_primary_error_message=%s "
             "asr_fallback_used=%s asr_provider_used=%s asr_fallback_provider=%s "
