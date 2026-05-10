@@ -27,7 +27,11 @@ from src.providers.realtime_asr import (
     RealtimeAsrResult,
     create_realtime_asr_session,
 )
-from src.services.realtime_session import start_realtime_session, start_realtime_session_from_question
+from src.services.realtime_session import (
+    normalize_buddhist_asr_text,
+    start_realtime_session,
+    start_realtime_session_from_question,
+)
 from src.settings import settings
 from src.storage.files import save_pcm_as_wav
 from src.storage.realtime_store import InMemoryRealtimeSessionStore
@@ -756,6 +760,14 @@ async def stream_opus_realtime_session(
         ]
         if value is not None
     )
+    asr_raw_text = asr_result.text if asr_result is not None else None
+    asr_normalized_text = None
+    asr_normalization_applied = None
+    asr_normalization_rules = None
+    if asr_raw_text:
+        asr_normalized_text, asr_normalization_rules = normalize_buddhist_asr_text(asr_raw_text)
+        asr_normalization_applied = bool(asr_normalization_rules)
+
     done_payload = {
         "type": "done",
         "stream_accept_ms": stream_accept_ms,
@@ -779,7 +791,11 @@ async def stream_opus_realtime_session(
         "first_asr_partial_abs_ms": first_asr_partial_abs_ms,
         "asr_final_abs_ms": asr_final_abs_ms,
         "done_abs_ms": websocket_done_abs_ms,
-        "question_text": asr_result.text if asr_result is not None else None,
+        "question_text": asr_normalized_text if asr_normalized_text is not None else asr_raw_text,
+        "asr_raw_text": asr_raw_text,
+        "asr_normalized_text": asr_normalized_text,
+        "asr_normalization_applied": asr_normalization_applied,
+        "asr_normalization_rules": asr_normalization_rules,
         "realtime_asr_request_id": asr_result.request_id if asr_result is not None else None,
         "asr_provider": asr_provider_used if asr_result is not None else None,
         "asr_log_id": asr_result.request_id if asr_result is not None else None,
@@ -809,6 +825,10 @@ async def stream_opus_realtime_session(
                 "asr_final_ms": asr_result.asr_final_ms,
                 "asr_ms": asr_result.asr_final_ms,
                 "realtime_asr_request_id": asr_result.request_id,
+                "asr_raw_text": asr_raw_text,
+                "asr_normalized_text": asr_normalized_text,
+                "asr_normalization_applied": asr_normalization_applied,
+                "asr_normalization_rules": asr_normalization_rules,
                 "asr_provider": asr_provider_used,
                 "asr_primary_provider": asr_primary_provider,
                 "asr_fallback_provider": asr_fallback_provider,

@@ -298,3 +298,55 @@ fallback 日志 `event=v5_asr_fallback` 也会附带上述字段，便于 grep �
 2. 本地 v5 启动后跑 1 条 full-chain smoke，`--asr-provider volcengine`。
 3. 本地火山 primary 连跑 5 次，记录 `asr_provider_used`、`asr_fallback_used`、`asr_primary_error_code`、`provider_log_id`、`asr_final_abs_ms`。
 4. 本地确认 primary 成功率后，再单独授权部署 greenunion-sh；部署前不改 v3、不重启云端。
+
+## P3.4 小步优化：ASR 归一化与下行观测
+
+P3.3 后真机已确认 Volcengine primary 可用，不再 fallback。最新两轮板端日志显示：
+
+- `5f2a7098-aafb-4df2-94cf-cbda8072082c`：`一边念阿弥陀佛，一边还说着什么四十八愿。`，下行 underrun 为 0。
+- `0de481bf-8bcf-41b1-b98b-da43d1f62ada`：`什么汇远之类的。`，下行 `max_inter_chunk_gap_ms≈1005ms`，`underrun_count=4`，`decode_fail_count=0`，`queue full=0`。
+
+本轮边界：
+
+- 不改 ESP32 板端主链路。
+- 不改 ASR provider 默认策略，DashScope fallback 保留。
+- 不改 RAG、LLM、TTS provider 策略。
+- 不改 v24/v25 下行播放队列、prebuffer、jitter、fake timeout 等参数。
+
+### ASR 规则归一化
+
+云端在进入 RAG/LLM 前做轻量规则归一化，不调用大模型纠错。
+
+| raw | normalized |
+| --- | --- |
+| `汇远` | `慧远` |
+| `惠远` | `慧远` |
+| `48愿` | `四十八愿` |
+| `四十八院` | `四十八愿` |
+| `48院` | `四十八愿` |
+
+trace/status 保留：
+
+- `asr_raw_text`
+- `asr_normalized_text`
+- `asr_normalization_applied`
+- `asr_normalization_rules`
+
+RAG、LLM、session `question_text` 使用 `asr_normalized_text`。`asr_raw_text` 保留 Volcengine 原文，便于后续判断是 ASR 词表问题还是规则覆盖不足。
+
+### TTS chunk 观测
+
+板端 summary 已有：
+
+- `max_inter_chunk_gap_ms`
+- `underrun_count`
+- `underrun_ms`
+
+云端补齐最小 status/trace 字段：
+
+- `tts_first_chunk_ms`
+- `tts_chunk_count`
+- `tts_total_audio_bytes`
+- `audio_stream_first_byte_ms`
+
+这些字段只是现有云端 `first_tts_chunk_ms`、`audio_chunk_count`、`audio_bytes`、`first_audio_byte_ms` 的观测口径别名或透传，不改变 TTS 生成、不改变 HTTP audio stream、不改变板端播放参数。

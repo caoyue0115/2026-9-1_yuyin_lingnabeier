@@ -65,8 +65,16 @@ class RealtimeSchemaTests(unittest.TestCase):
                 "retrieval_ms": None,
                 "first_llm_chunk_ms": None,
                 "first_tts_chunk_ms": None,
+                "tts_first_chunk_ms": 4100,
+                "tts_chunk_count": 12,
+                "tts_total_audio_bytes": 4096,
+                "audio_stream_first_byte_ms": 4300,
                 "first_audio_byte_ms": None,
                 "done_ms": None,
+                "asr_raw_text": "48院有哪些？",
+                "asr_normalized_text": "四十八愿有哪些？",
+                "asr_normalization_applied": True,
+                "asr_normalization_rules": ["48院->四十八愿"],
                 "asr_primary_provider": "volcengine",
                 "asr_provider_used": "dashscope",
                 "asr_fallback_provider": "dashscope",
@@ -93,6 +101,14 @@ class RealtimeSchemaTests(unittest.TestCase):
 
         self.assertEqual(payload.session_id, "session-1")
         self.assertIsNone(payload.trace.first_audio_byte_ms)
+        self.assertEqual(payload.trace.tts_first_chunk_ms, 4100)
+        self.assertEqual(payload.trace.tts_chunk_count, 12)
+        self.assertEqual(payload.trace.tts_total_audio_bytes, 4096)
+        self.assertEqual(payload.trace.audio_stream_first_byte_ms, 4300)
+        self.assertEqual(payload.trace.asr_raw_text, "48院有哪些？")
+        self.assertEqual(payload.trace.asr_normalized_text, "四十八愿有哪些？")
+        self.assertTrue(payload.trace.asr_normalization_applied)
+        self.assertEqual(payload.trace.asr_normalization_rules, ["48院->四十八愿"])
         self.assertIsNone(payload.trace.tts_warmup_ms)
         self.assertIsNone(payload.trace.tts_warmup_failed)
         self.assertEqual(payload.trace.asr_primary_provider, "volcengine")
@@ -1537,6 +1553,71 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertEqual(updated["status"], "done")
         self.assertEqual(updated["question_text"], question_text)
         self.assertEqual(updated["trace"]["retrieval_top_score"], 0.9)
+
+    def test_realtime_session_normalizes_buddhist_asr_terms_before_retrieval(self) -> None:
+        from src.services import realtime_session as realtime_session_service
+        from src.storage.realtime_store import InMemoryRealtimeSessionStore
+
+        wav_path = _write_test_wav(b"\x01\x00\x02\x00")
+        store = InMemoryRealtimeSessionStore(base_url="http://testserver")
+        session = store.create_session(device_id="esp-1")
+        raw_question = "什么汇远之类的，48院有哪些？"
+        store.update_session(session["session_id"], question_text=raw_question)
+
+        try:
+            with mock.patch.object(
+                realtime_session_service,
+                "retrieve_references",
+                return_value=([{"source_title": "慧远", "snippet": "净土宗祖师", "text": "净土宗祖师"}], 0.9),
+            ) as retrieve_references, mock.patch.object(
+                realtime_session_service,
+                "is_buddhist_question",
+                return_value=True,
+            ), mock.patch.object(
+                realtime_session_service,
+                "stream_answer_text",
+                return_value=iter(["慧远与四十八愿相关回答。"]),
+            ) as stream_answer_text, mock.patch.object(
+                realtime_session_service,
+                "realtime_tts_health",
+                return_value=False,
+            ), mock.patch.object(
+                realtime_session_service,
+                "synthesize_audio",
+                return_value=(wav_path, None),
+            ):
+                realtime_session_service.run_stub_realtime_session(store, session["session_id"])
+        finally:
+            Path(wav_path).unlink(missing_ok=True)
+
+        normalized_question = "什么慧远之类的，四十八愿有哪些？"
+        retrieve_references.assert_called_once_with(normalized_question, top_k=mock.ANY)
+        stream_answer_text.assert_called_once()
+        self.assertEqual(stream_answer_text.call_args.args[0], normalized_question)
+        updated = store.get_session(session["session_id"])
+        self.assertEqual(updated["question_text"], normalized_question)
+        self.assertEqual(updated["trace"]["asr_raw_text"], raw_question)
+        self.assertEqual(updated["trace"]["asr_normalized_text"], normalized_question)
+        self.assertTrue(updated["trace"]["asr_normalization_applied"])
+        self.assertEqual(
+            updated["trace"]["asr_normalization_rules"],
+            ["汇远->慧远", "48院->四十八愿"],
+        )
+
+    def test_buddhist_asr_normalization_covers_known_terms(self) -> None:
+        from src.services.realtime_session import normalize_buddhist_asr_text
+
+        cases = {
+            "什么汇远之类的。": ("什么慧远之类的。", ["汇远->慧远"]),
+            "请介绍惠远。": ("请介绍慧远。", ["惠远->慧远"]),
+            "48愿有哪些？": ("四十八愿有哪些？", ["48愿->四十八愿"]),
+            "四十八院是什么？": ("四十八愿是什么？", ["四十八院->四十八愿"]),
+            "48院有哪些？": ("四十八愿有哪些？", ["48院->四十八愿"]),
+        }
+
+        for raw_text, expected in cases.items():
+            with self.subTest(raw_text=raw_text):
+                self.assertEqual(normalize_buddhist_asr_text(raw_text), expected)
 
 
 if __name__ == "__main__":

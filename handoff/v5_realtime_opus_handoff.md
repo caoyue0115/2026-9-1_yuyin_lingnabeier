@@ -1376,6 +1376,57 @@ python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --bas
 
 本轮未部署 greenunion-sh，未重启云端容器。
 
+## 2026-05-10 P3.4：ASR 轻量归一化与下行观测字段
+
+真机 P3.3 后两轮完整跑通，ASR 已走 Volcengine primary，不再 fallback：
+
+- `5f2a7098-aafb-4df2-94cf-cbda8072082c`：`一边念阿弥陀佛，一边还说着什么四十八愿。`，`asr_final≈3911ms`，`first_audio≈8202ms`，`underrun=0`。
+- `0de481bf-8bcf-41b1-b98b-da43d1f62ada`：`什么汇远之类的。`，`asr_final≈2362ms`，`first_audio≈7100ms`，`underrun=4`，`underrun_ms≈77ms`。
+
+本轮不改板端、不改 RAG/LLM/TTS 策略、不改 v24/v25 下行队列和播放参数。只做两件小步优化：
+
+1. ASR 文本规则归一化，RAG/LLM 使用 normalized text，同时 status trace 保留 raw/normalized。
+2. 云端 status/terminal trace 增加 TTS chunk 观测字段别名，便于和板端 `max_inter_chunk_gap_ms`、`underrun_count`、`underrun_ms` 对齐排查。
+
+归一化规则：
+
+| raw | normalized |
+| --- | --- |
+| `汇远` | `慧远` |
+| `惠远` | `慧远` |
+| `48愿` | `四十八愿` |
+| `四十八院` | `四十八愿` |
+| `48院` | `四十八愿` |
+
+新增 trace/status 字段：
+
+```text
+asr_raw_text
+asr_normalized_text
+asr_normalization_applied
+asr_normalization_rules
+tts_first_chunk_ms
+tts_chunk_count
+tts_total_audio_bytes
+audio_stream_first_byte_ms
+```
+
+示例：
+
+```text
+asr_raw_text=什么汇远之类的，48院有哪些？
+asr_normalized_text=什么慧远之类的，四十八愿有哪些？
+asr_normalization_applied=true
+asr_normalization_rules=["汇远->慧远","48院->四十八愿"]
+```
+
+说明：
+
+- `question_text` 在 full-chain session 内保存 normalized text。
+- `asr_raw_text` 保留云端 ASR 原文，便于回查 Volcengine 识别质量。
+- `asr_normalization_rules` 只记录实际触发的规则。
+- 下行播放链路未改；`tts_*` 字段只是云端已有 `first_tts_chunk_ms`、`audio_chunk_count`、`audio_bytes`、`first_audio_byte_ms` 的观测口径补齐。
+
 ## 2026-05-10 P3.3：Volcengine ASR finish/close 修正
 
 greenunion-sh v5 公网 smoke 硬证据：

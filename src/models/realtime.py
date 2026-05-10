@@ -10,7 +10,9 @@ class RealtimeTrace(BaseModel):
     retrieval_ms: int | None = None
     first_llm_chunk_ms: int | None = None
     first_tts_chunk_ms: int | None = None
+    tts_first_chunk_ms: int | None = None
     first_audio_byte_ms: int | None = None
+    audio_stream_first_byte_ms: int | None = None
     done_ms: int | None = None
     tts_warmup_ms: int | None = None
     tts_warmup_failed: bool | None = None
@@ -18,7 +20,9 @@ class RealtimeTrace(BaseModel):
     tts_segment_count: int | None = None
     segment_ready_ms: list[int] | None = None
     audio_chunk_count: int | None = None
+    tts_chunk_count: int | None = None
     audio_bytes: int | None = None
+    tts_total_audio_bytes: int | None = None
     audio_duration_ms: int | None = None
     audio_stream_wall_ms: int | None = None
     audio_max_chunk_gap_ms: int | None = None
@@ -33,6 +37,10 @@ class RealtimeTrace(BaseModel):
     first_asr_partial_ms: int | None = None
     asr_final_ms: int | None = None
     realtime_asr_request_id: str | None = None
+    asr_raw_text: str | None = None
+    asr_normalized_text: str | None = None
+    asr_normalization_applied: bool | None = None
+    asr_normalization_rules: list[str] | None = None
     asr_provider: str | None = None
     asr_primary_provider: str | None = None
     asr_provider_used: str | None = None
