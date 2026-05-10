@@ -11,10 +11,13 @@
 
 #include "cJSON.h"
 #include "esp_audio_dec.h"
+#include "esp_audio_enc.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_opus_dec.h"
+#include "esp_opus_enc.h"
 #include "esp_timer.h"
+#include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -107,6 +110,30 @@ typedef struct {
     esp_err_t playback_result;
     int64_t decode_eof_us;
 } cloud_stream_runtime_t;
+
+struct cloud_opus_uplink {
+    esp_websocket_client_handle_t client;
+    cloud_opus_uplink_metrics_t *metrics;
+    void *encoder;
+    uint8_t *pcm_frame;
+    size_t pcm_frame_size;
+    size_t pcm_frame_len;
+    uint8_t *opus_frame;
+    size_t opus_frame_size;
+    uint8_t *ws_frame;
+    size_t ws_frame_size;
+    uint32_t sequence;
+    int64_t start_us;
+    volatile bool connected;
+    volatile bool disconnected;
+    volatile bool error_received;
+    volatile bool done_received;
+    cloud_realtime_session_t session;
+    char ws_url[320];
+    char ws_headers[640];
+    char rx_json[2048];
+    size_t rx_json_len;
+};
 
 static esp_err_t cloud_opus_pending_append(cloud_opus_decoder_state_t *state,
                                            const uint8_t *data,
@@ -1174,6 +1201,604 @@ static void cloud_playback_task(void *arg)
     runtime->playback_done = true;
     runtime->playback_task = NULL;
     vTaskDelete(NULL);
+}
+
+static void cloud_write_be32(uint8_t *data, uint32_t value)
+{
+    data[0] = (uint8_t)((value >> 24) & 0xFF);
+    data[1] = (uint8_t)((value >> 16) & 0xFF);
+    data[2] = (uint8_t)((value >> 8) & 0xFF);
+    data[3] = (uint8_t)(value & 0xFF);
+}
+
+static void cloud_write_be16(uint8_t *data, uint16_t value)
+{
+    data[0] = (uint8_t)((value >> 8) & 0xFF);
+    data[1] = (uint8_t)(value & 0xFF);
+}
+
+static esp_opus_enc_frame_duration_t cloud_opus_uplink_frame_duration(void)
+{
+    switch (V5_OPUS_UPLINK_FRAME_MS) {
+    case 20:
+        return ESP_OPUS_ENC_FRAME_DURATION_20_MS;
+    case 40:
+        return ESP_OPUS_ENC_FRAME_DURATION_40_MS;
+    case 60:
+    default:
+        return ESP_OPUS_ENC_FRAME_DURATION_60_MS;
+    }
+}
+
+static esp_err_t cloud_build_ws_url(char *out, size_t out_size, const char *path)
+{
+    if (out == NULL || out_size == 0 || path == NULL || DEMO_SERVER_BASE_URL[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const char *scheme = NULL;
+    const char *base = DEMO_SERVER_BASE_URL;
+    if (strncmp(base, "https://", 8) == 0) {
+        scheme = "wss://";
+        base += 8;
+    } else if (strncmp(base, "http://", 7) == 0) {
+        scheme = "ws://";
+        base += 7;
+    } else if (strncmp(base, "wss://", 6) == 0 || strncmp(base, "ws://", 5) == 0) {
+        return cloud_build_url(out, out_size, path);
+    } else {
+        scheme = "ws://";
+    }
+
+    size_t base_len = strlen(base);
+    while (base_len > 0 && base[base_len - 1] == '/') {
+        --base_len;
+    }
+    int written = snprintf(out, out_size, "%s%.*s/%s", scheme, (int)base_len, base, path);
+    if (written < 0 || (size_t)written >= out_size) {
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+static bool cloud_json_get_bool_default(const cJSON *object, const char *key, bool default_value)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (item == NULL || cJSON_IsNull(item)) {
+        return default_value;
+    }
+    return cJSON_IsTrue(item);
+}
+
+static void cloud_opus_uplink_copy_optional_string(const cJSON *object,
+                                                   const char *key,
+                                                   char *out,
+                                                   size_t out_size)
+{
+    if (object == NULL || key == NULL || out == NULL || out_size == 0) {
+        return;
+    }
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (cJSON_IsString(item) && item->valuestring != NULL) {
+        snprintf(out, out_size, "%s", item->valuestring);
+    }
+}
+
+static void cloud_opus_uplink_handle_json(cloud_opus_uplink_t *uplink, const char *json)
+{
+    if (uplink == NULL || json == NULL || json[0] == '\0') {
+        return;
+    }
+    cJSON *root = cJSON_Parse(json);
+    if (root == NULL) {
+        ESP_LOGW(TAG, "v5_uplink event=invalid_json payload_len=%u", (unsigned)strlen(json));
+        return;
+    }
+
+    char type[32] = {0};
+    cloud_opus_uplink_copy_optional_string(root, "type", type, sizeof(type));
+    const int64_t now_us = esp_timer_get_time();
+
+    if (strcmp(type, "ack") == 0) {
+        if (uplink->metrics != NULL && uplink->metrics->first_ack_us == 0) {
+            uplink->metrics->first_ack_us = now_us - uplink->start_us;
+        }
+    } else if (strcmp(type, "asr_final") == 0) {
+        if (uplink->metrics != NULL) {
+            uplink->metrics->asr_final_received_us = now_us - uplink->start_us;
+            cloud_opus_uplink_copy_optional_string(root, "text",
+                                                   uplink->metrics->question_text,
+                                                   sizeof(uplink->metrics->question_text));
+            cloud_opus_uplink_copy_optional_string(root, "asr_provider",
+                                                   uplink->metrics->asr_provider,
+                                                   sizeof(uplink->metrics->asr_provider));
+        }
+    } else if (strcmp(type, "done") == 0) {
+        uplink->done_received = true;
+        if (uplink->metrics != NULL) {
+            uplink->metrics->done_received_us = now_us - uplink->start_us;
+            uplink->metrics->session_started = cloud_json_get_bool_default(root, "session_started", false);
+            cloud_opus_uplink_copy_optional_string(root, "question_text",
+                                                   uplink->metrics->question_text,
+                                                   sizeof(uplink->metrics->question_text));
+            cloud_opus_uplink_copy_optional_string(root, "asr_provider",
+                                                   uplink->metrics->asr_provider,
+                                                   sizeof(uplink->metrics->asr_provider));
+            cloud_opus_uplink_copy_optional_string(root, "error_code",
+                                                   uplink->metrics->error_code,
+                                                   sizeof(uplink->metrics->error_code));
+        }
+        cloud_opus_uplink_copy_optional_string(root, "session_id",
+                                               uplink->session.session_id,
+                                               sizeof(uplink->session.session_id));
+        cloud_opus_uplink_copy_optional_string(root, "audio_stream_url",
+                                               uplink->session.audio_stream_url,
+                                               sizeof(uplink->session.audio_stream_url));
+        snprintf(uplink->session.status, sizeof(uplink->session.status), "%s", "done");
+    } else if (strcmp(type, "error") == 0) {
+        uplink->error_received = true;
+        if (uplink->metrics != NULL) {
+            cloud_opus_uplink_copy_optional_string(root, "error_code",
+                                                   uplink->metrics->error_code,
+                                                   sizeof(uplink->metrics->error_code));
+            cloud_opus_uplink_copy_optional_string(root, "error_message",
+                                                   uplink->metrics->error_message,
+                                                   sizeof(uplink->metrics->error_message));
+        }
+    }
+
+    cJSON_Delete(root);
+}
+
+static void cloud_opus_uplink_ws_event_handler(void *handler_args,
+                                               esp_event_base_t base,
+                                               int32_t event_id,
+                                               void *event_data)
+{
+    (void)base;
+    cloud_opus_uplink_t *uplink = (cloud_opus_uplink_t *)handler_args;
+    if (uplink == NULL) {
+        return;
+    }
+
+    if (event_id == WEBSOCKET_EVENT_CONNECTED) {
+        uplink->connected = true;
+        return;
+    }
+    if (event_id == WEBSOCKET_EVENT_DISCONNECTED || event_id == WEBSOCKET_EVENT_CLOSED) {
+        uplink->disconnected = true;
+        return;
+    }
+    if (event_id == WEBSOCKET_EVENT_ERROR) {
+        uplink->error_received = true;
+        if (uplink->metrics != NULL && uplink->metrics->error_code[0] == '\0') {
+            snprintf(uplink->metrics->error_code, sizeof(uplink->metrics->error_code),
+                     "%s", "websocket_error");
+        }
+        return;
+    }
+    if (event_id != WEBSOCKET_EVENT_DATA || event_data == NULL) {
+        return;
+    }
+
+    esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
+    if (data->data_ptr == NULL || data->data_len <= 0 || data->payload_len <= 0) {
+        return;
+    }
+    if (data->payload_offset == 0) {
+        uplink->rx_json_len = 0;
+    }
+    if (uplink->rx_json_len + (size_t)data->data_len >= sizeof(uplink->rx_json)) {
+        uplink->rx_json_len = 0;
+        if (uplink->metrics != NULL) {
+            snprintf(uplink->metrics->error_code, sizeof(uplink->metrics->error_code),
+                     "%s", "websocket_json_too_large");
+        }
+        uplink->error_received = true;
+        return;
+    }
+    memcpy(uplink->rx_json + uplink->rx_json_len, data->data_ptr, (size_t)data->data_len);
+    uplink->rx_json_len += (size_t)data->data_len;
+    uplink->rx_json[uplink->rx_json_len] = '\0';
+    if (data->payload_offset + data->data_len >= data->payload_len) {
+        cloud_opus_uplink_handle_json(uplink, uplink->rx_json);
+        uplink->rx_json_len = 0;
+    }
+}
+
+static esp_err_t cloud_opus_uplink_open_encoder(cloud_opus_uplink_t *uplink)
+{
+    if (uplink == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_opus_enc_config_t enc_cfg = ESP_OPUS_ENC_CONFIG_DEFAULT();
+    enc_cfg.sample_rate = DEMO_AUDIO_SAMPLE_RATE;
+    enc_cfg.channel = DEMO_AUDIO_CHANNELS;
+    enc_cfg.bits_per_sample = DEMO_AUDIO_BITS_PER_SAMPLE;
+    enc_cfg.bitrate = V5_OPUS_UPLINK_BITRATE;
+    enc_cfg.frame_duration = cloud_opus_uplink_frame_duration();
+    enc_cfg.application_mode = ESP_OPUS_ENC_APPLICATION_AUDIO;
+    enc_cfg.complexity = 1;
+    enc_cfg.enable_vbr = true;
+
+    esp_audio_err_t enc_ret = esp_opus_enc_open(&enc_cfg, sizeof(enc_cfg), &uplink->encoder);
+    if (enc_ret != ESP_AUDIO_ERR_OK || uplink->encoder == NULL) {
+        ESP_LOGE(TAG, "v5_uplink error_code=opus_encoder_open_failed ret=%d", enc_ret);
+        return ESP_FAIL;
+    }
+
+    int in_size = 0;
+    int out_size = 0;
+    enc_ret = esp_opus_enc_get_frame_size(uplink->encoder, &in_size, &out_size);
+    if (enc_ret != ESP_AUDIO_ERR_OK || in_size <= 0 || out_size <= 0) {
+        ESP_LOGE(TAG, "v5_uplink error_code=opus_encoder_frame_size_failed ret=%d", enc_ret);
+        return ESP_FAIL;
+    }
+    uplink->pcm_frame_size = (size_t)in_size;
+    uplink->opus_frame_size = (size_t)out_size;
+    uplink->ws_frame_size = 8 + 2 + uplink->opus_frame_size;
+    uplink->pcm_frame = calloc(1, uplink->pcm_frame_size);
+    uplink->opus_frame = calloc(1, uplink->opus_frame_size);
+    uplink->ws_frame = calloc(1, uplink->ws_frame_size);
+    if (uplink->pcm_frame == NULL || uplink->opus_frame == NULL || uplink->ws_frame == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG,
+             "v5_uplink opus_encoder_opened sample_rate=%d channels=%d frame_ms=%d pcm_frame_bytes=%u opus_out_bytes=%u bitrate=%d",
+             DEMO_AUDIO_SAMPLE_RATE,
+             DEMO_AUDIO_CHANNELS,
+             V5_OPUS_UPLINK_FRAME_MS,
+             (unsigned)uplink->pcm_frame_size,
+             (unsigned)uplink->opus_frame_size,
+             V5_OPUS_UPLINK_BITRATE);
+    return ESP_OK;
+}
+
+static esp_err_t cloud_opus_uplink_send_current_frame(cloud_opus_uplink_t *uplink)
+{
+    if (uplink == NULL || uplink->pcm_frame_len != uplink->pcm_frame_size) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_audio_enc_in_frame_t in_frame = {
+        .buffer = uplink->pcm_frame,
+        .len = (uint32_t)uplink->pcm_frame_size,
+    };
+    esp_audio_enc_out_frame_t out_frame = {
+        .buffer = uplink->opus_frame,
+        .len = (uint32_t)uplink->opus_frame_size,
+    };
+    const int64_t encode_start_us = esp_timer_get_time();
+    esp_audio_err_t enc_ret = esp_opus_enc_process(uplink->encoder, &in_frame, &out_frame);
+    if (enc_ret != ESP_AUDIO_ERR_OK || out_frame.encoded_bytes == 0 || out_frame.encoded_bytes > UINT16_MAX) {
+        ESP_LOGE(TAG, "v5_uplink error_code=opus_encode_failed ret=%d encoded_bytes=%u",
+                 enc_ret,
+                 (unsigned)out_frame.encoded_bytes);
+        return ESP_FAIL;
+    }
+    if (uplink->metrics != NULL && uplink->metrics->first_opus_frame_us == 0) {
+        uplink->metrics->first_opus_frame_us = esp_timer_get_time() - uplink->start_us;
+    }
+
+    const uint32_t payload_len = 2 + out_frame.encoded_bytes;
+    const size_t frame_len = 8 + (size_t)payload_len;
+    if (frame_len > uplink->ws_frame_size) {
+        return ESP_ERR_NO_MEM;
+    }
+    cloud_write_be32(uplink->ws_frame, uplink->sequence);
+    cloud_write_be32(uplink->ws_frame + 4, payload_len);
+    cloud_write_be16(uplink->ws_frame + 8, (uint16_t)out_frame.encoded_bytes);
+    memcpy(uplink->ws_frame + 10, uplink->opus_frame, out_frame.encoded_bytes);
+
+    const int sent = esp_websocket_client_send_bin(uplink->client,
+                                                   (const char *)uplink->ws_frame,
+                                                   (int)frame_len,
+                                                   pdMS_TO_TICKS(V5_OPUS_UPLINK_WS_SEND_TIMEOUT_MS));
+    if (sent != (int)frame_len) {
+        ESP_LOGE(TAG,
+                 "v5_uplink error_code=websocket_send_failed sequence=%u sent=%d expected=%u",
+                 (unsigned)uplink->sequence,
+                 sent,
+                 (unsigned)frame_len);
+        return ESP_FAIL;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    if (uplink->metrics != NULL) {
+        if (uplink->metrics->first_ws_frame_sent_us == 0) {
+            uplink->metrics->first_ws_frame_sent_us = now_us - uplink->start_us;
+        }
+        uplink->metrics->last_ws_frame_sent_us = now_us - uplink->start_us;
+        uplink->metrics->uplink_frame_count++;
+        uplink->metrics->uplink_opus_bytes += out_frame.encoded_bytes;
+    }
+    ESP_LOGD(TAG,
+             "v5_uplink frame_sent sequence=%u pcm_bytes=%u opus_bytes=%u encode_ms=%.1f",
+             (unsigned)uplink->sequence,
+             (unsigned)uplink->pcm_frame_size,
+             (unsigned)out_frame.encoded_bytes,
+             (double)(now_us - encode_start_us) / 1000.0);
+    uplink->sequence++;
+    uplink->pcm_frame_len = 0;
+    return ESP_OK;
+}
+
+static esp_err_t cloud_opus_uplink_wait_connected(cloud_opus_uplink_t *uplink)
+{
+    const int64_t start_us = esp_timer_get_time();
+    while (!uplink->connected && !uplink->error_received &&
+           (esp_timer_get_time() - start_us) < ((int64_t)V5_OPUS_UPLINK_WS_CONNECT_TIMEOUT_MS * 1000)) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!uplink->connected) {
+        if (uplink->metrics != NULL && uplink->metrics->error_code[0] == '\0') {
+            snprintf(uplink->metrics->error_code, sizeof(uplink->metrics->error_code),
+                     "%s", "websocket_connect_timeout");
+        }
+        return ESP_ERR_TIMEOUT;
+    }
+    if (uplink->metrics != NULL) {
+        uplink->metrics->ws_connect_elapsed_us = esp_timer_get_time() - start_us;
+    }
+    return ESP_OK;
+}
+
+esp_err_t cloud_client_opus_uplink_begin(cloud_opus_uplink_t **out_uplink,
+                                         cloud_opus_uplink_metrics_t *metrics)
+{
+    if (out_uplink == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_uplink = NULL;
+    if (metrics != NULL) {
+        memset(metrics, 0, sizeof(*metrics));
+        snprintf(metrics->asr_provider, sizeof(metrics->asr_provider), "%s", V5_OPUS_UPLINK_ASR_PROVIDER);
+    }
+
+    cloud_opus_uplink_t *uplink = calloc(1, sizeof(*uplink));
+    if (uplink == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    uplink->metrics = metrics;
+    uplink->start_us = esp_timer_get_time();
+
+    esp_err_t ret = cloud_opus_uplink_open_encoder(uplink);
+    if (ret != ESP_OK) {
+        if (metrics != NULL) {
+            snprintf(metrics->error_code, sizeof(metrics->error_code), "%s", "opus_encoder_init_failed");
+        }
+        cloud_client_opus_uplink_abort(uplink);
+        return ret;
+    }
+
+    ret = cloud_build_ws_url(uplink->ws_url, sizeof(uplink->ws_url), "api/v5/realtime/opus-stream");
+    if (ret != ESP_OK) {
+        if (metrics != NULL) {
+            snprintf(metrics->error_code, sizeof(metrics->error_code), "%s", "websocket_url_build_failed");
+        }
+        cloud_client_opus_uplink_abort(uplink);
+        return ret;
+    }
+
+    snprintf(uplink->ws_headers,
+             sizeof(uplink->ws_headers),
+             "X-Device-Id: %s\r\n"
+             "X-Audio-Packetization: framed-v1\r\n"
+             "X-Audio-Format: opus\r\n"
+             "X-Opus-Sample-Rate: %d\r\n"
+             "X-Opus-Channels: %d\r\n"
+             "X-Opus-Frame-Duration-Ms: %d\r\n",
+             DEMO_DEVICE_ID,
+             DEMO_AUDIO_SAMPLE_RATE,
+             DEMO_AUDIO_CHANNELS,
+             V5_OPUS_UPLINK_FRAME_MS);
+
+    esp_websocket_client_config_t ws_cfg = {
+        .uri = uplink->ws_url,
+        .headers = uplink->ws_headers,
+        .disable_auto_reconnect = true,
+        .network_timeout_ms = V5_OPUS_UPLINK_WS_SEND_TIMEOUT_MS,
+        .buffer_size = V5_OPUS_UPLINK_WS_BUFFER_SIZE,
+        .task_stack = V5_OPUS_UPLINK_WS_TASK_STACK_SIZE,
+    };
+    uplink->client = esp_websocket_client_init(&ws_cfg);
+    if (uplink->client == NULL) {
+        if (metrics != NULL) {
+            snprintf(metrics->error_code, sizeof(metrics->error_code), "%s", "websocket_init_failed");
+        }
+        cloud_client_opus_uplink_abort(uplink);
+        return ESP_FAIL;
+    }
+    ret = esp_websocket_register_events(uplink->client,
+                                        WEBSOCKET_EVENT_ANY,
+                                        cloud_opus_uplink_ws_event_handler,
+                                        uplink);
+    if (ret != ESP_OK) {
+        cloud_client_opus_uplink_abort(uplink);
+        return ret;
+    }
+
+    ESP_LOGI(TAG,
+             "v5_uplink ws_connect_start url=%s asr_provider=%s frame_ms=%d",
+             uplink->ws_url,
+             V5_OPUS_UPLINK_ASR_PROVIDER,
+             V5_OPUS_UPLINK_FRAME_MS);
+    ret = esp_websocket_client_start(uplink->client);
+    if (ret != ESP_OK) {
+        if (metrics != NULL) {
+            snprintf(metrics->error_code, sizeof(metrics->error_code), "%s", "websocket_start_failed");
+        }
+        cloud_client_opus_uplink_abort(uplink);
+        return ret;
+    }
+    ret = cloud_opus_uplink_wait_connected(uplink);
+    if (ret != ESP_OK) {
+        cloud_client_opus_uplink_abort(uplink);
+        return ret;
+    }
+    ESP_LOGI(TAG,
+             "v5_uplink ws_connect_done elapsed_ms=%.1f",
+             metrics != NULL ? (double)metrics->ws_connect_elapsed_us / 1000.0 : -1.0);
+
+    char start_json[192];
+    const int written = snprintf(start_json,
+                                 sizeof(start_json),
+                                 "{\"type\":\"start\",\"run_asr\":true,\"run_full_chain\":true,\"asr_provider\":\"%s\",\"answer_mode\":\"%s\"}",
+                                 V5_OPUS_UPLINK_ASR_PROVIDER,
+                                 V5_OPUS_UPLINK_ANSWER_MODE);
+    if (written < 0 || (size_t)written >= sizeof(start_json)) {
+        cloud_client_opus_uplink_abort(uplink);
+        return ESP_ERR_NO_MEM;
+    }
+    const int sent = esp_websocket_client_send_text(uplink->client,
+                                                    start_json,
+                                                    written,
+                                                    pdMS_TO_TICKS(V5_OPUS_UPLINK_WS_SEND_TIMEOUT_MS));
+    if (sent != written) {
+        if (metrics != NULL) {
+            snprintf(metrics->error_code, sizeof(metrics->error_code), "%s", "websocket_start_control_failed");
+        }
+        cloud_client_opus_uplink_abort(uplink);
+        return ESP_FAIL;
+    }
+
+    *out_uplink = uplink;
+    return ESP_OK;
+}
+
+esp_err_t cloud_client_opus_uplink_send_pcm(cloud_opus_uplink_t *uplink,
+                                            const uint8_t *pcm,
+                                            size_t pcm_bytes)
+{
+    if (uplink == NULL || pcm == NULL || pcm_bytes == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (uplink->error_received || !esp_websocket_client_is_connected(uplink->client)) {
+        if (uplink->metrics != NULL && uplink->metrics->error_code[0] == '\0') {
+            snprintf(uplink->metrics->error_code, sizeof(uplink->metrics->error_code),
+                     "%s", "websocket_disconnected");
+        }
+        return ESP_FAIL;
+    }
+
+    if (uplink->metrics != NULL) {
+        if (uplink->metrics->first_pcm_frame_us == 0) {
+            uplink->metrics->first_pcm_frame_us = esp_timer_get_time() - uplink->start_us;
+        }
+        uplink->metrics->uplink_pcm_bytes += pcm_bytes;
+    }
+
+    size_t offset = 0;
+    while (offset < pcm_bytes) {
+        const size_t copy_bytes =
+            (pcm_bytes - offset) < (uplink->pcm_frame_size - uplink->pcm_frame_len)
+                ? (pcm_bytes - offset)
+                : (uplink->pcm_frame_size - uplink->pcm_frame_len);
+        memcpy(uplink->pcm_frame + uplink->pcm_frame_len, pcm + offset, copy_bytes);
+        uplink->pcm_frame_len += copy_bytes;
+        offset += copy_bytes;
+        if (uplink->pcm_frame_len == uplink->pcm_frame_size) {
+            esp_err_t ret = cloud_opus_uplink_send_current_frame(uplink);
+            if (ret != ESP_OK) {
+                if (uplink->metrics != NULL && uplink->metrics->error_code[0] == '\0') {
+                    snprintf(uplink->metrics->error_code, sizeof(uplink->metrics->error_code),
+                             "%s", "opus_frame_send_failed");
+                }
+                return ret;
+            }
+        }
+    }
+    return ESP_OK;
+}
+
+esp_err_t cloud_client_opus_uplink_finish(cloud_opus_uplink_t *uplink,
+                                          cloud_realtime_session_t *session)
+{
+    if (uplink == NULL || session == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (uplink->pcm_frame_len > 0) {
+        memset(uplink->pcm_frame + uplink->pcm_frame_len, 0, uplink->pcm_frame_size - uplink->pcm_frame_len);
+        uplink->pcm_frame_len = uplink->pcm_frame_size;
+        esp_err_t ret = cloud_opus_uplink_send_current_frame(uplink);
+        if (ret != ESP_OK) {
+            cloud_client_opus_uplink_abort(uplink);
+            return ret;
+        }
+    }
+
+    const char end_json[] = "{\"type\":\"end\"}";
+    int sent = esp_websocket_client_send_text(uplink->client,
+                                              end_json,
+                                              (int)strlen(end_json),
+                                              pdMS_TO_TICKS(V5_OPUS_UPLINK_WS_SEND_TIMEOUT_MS));
+    if (sent != (int)strlen(end_json)) {
+        if (uplink->metrics != NULL) {
+            snprintf(uplink->metrics->error_code, sizeof(uplink->metrics->error_code),
+                     "%s", "websocket_end_control_failed");
+        }
+        cloud_client_opus_uplink_abort(uplink);
+        return ESP_FAIL;
+    }
+    if (uplink->metrics != NULL) {
+        uplink->metrics->end_sent_us = esp_timer_get_time() - uplink->start_us;
+    }
+    ESP_LOGI(TAG, "v5_uplink end_sent_ms=%.1f frame_count=%u opus_bytes=%u pcm_bytes=%u",
+             uplink->metrics != NULL ? (double)uplink->metrics->end_sent_us / 1000.0 : -1.0,
+             uplink->metrics != NULL ? (unsigned)uplink->metrics->uplink_frame_count : 0,
+             uplink->metrics != NULL ? (unsigned)uplink->metrics->uplink_opus_bytes : 0,
+             uplink->metrics != NULL ? (unsigned)uplink->metrics->uplink_pcm_bytes : 0);
+
+    const int64_t wait_start_us = esp_timer_get_time();
+    while (!uplink->done_received && !uplink->error_received &&
+           (esp_timer_get_time() - wait_start_us) < ((int64_t)V5_OPUS_UPLINK_WS_DONE_TIMEOUT_MS * 1000)) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (!uplink->done_received) {
+        if (uplink->metrics != NULL && uplink->metrics->error_code[0] == '\0') {
+            snprintf(uplink->metrics->error_code, sizeof(uplink->metrics->error_code),
+                     "%s", uplink->error_received ? "websocket_server_error" : "websocket_done_timeout");
+        }
+        cloud_client_opus_uplink_abort(uplink);
+        return uplink->error_received ? ESP_FAIL : ESP_ERR_TIMEOUT;
+    }
+    if (uplink->session.audio_stream_url[0] == '\0') {
+        if (uplink->metrics != NULL && uplink->metrics->error_code[0] == '\0') {
+            snprintf(uplink->metrics->error_code, sizeof(uplink->metrics->error_code),
+                     "%s", "audio_stream_url_missing");
+        }
+        cloud_client_opus_uplink_abort(uplink);
+        return DEMO_CLOUD_ERR_INVALID_RESPONSE;
+    }
+
+    *session = uplink->session;
+    (void)esp_websocket_client_close(uplink->client, pdMS_TO_TICKS(1000));
+    cloud_client_opus_uplink_abort(uplink);
+    return ESP_OK;
+}
+
+void cloud_client_opus_uplink_abort(cloud_opus_uplink_t *uplink)
+{
+    if (uplink == NULL) {
+        return;
+    }
+    if (uplink->client != NULL) {
+        if (esp_websocket_client_is_connected(uplink->client)) {
+            (void)esp_websocket_client_stop(uplink->client);
+        }
+        (void)esp_websocket_client_destroy(uplink->client);
+        uplink->client = NULL;
+    }
+    if (uplink->encoder != NULL) {
+        esp_opus_enc_close(uplink->encoder);
+        uplink->encoder = NULL;
+    }
+    free(uplink->pcm_frame);
+    free(uplink->opus_frame);
+    free(uplink->ws_frame);
+    free(uplink);
 }
 
 esp_err_t cloud_client_submit_pcm_task(const uint8_t *pcm,

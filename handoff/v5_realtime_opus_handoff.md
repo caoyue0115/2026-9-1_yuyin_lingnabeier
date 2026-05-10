@@ -888,3 +888,111 @@ python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --bas
 | start override | dashscope | false | 情解释阿弥陀佛是什么意思？ | 5494 | 10682 | 15959 | 61 |
 
 补充修复：DashScope realtime adapter 以前复用了全局 `settings.asr_provider == "dashscope"` 作为配置判断。P2.4 后本地 `.env` 默认 provider 是 `volcengine`，这会导致显式 `--asr-provider dashscope` 被误判为 `asr_not_configured`。已改为 DashScope adapter 只检查 DashScope API key 与 ASR model，不再依赖全局默认 provider。
+
+## 2026-05-10 P3：ESP32-S3 板端 Opus framed-v1 上行
+
+本轮进入 ESP32-S3 / ESP-VoCat v1.2 板端改造。目标是把 touch 触发后的上行路径从“整段 PCM 录完后提交”改为“开口后按帧 Opus encode，再以 framed-v1 WebSocket binary frame 持续上行到 v5 云端”。
+
+新增设计文档：
+
+```text
+docs/superpowers/specs/2026-05-10-v5-esp32-opus-uplink-design.md
+```
+
+板端新增配置宏，默认启用 v5 WS 上行并保留旧路径 fallback：
+
+```text
+V5_OPUS_UPLINK_WS_ENABLED=1
+V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=1
+V5_OPUS_UPLINK_FRAME_MS=60
+V5_OPUS_UPLINK_ASR_PROVIDER="volcengine"
+V5_OPUS_UPLINK_ANSWER_MODE="short"
+V5_OPUS_UPLINK_BITRATE=24000
+```
+
+本轮代码边界：
+
+- 保持 touch 触发，不改回 GPIO6。
+- 保持 waiting_speech 原口径：播放“请讲”、等待开口、首次超时重等一次、二次超时退出。
+- 新增 `audio_in_stream_after_speech_start()`，从已打开麦克风持续读取 PCM chunk 并通过 callback 推给上行 client，不再为 v5 主路径分配整段录音 buffer。
+- 新增 `cloud_client_opus_uplink_*`，连接 `WS /api/v5/realtime/opus-stream`，发送 start config、framed-v1 Opus binary frame 和 end control。
+- framed-v1 与 `src/providers/opus.py` 对齐：outer header 为 4-byte big-endian sequence + 4-byte big-endian payload length；payload 为 2-byte big-endian Opus packet length + Opus packet。
+- Opus encoder 使用 `espressif/esp_audio_codec` 2.4.1 已提供的 `esp_opus_enc_*`，新增依赖 `espressif/esp_websocket_client` 1.7.0。
+- 不修改 `cloud_client_stream_realtime_audio()` 下行收流/解码/播放队列，不调整 v24 下行 jitter/prebuffer/close/tail/intro 并行参数。
+
+第一版任务模型是串行 capture -> encode -> WS send，日志保留阶段耗时和上行指标；后续若真机发现 send/encode 阻塞 mic read，再拆 PCM queue 和 Opus queue。
+
+fallback 行为：
+
+- WS URL/连接/start control、Opus encoder、binary send、云端 error/done 缺少 `audio_stream_url` 均记录 `error_code`。
+- 若 `V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=1`，日志打印 `fallback_to_legacy_audio=true` 并尝试旧整段录音提交路径。
+- 如果错误发生在 v5 streaming 已经消费完用户音频之后，fallback 可能需要用户重说；第一版以编译级改造和接口对齐为主，不伪装真机体验已稳定。
+
+新增板端指标日志包括：
+
+```text
+v5_uplink_enabled
+touch_trigger_ms
+prompt_play_start_ms
+prompt_play_end_ms
+speech_start_ms
+ws_connect_start
+ws_connect_done
+asr_provider
+first_pcm_frame_ms
+first_opus_frame_ms
+first_ws_frame_sent_ms
+last_ws_frame_sent_ms
+end_sent_ms
+first_ack_ms
+asr_final_received_ms
+done_received_ms
+first_audio_play_ms
+uplink_frame_count
+uplink_opus_bytes
+uplink_pcm_bytes
+compression_ratio
+heap_free
+psram_free
+```
+
+ESP-IDF 编译结果：
+
+```bash
+cd esp_idf_demo
+source /home/aitopia/esp/esp-idf-v5.5.4-full/export.sh
+idf.py build
+```
+
+结果：通过。构建产物 `build/esp_idf_demo.bin`，binary size `0x37bf0`，factory partition 剩余约 89%。
+
+Python 回归：
+
+```bash
+python -m pytest -q
+```
+
+结果：通过，`143 passed, 1 warning`。为避免 ESP-IDF component manager 拉下来的 `esp_idf_demo/managed_components/lvgl__lvgl/tests` 被顶层 pytest 误收集，本轮新增 `pytest.ini`，限定 `testpaths = tests`。
+
+安全检查：
+
+- `.env`、`esp_idf_demo/build/`、`esp_idf_demo/managed_components/`、`data/incoming/`、`data/output/`、`tmp/` 均由 `.gitignore` 覆盖。
+- 凭据扫描排除了 `.env`、build、managed components、data、indices；命中项均为代码变量名、测试 dummy token 或文档配置名，未发现真实凭据。
+- 本轮未纳入运行音频、trace、payload 或 build 产物。
+
+下一步真机验证：
+
+```bash
+cd esp_idf_demo
+source /home/aitopia/esp/esp-idf-v5.5.4-full/export.sh
+idf.py -p /dev/ttyACM0 flash monitor
+```
+
+真机日志优先确认：
+
+- `v5_uplink_enabled=1`
+- `ws_connect_done`
+- `first_ws_frame_sent_ms` 出现在录音结束前
+- `asr_provider=volcengine`
+- `done_received_ms` 后进入现有 `stream_audio`
+- 若失败，确认 `fallback_to_legacy_audio=true` 和明确 `error_code`

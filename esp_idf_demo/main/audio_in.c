@@ -248,6 +248,7 @@ static esp_err_t audio_in_record_after_voice_start_impl(const uint8_t *speech_pr
         out_metrics->voice_started = voice_started;
         out_metrics->max_level = max_chunk_level;
         out_metrics->elapsed_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
+        out_metrics->pcm_bytes = pcm_offset;
     }
 
     ESP_LOGI(TAG,
@@ -375,6 +376,109 @@ esp_err_t audio_in_record_after_speech_start(const uint8_t *speech_prefix,
                                                   out_buffer,
                                                   out_bytes,
                                                   out_metrics);
+}
+
+esp_err_t audio_in_stream_after_speech_start(const uint8_t *speech_prefix,
+                                             size_t speech_prefix_bytes,
+                                             audio_in_pcm_chunk_callback_t callback,
+                                             void *user_ctx,
+                                             audio_in_record_metrics_t *out_metrics)
+{
+    if (callback == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (out_metrics != NULL) {
+        memset(out_metrics, 0, sizeof(*out_metrics));
+    }
+    if (!s_audio_in_state.opened || s_audio_in_state.mic_handle == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t *chunk = malloc(DEMO_AUDIO_CHUNK_BYTES);
+    if (chunk == NULL) {
+        audio_in_close_locked();
+        return ESP_ERR_NO_MEM;
+    }
+
+    uint32_t max_chunk_level = 0;
+    size_t pcm_bytes = 0;
+    size_t trailing_silence_bytes = 0;
+    bool voice_started = speech_prefix_bytes > 0;
+    bool vad_stopped = false;
+    const int64_t start_us = esp_timer_get_time();
+
+    if (speech_prefix != NULL && speech_prefix_bytes > 0) {
+        esp_err_t ret = callback(speech_prefix, speech_prefix_bytes, user_ctx);
+        if (ret != ESP_OK) {
+            free(chunk);
+            audio_in_close_locked();
+            return ret;
+        }
+        pcm_bytes += speech_prefix_bytes;
+        max_chunk_level = audio_in_avg_abs_pcm16_le(speech_prefix, speech_prefix_bytes);
+    }
+
+    while (pcm_bytes < DEMO_AUDIO_BUFFER_BYTES) {
+        const size_t chunk_bytes = DEMO_AUDIO_BUFFER_BYTES - pcm_bytes > DEMO_AUDIO_CHUNK_BYTES ?
+                                   DEMO_AUDIO_CHUNK_BYTES :
+                                   DEMO_AUDIO_BUFFER_BYTES - pcm_bytes;
+        esp_err_t ret = audio_in_read_chunk(chunk, chunk_bytes);
+        if (ret != ESP_OK) {
+            free(chunk);
+            audio_in_close_locked();
+            return ret;
+        }
+
+        ret = callback(chunk, chunk_bytes, user_ctx);
+        if (ret != ESP_OK) {
+            free(chunk);
+            audio_in_close_locked();
+            return ret;
+        }
+        pcm_bytes += chunk_bytes;
+
+#if DEMO_RECORD_VAD_ENABLED
+        const uint32_t chunk_level = audio_in_avg_abs_pcm16_le(chunk, chunk_bytes);
+        if (chunk_level > max_chunk_level) {
+            max_chunk_level = chunk_level;
+        }
+        if (!voice_started && chunk_level >= DEMO_RECORD_VAD_START_THRESHOLD) {
+            voice_started = true;
+            trailing_silence_bytes = 0;
+        } else if (voice_started) {
+            if (chunk_level <= DEMO_RECORD_VAD_SILENCE_THRESHOLD) {
+                trailing_silence_bytes += chunk_bytes;
+            } else {
+                trailing_silence_bytes = 0;
+            }
+        }
+        if (voice_started &&
+            pcm_bytes >= DEMO_RECORD_MIN_BYTES &&
+            trailing_silence_bytes >= DEMO_RECORD_VAD_SILENCE_BYTES) {
+            vad_stopped = true;
+            break;
+        }
+#endif
+    }
+
+    audio_in_close_locked();
+    if (out_metrics != NULL) {
+        out_metrics->vad_stopped = vad_stopped;
+        out_metrics->voice_started = voice_started;
+        out_metrics->max_level = max_chunk_level;
+        out_metrics->elapsed_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
+        out_metrics->pcm_bytes = pcm_bytes;
+    }
+    ESP_LOGI(TAG,
+             "Streamed %u PCM bytes in %.3f s vad_enabled=%d vad_stopped=%d voice_started=%d max_level=%u",
+             (unsigned)pcm_bytes,
+             (double)(esp_timer_get_time() - start_us) / 1000000.0,
+             DEMO_RECORD_VAD_ENABLED,
+             vad_stopped,
+             voice_started,
+             (unsigned)max_chunk_level);
+    free(chunk);
+    return ESP_OK;
 }
 
 void audio_in_deinit(void)

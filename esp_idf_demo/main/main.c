@@ -139,6 +139,11 @@ static void app_log_runtime_config(void)
     ESP_LOGI(TAG, "  cloud_poll_timeout_ms=%d", DEMO_CLOUD_POLL_TIMEOUT_MS);
     ESP_LOGI(TAG, "  cloud_poll_interval_ms=%d", DEMO_CLOUD_POLL_INTERVAL_MS);
     ESP_LOGI(TAG, "  realtime_session_timeout_ms=%d", DEMO_REALTIME_SESSION_TIMEOUT_MS);
+    ESP_LOGI(TAG, "  v5_uplink_enabled=%d", V5_OPUS_UPLINK_WS_ENABLED);
+    ESP_LOGI(TAG, "  v5_uplink_fallback_legacy_audio=%d", V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO);
+    ESP_LOGI(TAG, "  v5_uplink_frame_ms=%d", V5_OPUS_UPLINK_FRAME_MS);
+    ESP_LOGI(TAG, "  v5_uplink_asr_provider=%s", V5_OPUS_UPLINK_ASR_PROVIDER);
+    ESP_LOGI(TAG, "  v5_uplink_answer_mode=%s", V5_OPUS_UPLINK_ANSWER_MODE);
     ESP_LOGI(TAG, "  realtime_audio_open_timeout_ms=%d", DEMO_REALTIME_AUDIO_OPEN_TIMEOUT_MS);
     ESP_LOGI(TAG, "  realtime_audio_read_timeout_ms=%d", DEMO_REALTIME_AUDIO_READ_TIMEOUT_MS);
     ESP_LOGI(TAG, "  realtime_audio_jitter_buffer_bytes=%d", DEMO_REALTIME_AUDIO_JITTER_BUFFER_BYTES);
@@ -292,6 +297,9 @@ static esp_err_t app_realtime_audio_chunk_sink(const uint8_t *chunk,
         ESP_LOGI(TAG,
                  "first_audio_byte_local_ms=%.1f",
                  (double)(ctx->first_chunk_us - ctx->pipeline_start_us) / 1000.0);
+        ESP_LOGI(TAG,
+                 "first_audio_play_ms=%.1f",
+                 (double)(ctx->first_chunk_us - ctx->pipeline_start_us) / 1000.0);
         if (ctx->intro_end_us > 0) {
             ESP_LOGI(TAG,
                      "intro_end_to_first_audio_byte_ms=%.1f",
@@ -338,6 +346,47 @@ static void app_log_stage_result(const char *stage, esp_err_t ret, int64_t elaps
         ESP_LOGE(TAG, "stage=%s event=failed err=%s elapsed_ms=%.1f",
                  stage, esp_err_to_name(ret), (double)elapsed_us / 1000.0);
     }
+}
+
+static esp_err_t app_v5_opus_uplink_pcm_sink(const uint8_t *pcm,
+                                             size_t pcm_bytes,
+                                             void *user_ctx)
+{
+    return cloud_client_opus_uplink_send_pcm((cloud_opus_uplink_t *)user_ctx, pcm, pcm_bytes);
+}
+
+static void app_log_v5_uplink_metrics(const cloud_opus_uplink_metrics_t *metrics,
+                                      int64_t pipeline_start_us)
+{
+    if (metrics == NULL) {
+        return;
+    }
+    const double compression_ratio =
+        metrics->uplink_opus_bytes > 0
+            ? (double)metrics->uplink_pcm_bytes / (double)metrics->uplink_opus_bytes
+            : 0.0;
+    ESP_LOGI(TAG,
+             "v5_uplink_summary asr_provider=%s first_pcm_frame_ms=%.1f first_opus_frame_ms=%.1f first_ws_frame_sent_ms=%.1f last_ws_frame_sent_ms=%.1f end_sent_ms=%.1f first_ack_ms=%.1f asr_final_received_ms=%.1f done_received_ms=%.1f uplink_frame_count=%u uplink_opus_bytes=%u uplink_pcm_bytes=%u compression_ratio=%.3f heap_free=%u psram_free=%u question_text=%s error_code=%s",
+             metrics->asr_provider[0] != '\0' ? metrics->asr_provider : V5_OPUS_UPLINK_ASR_PROVIDER,
+             metrics->first_pcm_frame_us > 0 ? (double)metrics->first_pcm_frame_us / 1000.0 : -1.0,
+             metrics->first_opus_frame_us > 0 ? (double)metrics->first_opus_frame_us / 1000.0 : -1.0,
+             metrics->first_ws_frame_sent_us > 0 ? (double)metrics->first_ws_frame_sent_us / 1000.0 : -1.0,
+             metrics->last_ws_frame_sent_us > 0 ? (double)metrics->last_ws_frame_sent_us / 1000.0 : -1.0,
+             metrics->end_sent_us > 0 ? (double)metrics->end_sent_us / 1000.0 : -1.0,
+             metrics->first_ack_us > 0 ? (double)metrics->first_ack_us / 1000.0 : -1.0,
+             metrics->asr_final_received_us > 0 ? (double)metrics->asr_final_received_us / 1000.0 : -1.0,
+             metrics->done_received_us > 0 ? (double)metrics->done_received_us / 1000.0 : -1.0,
+             (unsigned)metrics->uplink_frame_count,
+             (unsigned)metrics->uplink_opus_bytes,
+             (unsigned)metrics->uplink_pcm_bytes,
+             compression_ratio,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             metrics->question_text[0] != '\0' ? metrics->question_text : "(empty)",
+             metrics->error_code[0] != '\0' ? metrics->error_code : "(none)");
+    ESP_LOGI(TAG,
+             "v5_uplink_total_ms=%.1f",
+             (double)(esp_timer_get_time() - pipeline_start_us) / 1000.0);
 }
 
 static void app_play_retry_prompt(const char *reason, const char *path)
@@ -557,6 +606,7 @@ static esp_err_t run_trigger_pipeline(app_state_t *state)
     cloud_task_result_t result = {0};
     cloud_realtime_session_t realtime_session = {0};
     cloud_realtime_audio_metrics_t realtime_metrics = {0};
+    cloud_opus_uplink_metrics_t opus_uplink_metrics = {0};
     app_realtime_stream_ctx_t realtime_stream_ctx = {
         .saw_first_chunk = false,
         .total_bytes = 0,
@@ -572,6 +622,8 @@ static esp_err_t run_trigger_pipeline(app_state_t *state)
     const char *pipeline_error_code = "unknown";
     int64_t stage_start_us = 0;
     int waiting_speech_attempt = 0;
+    bool realtime_session_ready = false;
+    bool v5_uplink_attempted = false;
 
     if (!app_wifi_is_connected()) {
         ESP_LOGE(TAG, "Wi-Fi is not connected; refusing to start pipeline");
@@ -580,9 +632,13 @@ static esp_err_t run_trigger_pipeline(app_state_t *state)
 
     app_log_pipeline_stack_watermark("pipeline_start");
     app_log_heap_snapshot("pipeline_start");
+    ESP_LOGI(TAG, "touch_trigger_ms=0.0");
+    ESP_LOGI(TAG, "v5_uplink_enabled=%d", V5_OPUS_UPLINK_WS_ENABLED);
 
 #if DEMO_RECORD_PROMPT_ENABLED
     app_set_state(state, APP_STATE_PLAYING_PROMPT);
+    ESP_LOGI(TAG, "prompt_play_start_ms=%.1f",
+             (double)(esp_timer_get_time() - pipeline_start_us) / 1000.0);
     app_log_stage_start("record_prompt");
     stage_start_us = esp_timer_get_time();
     esp_err_t prompt_ret = audio_out_play_pcm_file(DEMO_RECORD_PROMPT_PATH,
@@ -591,6 +647,8 @@ static esp_err_t run_trigger_pipeline(app_state_t *state)
                                                    DEMO_AUDIO_BITS_PER_SAMPLE,
                                                    DEMO_RECORD_PROMPT_MAX_BYTES);
     app_log_stage_result("record_prompt", prompt_ret, esp_timer_get_time() - stage_start_us);
+    ESP_LOGI(TAG, "prompt_play_end_ms=%.1f",
+             (double)(esp_timer_get_time() - pipeline_start_us) / 1000.0);
     if (prompt_ret != ESP_OK) {
         ESP_LOGW(TAG,
                  "record_prompt_failed path=%s err=%s",
@@ -624,6 +682,8 @@ static esp_err_t run_trigger_pipeline(app_state_t *state)
                      (unsigned)wait_metrics.elapsed_ms,
                      (unsigned)wait_metrics.max_level,
                      (unsigned)wait_metrics.speech_prefix_bytes);
+            ESP_LOGI(TAG, "speech_start_ms=%.1f",
+                     (double)(esp_timer_get_time() - pipeline_start_us) / 1000.0);
         } else if (ret == DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT) {
             ESP_LOGW(TAG,
                      "stage=waiting_speech event=timeout elapsed_ms=%u max_level=%u retry_index=%d retry_limit=%d",
@@ -661,17 +721,86 @@ static esp_err_t run_trigger_pipeline(app_state_t *state)
         goto cleanup;
     }
 
+#if V5_OPUS_UPLINK_WS_ENABLED
+    if (DEMO_AUDIO_MODE == DEMO_AUDIO_MODE_V3_REALTIME) {
+        cloud_opus_uplink_t *uplink = NULL;
+        v5_uplink_attempted = true;
+        app_set_state(state, APP_STATE_RECORDING);
+        app_log_stage_start("v5_opus_uplink");
+        stage_start_us = esp_timer_get_time();
+        ESP_LOGI(TAG,
+                 "v5_uplink_begin asr_provider=%s answer_mode=%s frame_ms=%d fallback_legacy_audio=%d",
+                 V5_OPUS_UPLINK_ASR_PROVIDER,
+                 V5_OPUS_UPLINK_ANSWER_MODE,
+                 V5_OPUS_UPLINK_FRAME_MS,
+                 V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO);
+        ret = cloud_client_opus_uplink_begin(&uplink, &opus_uplink_metrics);
+        if (ret == ESP_OK) {
+            ret = audio_in_stream_after_speech_start(speech_prefix,
+                                                     speech_prefix_bytes,
+                                                     app_v5_opus_uplink_pcm_sink,
+                                                     uplink,
+                                                     &record_metrics);
+        }
+        if (ret == ESP_OK) {
+            ret = cloud_client_opus_uplink_finish(uplink, &realtime_session);
+            uplink = NULL;
+        } else if (uplink != NULL) {
+            cloud_client_opus_uplink_abort(uplink);
+            uplink = NULL;
+        }
+        app_log_stage_result("v5_opus_uplink", ret, esp_timer_get_time() - stage_start_us);
+        app_log_v5_uplink_metrics(&opus_uplink_metrics, pipeline_start_us);
+        if (ret == ESP_OK) {
+            realtime_session_ready = true;
+            ESP_LOGI(TAG,
+                     "stage=v5_opus_uplink session_id=%s audio_stream_url=%s pcm_bytes=%u vad_stopped=%d voice_started=%d max_level=%u",
+                     realtime_session.session_id,
+                     realtime_session.audio_stream_url,
+                     (unsigned)record_metrics.pcm_bytes,
+                     record_metrics.vad_stopped,
+                     record_metrics.voice_started,
+                     (unsigned)record_metrics.max_level);
+        } else if (V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO) {
+            ESP_LOGW(TAG,
+                     "fallback_to_legacy_audio=true error_code=%s err=%s",
+                     opus_uplink_metrics.error_code[0] != '\0' ? opus_uplink_metrics.error_code : "v5_opus_uplink_failed",
+                     esp_err_to_name(ret));
+            audio_in_deinit();
+            speech_prefix_bytes = 0;
+        } else {
+            pipeline_error_code = opus_uplink_metrics.error_code[0] != '\0'
+                                      ? opus_uplink_metrics.error_code
+                                      : "v5_opus_uplink_failed";
+            goto cleanup;
+        }
+    }
+#endif
+
+    if (realtime_session_ready) {
+        goto submit_complete;
+    }
+
     app_set_state(state, APP_STATE_RECORDING);
     ESP_LOGI(TAG,
              "stage=recording event=start reason=speech_detected record_budget_ms=%u",
              (unsigned)DEMO_RECORD_AFTER_SPEECH_MAX_MS);
     app_log_stage_start("record");
     stage_start_us = esp_timer_get_time();
-    ret = audio_in_record_after_speech_start(speech_prefix,
-                                             speech_prefix_bytes,
-                                             &pcm_buffer,
-                                             &pcm_bytes,
-                                             &record_metrics);
+    if (v5_uplink_attempted && speech_prefix_bytes == 0) {
+        ret = audio_in_record_fixed_duration(&pcm_buffer, &pcm_bytes);
+        if (ret == ESP_OK) {
+            memset(&record_metrics, 0, sizeof(record_metrics));
+            record_metrics.voice_started = true;
+            record_metrics.pcm_bytes = pcm_bytes;
+        }
+    } else {
+        ret = audio_in_record_after_speech_start(speech_prefix,
+                                                 speech_prefix_bytes,
+                                                 &pcm_buffer,
+                                                 &pcm_bytes,
+                                                 &record_metrics);
+    }
     app_log_stage_result("record", ret, esp_timer_get_time() - stage_start_us);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Recording failed: %s", esp_err_to_name(ret));
@@ -711,6 +840,7 @@ static esp_err_t run_trigger_pipeline(app_state_t *state)
     pcm_buffer = NULL;
     app_log_heap_snapshot("after_record_buffer_free");
 
+submit_complete:
     if (DEMO_AUDIO_MODE == DEMO_AUDIO_MODE_V3_REALTIME) {
         bool parallel_intro_started = false;
 #if DEMO_REALTIME_INTRO_ENABLED && DEMO_REALTIME_INTRO_AUDIO_PARALLEL_ENABLED

@@ -59,6 +59,28 @@ typedef struct {
     char audio_stream_url[DEMO_CLOUD_AUDIO_URL_MAX_LEN];
 } cloud_realtime_session_t;
 
+typedef struct cloud_opus_uplink cloud_opus_uplink_t;
+
+typedef struct {
+    char error_code[DEMO_CLOUD_ERROR_CODE_MAX_LEN];
+    char error_message[160];
+    char asr_provider[32];
+    char question_text[DEMO_CLOUD_QUESTION_TEXT_MAX_LEN];
+    size_t uplink_frame_count;
+    size_t uplink_opus_bytes;
+    size_t uplink_pcm_bytes;
+    int64_t ws_connect_elapsed_us;
+    int64_t first_pcm_frame_us;
+    int64_t first_opus_frame_us;
+    int64_t first_ws_frame_sent_us;
+    int64_t last_ws_frame_sent_us;
+    int64_t end_sent_us;
+    int64_t first_ack_us;
+    int64_t asr_final_received_us;
+    int64_t done_received_us;
+    bool session_started;
+} cloud_opus_uplink_metrics_t;
+
 typedef struct {
     char audio_format[16];
     char audio_packetization[16];
@@ -107,3 +129,15 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
                                              cloud_realtime_audio_chunk_callback_t callback,
                                              void *user_ctx,
                                              cloud_realtime_audio_metrics_t *metrics);
+
+esp_err_t cloud_client_opus_uplink_begin(cloud_opus_uplink_t **out_uplink,
+                                         cloud_opus_uplink_metrics_t *metrics);
+
+esp_err_t cloud_client_opus_uplink_send_pcm(cloud_opus_uplink_t *uplink,
+                                            const uint8_t *pcm,
+                                            size_t pcm_bytes);
+
+esp_err_t cloud_client_opus_uplink_finish(cloud_opus_uplink_t *uplink,
+                                          cloud_realtime_session_t *session);
+
+void cloud_client_opus_uplink_abort(cloud_opus_uplink_t *uplink);

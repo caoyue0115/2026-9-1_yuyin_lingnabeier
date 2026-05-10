@@ -19,7 +19,12 @@ typedef struct {
     bool voice_started;
     uint32_t max_level;
     uint32_t elapsed_ms;
+    size_t pcm_bytes;
 } audio_in_record_metrics_t;
+
+typedef esp_err_t (*audio_in_pcm_chunk_callback_t)(const uint8_t *pcm,
+                                                   size_t pcm_bytes,
+                                                   void *user_ctx);
 
 // Opens the mic, waits for real speech start, and returns a small speech prefix buffer
 // that should be prepended to the formal recording buffer. The caller owns the returned
@@ -34,6 +39,14 @@ esp_err_t audio_in_record_after_speech_start(const uint8_t *speech_prefix,
                                              size_t speech_prefix_bytes,
                                              uint8_t **out_buffer,
                                              size_t *out_bytes,
+                                             audio_in_record_metrics_t *out_metrics);
+
+// Continues capture from an already-open microphone after speech start was detected
+// and streams PCM chunks to callback without allocating the full recording buffer.
+esp_err_t audio_in_stream_after_speech_start(const uint8_t *speech_prefix,
+                                             size_t speech_prefix_bytes,
+                                             audio_in_pcm_chunk_callback_t callback,
+                                             void *user_ctx,
                                              audio_in_record_metrics_t *out_metrics);
 
 // Records mono PCM into heap memory. VAD may stop before the fixed maximum duration.
