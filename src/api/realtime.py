@@ -47,6 +47,21 @@ store = InMemoryRealtimeSessionStore(
 ASR_PROVIDER_READY_TIMEOUT_SECONDS = 8.0
 ASR_PROVIDER_PENDING_PCM_MAX_BYTES = 2 * 1024 * 1024
 ANSWER_MODE_CHOICES = {"default", "short"}
+
+
+def _make_board_done_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = (
+        "type",
+        "session_started",
+        "session_id",
+        "audio_stream_url",
+        "question_text",
+        "asr_provider",
+        "error_code",
+        "error_message",
+        "done_abs_ms",
+    )
+    return {key: payload[key] for key in allowed_keys if key in payload}
 ASR_FALLBACK_NONE = "none"
 ASR_FALLBACK_CHOICES = ASR_PROVIDER_CHOICES | {ASR_FALLBACK_NONE, ""}
 
@@ -725,15 +740,9 @@ async def stream_opus_realtime_session(
             {
                 "type": "asr_final",
                 "text": asr_result.text,
-                "first_asr_partial_ms": asr_result.first_asr_partial_ms,
                 "asr_final_ms": asr_result.asr_final_ms,
-                "first_asr_partial_abs_ms": first_asr_partial_abs_ms,
                 "asr_final_abs_ms": asr_final_abs_ms,
                 "asr_provider": asr_provider_used,
-                "asr_log_id": asr_result.request_id,
-                "provider_log_id": asr_result.request_id,
-                **_provider_lifecycle_payload(),
-                "request_id": asr_result.request_id,
             }
         )
     else:
@@ -910,7 +919,7 @@ async def stream_opus_realtime_session(
             }
         )
 
-    await websocket.send_json(done_payload)
+    await websocket.send_json(_make_board_done_payload(done_payload))
     await websocket.close(code=1000)
 
 

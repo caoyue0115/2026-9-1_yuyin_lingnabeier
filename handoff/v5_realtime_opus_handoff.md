@@ -1427,6 +1427,42 @@ asr_normalization_rules=["汇远->慧远","48院->四十八愿"]
 - `asr_normalization_rules` 只记录实际触发的规则。
 - 下行播放链路未改；`tts_*` 字段只是云端已有 `first_tts_chunk_ms`、`audio_chunk_count`、`audio_bytes`、`first_audio_byte_ms` 的观测口径补齐。
 
+## 2026-05-10 P3.5：WS done payload 瘦身
+
+真机 `/tmp/log_txt_file/10.1.txt` 两轮均显示：
+
+- `asr_provider=volcengine`
+- `asr_final_received_ms` 正常
+- `done_received_ms=-1`
+- `error_code=websocket_json_too_large`
+
+根因：ESP32 `cloud_client.c` 使用 `rx_json[2048]` 接收 WebSocket JSON。P3.4 将 raw/normalized、provider lifecycle、fallback 等观测字段直接塞进 WS `done` payload，导致 done JSON 超过 2KB。板端已经拿到 `asr_final`，但解析 `done` 失败，无法进入下行播放。
+
+修复边界：
+
+- 不改板端，不重发 v25。
+- 不改 ASR provider/fallback 策略。
+- 不改 RAG/LLM/TTS。
+- P3.4 字段继续进入 session trace/status API。
+
+WS `done` 发给板端只保留：
+
+```text
+type
+session_started
+session_id
+audio_stream_url
+question_text
+asr_provider
+error_code
+error_message
+done_abs_ms
+```
+
+其中 `session_id` 和 `audio_stream_url` 只在 `session_started=true` 时出现。`asr_raw_text`、`asr_normalized_text`、`asr_normalization_applied`、`asr_normalization_rules`、`asr_fallback_*`、provider lifecycle、`tts_*` 等字段只保留在 session trace/status API，不再发送给板端 WS `done`。
+
+`asr_final` payload 同步瘦身，仅保留识别文本、provider 和最小 final 时间字段。
+
 ## 2026-05-10 P3.3：Volcengine ASR finish/close 修正
 
 greenunion-sh v5 公网 smoke 硬证据：

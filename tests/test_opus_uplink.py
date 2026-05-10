@@ -491,12 +491,11 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertEqual(len(ack_payloads), len(inner_packets))
         self.assertEqual(ack_payloads[-1]["frame_count"], len(inner_packets))
         self.assertEqual(done_payload["type"], "done")
-        self.assertEqual(done_payload["uplink_frame_count"], len(inner_packets))
-        self.assertEqual(done_payload["uplink_pcm_bytes"], len(pcm))
-        self.assertEqual(done_payload["reconstructed_audio_ms"], 120)
-        self.assertEqual(done_payload["client_stream_duration_ms"], 120)
         self.assertEqual(done_payload["error_code"], None)
-        self.assertIsInstance(done_payload["opus_decode_ms"], int)
+        self.assertEqual(done_payload["session_started"], False)
+        self.assertLess(len(json.dumps(done_payload, ensure_ascii=False)), 2048)
+        self.assertNotIn("uplink_frame_count", done_payload)
+        self.assertNotIn("opus_decode_ms", done_payload)
 
     def test_stream_opus_realtime_session_reports_bad_frame_error(self) -> None:
         from src.api import realtime as realtime_api
@@ -574,18 +573,19 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         done_payload = websocket.sent_json[-1]
         self.assertEqual(done_payload["type"], "done")
         self.assertEqual(done_payload["question_text"], "请解释阿弥陀佛是什么意思")
-        self.assertEqual(done_payload["asr_final_ms"], 123)
-        self.assertEqual(done_payload["server_stream_accept_abs_ms"], 0)
-        self.assertIsInstance(done_payload["first_frame_server_abs_ms"], int)
-        self.assertIsInstance(done_payload["first_pcm_to_asr_abs_ms"], int)
-        self.assertIsInstance(done_payload["first_asr_partial_abs_ms"], int)
-        self.assertIsInstance(done_payload["asr_final_abs_ms"], int)
         self.assertIsInstance(done_payload["done_abs_ms"], int)
-        self.assertLessEqual(done_payload["server_stream_accept_abs_ms"], done_payload["first_frame_server_abs_ms"])
-        self.assertLessEqual(done_payload["first_frame_server_abs_ms"], done_payload["first_pcm_to_asr_abs_ms"])
-        self.assertLessEqual(done_payload["first_asr_partial_abs_ms"], done_payload["asr_final_abs_ms"])
-        self.assertLessEqual(done_payload["asr_final_abs_ms"], done_payload["done_abs_ms"])
         self.assertFalse(done_payload["session_started"])
+        self.assertEqual(done_payload["asr_provider"], "dashscope")
+        self.assertEqual(set(done_payload), {
+            "type",
+            "session_started",
+            "question_text",
+            "asr_provider",
+            "error_code",
+            "error_message",
+            "done_abs_ms",
+        })
+        self.assertLess(len(json.dumps(done_payload, ensure_ascii=False)), 2048)
         start_from_question.assert_not_called()
         start_session.assert_not_called()
 
@@ -646,18 +646,11 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertEqual(len(fake_asr.pcm_chunks), len(inner_packets))
         done_payload = websocket.sent_json[-1]
         self.assertEqual(done_payload["type"], "done")
-        self.assertIsInstance(done_payload["provider_start_duration_ms"], int)
-        self.assertIsInstance(done_payload["provider_start_abs_ms"], int)
-        self.assertIsInstance(done_payload["provider_ready_abs_ms"], int)
-        self.assertIsInstance(done_payload["first_pcm_decoded_abs_ms"], int)
-        self.assertIsInstance(done_payload["first_pcm_sent_to_provider_abs_ms"], int)
-        self.assertIsInstance(done_payload["first_provider_result_abs_ms"], int)
-        self.assertLessEqual(done_payload["first_frame_server_abs_ms"], done_payload["first_pcm_decoded_abs_ms"])
-        self.assertLessEqual(done_payload["provider_start_abs_ms"], done_payload["provider_ready_abs_ms"])
-        self.assertLessEqual(
-            done_payload["provider_ready_abs_ms"],
-            done_payload["first_pcm_sent_to_provider_abs_ms"],
-        )
+        self.assertLess(len(json.dumps(done_payload, ensure_ascii=False)), 2048)
+        self.assertNotIn("provider_start_duration_ms", done_payload)
+        self.assertNotIn("first_provider_result_abs_ms", done_payload)
+        self.assertNotIn("first_frame_server_abs_ms", done_payload)
+        self.assertNotIn("first_pcm_sent_to_provider_abs_ms", done_payload)
 
     def test_stream_opus_realtime_session_provider_ready_timeout_reports_error(self) -> None:
         from src.api import realtime as realtime_api
@@ -752,6 +745,27 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertEqual(done_payload["type"], "done")
         self.assertTrue(done_payload["session_started"])
         self.assertIn("session_id", done_payload)
+        self.assertIn("audio_stream_url", done_payload)
+        self.assertEqual(set(done_payload), {
+            "type",
+            "session_started",
+            "session_id",
+            "audio_stream_url",
+            "question_text",
+            "asr_provider",
+            "error_code",
+            "error_message",
+            "done_abs_ms",
+        })
+        self.assertLess(len(json.dumps(done_payload, ensure_ascii=False)), 2048)
+        session = realtime_api.store.get_session(done_payload["session_id"])
+        self.assertIsNotNone(session)
+        trace = session["trace"]
+        self.assertEqual(trace["asr_raw_text"], "请解释阿弥陀佛是什么意思")
+        self.assertEqual(trace["asr_normalized_text"], "请解释阿弥陀佛是什么意思")
+        self.assertFalse(trace["asr_normalization_applied"])
+        self.assertEqual(trace["asr_normalization_rules"], [])
+        self.assertEqual(trace["asr_provider_used"], "dashscope")
         start_from_question.assert_called_once()
         self.assertEqual(start_from_question.call_args.args[2], "请解释阿弥陀佛是什么意思")
 
@@ -809,7 +823,7 @@ class OpusUplinkEndpointTests(unittest.TestCase):
 
         done_payload = websocket.sent_json[-1]
         self.assertEqual(done_payload["type"], "done")
-        self.assertEqual(done_payload["answer_mode"], "short")
+        self.assertNotIn("answer_mode", done_payload)
         start_from_question.assert_called_once()
         self.assertEqual(start_from_question.call_args.kwargs["answer_mode"], "short")
 
@@ -902,7 +916,7 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         factory.assert_called_once()
         self.assertEqual(factory.call_args.kwargs["provider"], "volcengine")
         self.assertEqual(websocket.sent_json[-1]["asr_provider"], "volcengine")
-        self.assertEqual(websocket.sent_json[-1]["asr_provider_used"], "volcengine")
+        self.assertNotIn("asr_provider_used", websocket.sent_json[-1])
 
     def test_stream_opus_realtime_session_start_provider_overrides_env_provider(self) -> None:
         from src.api import realtime as realtime_api
@@ -1001,7 +1015,7 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertEqual(factory.call_args.kwargs["provider"], "volcengine")
         done_payload = websocket.sent_json[-1]
         self.assertEqual(done_payload["asr_provider"], "volcengine")
-        self.assertEqual(done_payload["asr_log_id"], "volc-log-id")
+        self.assertNotIn("asr_log_id", done_payload)
 
     def test_stream_opus_realtime_session_reports_asr_failure(self) -> None:
         from src.api import realtime as realtime_api
@@ -1117,16 +1131,23 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         done_payload = websocket.sent_json[-1]
         self.assertEqual(done_payload["type"], "done")
         self.assertTrue(done_payload["session_started"])
-        self.assertEqual(done_payload["asr_primary_provider"], "volcengine")
-        self.assertEqual(done_payload["asr_fallback_provider"], "dashscope")
-        self.assertEqual(done_payload["asr_provider_used"], "dashscope")
-        self.assertTrue(done_payload["asr_fallback_used"])
-        self.assertEqual(done_payload["asr_primary_error_code"], "volcengine_asr_empty_text")
-        self.assertEqual(done_payload["asr_primary_provider_log_id"], "req-test")
-        self.assertEqual(done_payload["fallback_reason"], "volcengine_asr_empty_text")
-        self.assertIsInstance(done_payload["fallback_started_abs_ms"], int)
-        self.assertIsInstance(done_payload["fallback_done_abs_ms"], int)
-        self.assertEqual(done_payload["asr_log_id"], "dash-fallback")
+        self.assertEqual(done_payload["asr_provider"], "dashscope")
+        self.assertNotIn("asr_provider_used", done_payload)
+        self.assertNotIn("asr_fallback_used", done_payload)
+        self.assertNotIn("asr_primary_error_code", done_payload)
+        session = realtime_api.store.get_session(done_payload["session_id"])
+        self.assertIsNotNone(session)
+        trace = session["trace"]
+        self.assertEqual(trace["asr_primary_provider"], "volcengine")
+        self.assertEqual(trace["asr_fallback_provider"], "dashscope")
+        self.assertEqual(trace["asr_provider_used"], "dashscope")
+        self.assertTrue(trace["asr_fallback_used"])
+        self.assertEqual(trace["asr_primary_error_code"], "volcengine_asr_empty_text")
+        self.assertEqual(trace["asr_primary_provider_log_id"], "req-test")
+        self.assertEqual(trace["fallback_reason"], "volcengine_asr_empty_text")
+        self.assertIsInstance(trace["fallback_started_abs_ms"], int)
+        self.assertIsInstance(trace["fallback_done_abs_ms"], int)
+        self.assertEqual(trace["asr_log_id"], "dash-fallback")
         fallback_logs = "\n".join(logs.output)
         self.assertIn("event=v5_asr_fallback", fallback_logs)
         self.assertIn("session_id=pending", fallback_logs)

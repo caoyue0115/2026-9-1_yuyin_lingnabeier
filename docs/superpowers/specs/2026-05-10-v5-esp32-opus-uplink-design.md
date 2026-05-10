@@ -350,3 +350,32 @@ RAG、LLM、session `question_text` 使用 `asr_normalized_text`。`asr_raw_text
 - `audio_stream_first_byte_ms`
 
 这些字段只是现有云端 `first_tts_chunk_ms`、`audio_chunk_count`、`audio_bytes`、`first_audio_byte_ms` 的观测口径别名或透传，不改变 TTS 生成、不改变 HTTP audio stream、不改变板端播放参数。
+
+## P3.5 紧急修复：WS done payload 瘦身
+
+板端 `cloud_client.c` 的 WebSocket JSON 接收缓冲为 `rx_json[2048]`。P3.4 后，云端 `done` payload 带上 raw/normalized、fallback、provider lifecycle、时间线和 uplink 统计，真机两轮均出现：
+
+- `asr_final_received_ms` 正常。
+- `done_received_ms=-1`。
+- `error_code=websocket_json_too_large`。
+
+因此 `done` 不能承载云端完整 trace。P3.5 将板端 WS `done` 定义为小型控制包，只保留：
+
+- `type`
+- `session_started`
+- `session_id`
+- `audio_stream_url`
+- `question_text`
+- `asr_provider`
+- `error_code`
+- `error_message`
+- `done_abs_ms`
+
+`session_id` 和 `audio_stream_url` 仅在 full-chain 已创建 session 时出现。所有 P3.2/P3.3/P3.4 观测字段继续写入 session trace，并通过 status API 查询：
+
+- ASR raw/normalized 字段。
+- ASR fallback 字段。
+- provider lifecycle / close debug 字段。
+- `tts_first_chunk_ms`、`tts_chunk_count`、`tts_total_audio_bytes`、`audio_stream_first_byte_ms`。
+
+`asr_final` 也保持小包，只携带识别文本、ASR provider 和最小 final 时间字段。该修复不改 ESP32、不改 ASR provider 策略、不改 RAG/LLM/TTS、不改下行播放参数。
