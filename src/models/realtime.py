@@ -56,6 +56,12 @@ class RealtimeTrace(BaseModel):
     fallback_reason: str | None = None
     fallback_started_abs_ms: int | None = None
     fallback_done_abs_ms: int | None = None
+    close_code: int | None = None
+    close_reason: str | None = None
+    last_payload_type: int | None = None
+    last_log_id: str | None = None
+    last_result_text: str | None = None
+    packets_received: int | None = None
     answer_mode: str | None = None
     retrieval_top_score: float | None = None
     stream_to_session_start_abs_ms: int | None = None

@@ -268,3 +268,33 @@ idf.py -p /dev/ttyACM0 flash monitor
 - 确认 `done_received_ms` 后复用现有 `stream_audio` 下行日志。
 - 若 v5 失败且未显式开启 legacy 调试开关，确认日志包含 `v5_uplink_failed`、`fallback_behavior=local_prompt`、`legacy_audio_fallback=false`。
 - 只有显式构建 `V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO=1` 时，才确认 `legacy_audio_fallback=true` 和 `fallback_reason=<reason>`。
+
+## P3.3 Volcengine finish/close 时序修正
+
+greenunion-sh v5 公网 smoke 证据显示，Volcengine primary 在 finish 阶段返回 `volcengine_asr_finish_failed`，错误信息为 `Connection to remote host was lost.`，但同一轮已有 `asr_primary_provider_log_id`，且 DashScope fallback 用同一份 PCM 成功识别。这说明问题集中在 Volcengine WebSocket final audio 后的 drain/close 判定，不是板端 Opus 上行、PCM 内容或 RAG/LLM/TTS。
+
+本轮只调整云端 Volcengine ASR adapter：
+
+- final audio 包仍使用当前负 sequence 协议，不改变采样率、音频格式、模型名、provider 默认策略。
+- 发送 final audio 后不主动把服务端 close/lost 直接归类为失败；先 drain 服务端响应。
+- 若 drain 中已经取得最终文本，随后遇到 `WebSocketConnectionClosedException`、`already closed` 或 `Connection to remote host was lost.`，按服务端正常结束处理。
+- 若未取得文本，close/lost 仍按 `volcengine_asr_finish_failed` 或 `volcengine_asr_empty_text` 处理，并继续保留 DashScope fallback。
+- 增加 `VOLCENGINE_ASR_FINAL_DRAIN_TIMEOUT`，默认 2.0 秒，仅限制拿到文本后的尾部 drain，不改变连接/整体 ASR timeout。
+
+新增 close 调试字段会进入 `RealtimeAsrResult`、WebSocket done/error payload、full-chain session trace 和 status API：
+
+- `close_code`
+- `close_reason`
+- `last_payload_type`
+- `last_log_id`
+- `last_result_text`
+- `packets_received`
+
+fallback 日志 `event=v5_asr_fallback` 也会附带上述字段，便于 grep 定位是服务端正常 close、协议错误包、空文本，还是 finish 阶段异常。
+
+验证要求：
+
+1. `python -m pytest -q`
+2. 本地 v5 启动后跑 1 条 full-chain smoke，`--asr-provider volcengine`。
+3. 本地火山 primary 连跑 5 次，记录 `asr_provider_used`、`asr_fallback_used`、`asr_primary_error_code`、`provider_log_id`、`asr_final_abs_ms`。
+4. 本地确认 primary 成功率后，再单独授权部署 greenunion-sh；部署前不改 v3、不重启云端。

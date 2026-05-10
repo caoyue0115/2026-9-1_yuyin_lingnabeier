@@ -254,6 +254,12 @@ async def stream_opus_realtime_session(
     first_provider_result_abs_ms: int | None = None
     provider_error_code: str | None = None
     provider_error_message: str | None = None
+    close_code: int | None = None
+    close_reason: str | None = None
+    last_payload_type: int | None = None
+    last_log_id: str | None = None
+    last_result_text: str | None = None
+    packets_received: int | None = None
     asr_result = None
 
     def _normalize_asr_provider(value: Any, *, default: str) -> str:
@@ -293,6 +299,12 @@ async def stream_opus_realtime_session(
             "fallback_reason": fallback_reason,
             "fallback_started_abs_ms": fallback_started_abs_ms,
             "fallback_done_abs_ms": fallback_done_abs_ms,
+            "close_code": close_code,
+            "close_reason": close_reason,
+            "last_payload_type": last_payload_type,
+            "last_log_id": last_log_id,
+            "last_result_text": last_result_text,
+            "packets_received": packets_received,
         }
 
     def _log_asr_fallback(session_id: str | None = None) -> None:
@@ -301,7 +313,9 @@ async def stream_opus_realtime_session(
             "asr_primary_error_code=%s asr_primary_error_message=%s "
             "asr_fallback_used=%s asr_provider_used=%s asr_fallback_provider=%s "
             "asr_primary_provider_log_id=%s provider_log_id=%s "
-            "fallback_reason=%s fallback_started_abs_ms=%s fallback_done_abs_ms=%s",
+            "fallback_reason=%s fallback_started_abs_ms=%s fallback_done_abs_ms=%s "
+            "close_code=%s close_reason=%s last_payload_type=%s last_log_id=%s "
+            "last_result_text=%s packets_received=%s",
             session_id or "pending",
             asr_primary_provider,
             asr_primary_error_code,
@@ -314,7 +328,30 @@ async def stream_opus_realtime_session(
             fallback_reason,
             fallback_started_abs_ms,
             fallback_done_abs_ms,
+            close_code,
+            close_reason,
+            last_payload_type,
+            last_log_id,
+            last_result_text,
+            packets_received,
         )
+
+    def _capture_provider_debug(result: RealtimeAsrResult | None) -> None:
+        nonlocal close_code, close_reason, last_payload_type, last_log_id, last_result_text, packets_received
+        if result is None:
+            return
+        if close_code is None and result.close_code is not None:
+            close_code = result.close_code
+        if close_reason is None and result.close_reason is not None:
+            close_reason = result.close_reason
+        if last_payload_type is None and result.last_payload_type is not None:
+            last_payload_type = result.last_payload_type
+        if last_log_id is None and result.last_log_id is not None:
+            last_log_id = result.last_log_id
+        if last_result_text is None and result.last_result_text is not None:
+            last_result_text = result.last_result_text
+        if packets_received is None and result.packets_received is not None:
+            packets_received = result.packets_received
 
     def _pcm_chunks_for_provider(pcm_bytes: bytes) -> list[bytes]:
         chunk_bytes = max(1, frame_size * x_opus_channels * 2)
@@ -343,6 +380,7 @@ async def stream_opus_realtime_session(
                 first_provider_result_abs_ms = _server_elapsed_ms()
             await _send_asr_events(websocket, events)
         result = await asyncio.to_thread(cached_asr.finish)
+        _capture_provider_debug(result)
         await _send_asr_events(websocket, cached_asr.drain_events())
         if first_provider_result_abs_ms is None and result.first_asr_partial_ms is not None:
             first_provider_result_abs_ms = provider_start_abs_ms + result.first_asr_partial_ms
@@ -608,6 +646,7 @@ async def stream_opus_realtime_session(
                 error_message=exc.message,
             )
         await _send_asr_events(websocket, realtime_asr.drain_events())
+        _capture_provider_debug(asr_result)
         if first_provider_result_abs_ms is None and asr_result.first_asr_partial_ms is not None:
             first_provider_result_abs_ms = (
                 (provider_start_abs_ms or 0) + asr_result.first_asr_partial_ms
@@ -793,6 +832,12 @@ async def stream_opus_realtime_session(
                 "fallback_reason": fallback_reason,
                 "fallback_started_abs_ms": fallback_started_abs_ms,
                 "fallback_done_abs_ms": fallback_done_abs_ms,
+                "close_code": close_code,
+                "close_reason": close_reason,
+                "last_payload_type": last_payload_type,
+                "last_log_id": last_log_id,
+                "last_result_text": last_result_text,
+                "packets_received": packets_received,
                 "answer_mode": answer_mode,
                 "stream_to_session_start_abs_ms": stream_to_session_start_abs_ms,
                 "server_stream_accept_abs_ms": 0,

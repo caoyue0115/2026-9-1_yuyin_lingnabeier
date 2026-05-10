@@ -55,6 +55,12 @@ class RealtimeAsrResult:
     first_asr_partial_ms: int | None = None
     asr_final_ms: int | None = None
     request_id: str | None = None
+    close_code: int | None = None
+    close_reason: str | None = None
+    last_payload_type: int | None = None
+    last_log_id: str | None = None
+    last_result_text: str | None = None
+    packets_received: int | None = None
 
 
 def _elapsed_ms(started_at: float) -> int:
@@ -382,6 +388,7 @@ class VolcengineRealtimeAsrSession:
         self._model_name = _env_value("VOLCENGINE_ASR_MODEL_NAME", "bigmodel")
         self._endpoint = _env_value("VOLCENGINE_ASR_ENDPOINT", VOLCENGINE_ASR_STREAMING_URL)
         self._timeout = float(_env_value("VOLCENGINE_ASR_TIMEOUT", "30") or "30")
+        self._final_drain_timeout = float(_env_value("VOLCENGINE_ASR_FINAL_DRAIN_TIMEOUT", "2.0") or "2.0")
         if not self._app_id or not self._access_token:
             raise RealtimeAsrError("volcengine_asr_not_configured", "Volcengine ASR app id or access token is missing")
 
@@ -393,6 +400,12 @@ class VolcengineRealtimeAsrSession:
         self._final_ms: int | None = None
         self._latest_text = ""
         self._log_id: str | None = None
+        self._close_code: int | None = None
+        self._close_reason: str | None = None
+        self._last_payload_type: int | None = None
+        self._last_log_id: str | None = None
+        self._last_result_text: str | None = None
+        self._packets_received = 0
         self._started = False
 
     def start(self) -> None:
@@ -439,6 +452,53 @@ class VolcengineRealtimeAsrSession:
     def drain_events(self) -> list[RealtimeAsrEvent]:
         return []
 
+    def _result(
+        self,
+        *,
+        text: str | None,
+        error_code: str | None,
+        error_message: str | None = None,
+        asr_final_ms: int | None = None,
+    ) -> RealtimeAsrResult:
+        return RealtimeAsrResult(
+            text=text,
+            error_code=error_code,
+            error_message=error_message,
+            first_asr_partial_ms=self._first_partial_ms,
+            asr_final_ms=asr_final_ms if asr_final_ms is not None else self._final_ms,
+            request_id=self._log_id,
+            close_code=self._close_code,
+            close_reason=self._close_reason,
+            last_payload_type=self._last_payload_type,
+            last_log_id=self._last_log_id,
+            last_result_text=self._last_result_text,
+            packets_received=self._packets_received,
+        )
+
+    def _record_close_exception(self, exc: Exception) -> None:
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int):
+            self._close_code = status_code
+        elif self._close_code is None:
+            code = getattr(exc, "code", None)
+            if isinstance(code, int):
+                self._close_code = code
+        reason = str(exc) or getattr(exc, "reason", None)
+        if reason:
+            self._close_reason = str(reason)
+
+    def _is_expected_close_after_result(self, exc: Exception) -> bool:
+        if not self._latest_text:
+            return False
+        message = str(exc).lower()
+        class_name = exc.__class__.__name__.lower()
+        return (
+            "closed" in class_name
+            or "already closed" in message
+            or "connection to remote host was lost" in message
+            or "connection is already closed" in message
+        )
+
     def finish(self) -> RealtimeAsrResult:
         if not self._started or self._ws is None:
             return RealtimeAsrResult(text=None, error_code="volcengine_asr_not_started", error_message="Volcengine ASR was not started")
@@ -453,21 +513,25 @@ class VolcengineRealtimeAsrSession:
                 except Exception as exc:
                     if exc.__class__.__name__ == "WebSocketTimeoutException":
                         continue
-                    if self._latest_text and "already closed" in str(exc).lower():
+                    self._record_close_exception(exc)
+                    if self._is_expected_close_after_result(exc):
                         break
                     raise
+                self._packets_received += 1
+                message_type = response.get("message_type")
+                if isinstance(message_type, int):
+                    self._last_payload_type = message_type
                 payload = response.get("payload")
                 log_id = _extract_volcengine_log_id(payload)
                 if log_id:
                     self._log_id = log_id
+                    self._last_log_id = log_id
                 if response.get("message_type") == SERVER_ERROR_RESPONSE:
-                    return RealtimeAsrResult(
+                    return self._result(
                         text=None,
                         error_code="volcengine_asr_server_error",
                         error_message=json.dumps(payload, ensure_ascii=False) if payload is not None else "Volcengine ASR server error",
-                        first_asr_partial_ms=self._first_partial_ms,
                         asr_final_ms=_elapsed_ms(self._started_at),
-                        request_id=self._log_id,
                     )
                 text = _extract_volcengine_text(payload)
                 if text:
@@ -475,18 +539,17 @@ class VolcengineRealtimeAsrSession:
                     if self._first_partial_ms is None:
                         self._first_partial_ms = elapsed
                     self._latest_text = text
+                    self._last_result_text = text
                     self._final_ms = elapsed
+                    receive_deadline = min(receive_deadline, time.perf_counter() + self._final_drain_timeout)
                 response_sequence = response.get("sequence")
                 if isinstance(response_sequence, int) and response_sequence < 0:
                     break
         except Exception as exc:
-            return RealtimeAsrResult(
+            return self._result(
                 text=None,
                 error_code="volcengine_asr_finish_failed",
                 error_message=str(exc) or "Volcengine ASR finish failed",
-                first_asr_partial_ms=self._first_partial_ms,
-                asr_final_ms=self._final_ms,
-                request_id=self._log_id,
             )
         finally:
             try:
@@ -494,21 +557,15 @@ class VolcengineRealtimeAsrSession:
             except Exception:
                 pass
         if not self._latest_text:
-            return RealtimeAsrResult(
+            return self._result(
                 text=None,
                 error_code="volcengine_asr_empty_text",
                 error_message="Volcengine ASR returned empty text",
-                first_asr_partial_ms=self._first_partial_ms,
-                asr_final_ms=self._final_ms,
-                request_id=self._log_id,
             )
-        return RealtimeAsrResult(
+        return self._result(
             text=self._latest_text,
             error_code=None,
             error_message=None,
-            first_asr_partial_ms=self._first_partial_ms,
-            asr_final_ms=self._final_ms,
-            request_id=self._log_id,
         )
 
 

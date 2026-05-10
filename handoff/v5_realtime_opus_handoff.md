@@ -1375,3 +1375,71 @@ python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --bas
 结果：通过。本轮本地 smoke 火山 ASR primary 成功，未触发 fallback；`done` 和 status API 均返回新增字段，`asr_provider=volcengine`，`asr_fallback_used=false`，`provider_log_id=20260510115143CD7FE60E8C62D977C6FD`。本地 `/healthz` 在一次 10s curl 中未返回，判断是同步 provider health check 阻塞，未作为本轮代码变更范围处理。
 
 本轮未部署 greenunion-sh，未重启云端容器。
+
+## 2026-05-10 P3.3：Volcengine ASR finish/close 修正
+
+greenunion-sh v5 公网 smoke 硬证据：
+
+- `session_id=e77df0d6-c8e2-46ee-b490-9db5aeaf949e`
+- `asr_primary_provider=volcengine`
+- `asr_primary_error_code=volcengine_asr_finish_failed`
+- `asr_primary_error_message=Connection to remote host was lost.`
+- `asr_primary_provider_log_id=20260510120911A8F1A1DF9EDB074B28D2`
+- DashScope fallback 成功，说明同一份 PCM 可识别。
+
+本轮判断：问题在 Volcengine WebSocket final audio 后的 finish/drain/close 判定。云端已经收到过带 log id 的服务端响应，后续服务端断开被旧逻辑误判为 `finish_failed`。本轮不改板端、不改 RAG/LLM/TTS、不改 ASR provider 默认策略，DashScope fallback 继续保留。
+
+改动：
+
+- `src/providers/realtime_asr.py`
+  - `RealtimeAsrResult` 增加 close/debug 字段。
+  - Volcengine final audio 发送后继续 drain 服务端响应。
+  - 若已取得最终文本，再遇到 websocket closed/lost，按成功结束，不再误报 `volcengine_asr_finish_failed`。
+  - 增加 `VOLCENGINE_ASR_FINAL_DRAIN_TIMEOUT`，默认 2 秒，仅限制拿到文本后的尾部 drain。
+- `src/api/realtime.py`
+  - WebSocket done/error payload、full-chain session trace 和 fallback 结构化日志透传 close/debug 字段。
+- `src/models/realtime.py`
+  - status API trace 暴露 close/debug 字段，避免被 Pydantic response model 过滤。
+- `src/storage/realtime_store.py`
+  - 新 session 初始 trace 包含 close/debug 字段。
+- `tests/test_opus_uplink.py`
+  - 覆盖 “Volcengine 已返回文本后连接丢失应成功”。
+- `tests/test_realtime_api.py`
+  - 覆盖 status API 和 store 初始 trace 不过滤新增字段。
+- `docs/superpowers/specs/2026-05-10-v5-esp32-opus-uplink-design.md`
+  - 增加 P3.3 修正和验证口径。
+
+新增字段：
+
+```text
+close_code
+close_reason
+last_payload_type
+last_log_id
+last_result_text
+packets_received
+```
+
+fallback 日志现在会附带这些字段，例如：
+
+```text
+event=v5_asr_fallback session_id=<pending-or-session-id> asr_primary_provider=volcengine asr_primary_error_code=<code> asr_primary_error_message=<message> asr_fallback_used=true asr_provider_used=dashscope asr_fallback_provider=dashscope asr_primary_provider_log_id=<primary_log_id> provider_log_id=<fallback_log_id> fallback_reason=<code> fallback_started_abs_ms=<ms> fallback_done_abs_ms=<ms> close_code=<code> close_reason=<reason> last_payload_type=<type> last_log_id=<log_id> last_result_text=<text> packets_received=<count>
+```
+
+本地验证：
+
+- `python -m pytest -q`：147 passed，1 warning（`audioop` Python 3.13 deprecation）。
+- 本地 1 条 Volcengine full-chain smoke：通过。`session_id=b2780e9e-6f30-493e-b085-ddf2168d8f8e`，`asr_provider_used=volcengine`，`asr_fallback_used=false`，`provider_log_id=2026051012412686E6FC39EA676045E9C7`，status trace 返回 close/debug 字段。
+- 本地 Volcengine primary 5 连跑：5/5 成功，均未 fallback。
+
+| run | session_id | asr_provider_used | asr_fallback_used | asr_primary_error_code | provider_log_id | asr_final_abs_ms | close_reason | packets_received |
+| --- | --- | --- | --- | --- | --- | ---: | --- | ---: |
+| 1 | `41e15888-85c3-4968-92d4-903f363c2d2c` | `volcengine` | `false` | `null` | `2026051012430981581A989A01FF49225C` | 5651 | `Connection is already closed.` | 11 |
+| 2 | `0b292964-9e80-4ab3-805d-c34d22978406` | `volcengine` | `false` | `null` | `202605101243271519FEB8FF77204A8E2A` | 5612 | `Connection is already closed.` | 11 |
+| 3 | `064e7a06-e18d-4cf0-80eb-ef3708bd6c3c` | `volcengine` | `false` | `null` | `202605101243426E8F4A9224C1814BAE59` | 5431 | `Connection is already closed.` | 11 |
+| 4 | `7898140a-860d-436b-945c-350dc66463c5` | `volcengine` | `false` | `null` | `20260510124359AA2CCB125E324E4FAF9C` | 5491 | `Connection is already closed.` | 11 |
+| 5 | `db0376de-7dba-4012-a161-99fb87a43e81` | `volcengine` | `false` | `null` | `20260510124417C25CC0E020C4AF425A8B` | 5582 | `Connection is already closed.` | 11 |
+
+结论：本地复现证明服务端 close/lost 可发生在已返回最终文本之后；P3.3 修正后不再误触发 DashScope fallback。建议下一步单独授权部署 greenunion-sh v5 80 实例后，公网 full-chain smoke 再连跑 5 次确认云端一致性。
+
+本轮未部署 greenunion-sh，未重启云端容器。

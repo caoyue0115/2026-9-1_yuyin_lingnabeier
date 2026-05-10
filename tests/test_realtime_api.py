@@ -80,6 +80,12 @@ class RealtimeSchemaTests(unittest.TestCase):
                 "fallback_reason": "volcengine_asr_finish_failed",
                 "fallback_started_abs_ms": 1200,
                 "fallback_done_abs_ms": 2200,
+                "close_code": 1000,
+                "close_reason": "Connection to remote host was lost.",
+                "last_payload_type": 9,
+                "last_log_id": "volc-log-1",
+                "last_result_text": "请解释阿弥陀佛是什么意思？",
+                "packets_received": 1,
             },
             error_code=None,
             error_message=None,
@@ -102,6 +108,12 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertEqual(payload.trace.fallback_reason, "volcengine_asr_finish_failed")
         self.assertEqual(payload.trace.fallback_started_abs_ms, 1200)
         self.assertEqual(payload.trace.fallback_done_abs_ms, 2200)
+        self.assertEqual(payload.trace.close_code, 1000)
+        self.assertEqual(payload.trace.close_reason, "Connection to remote host was lost.")
+        self.assertEqual(payload.trace.last_payload_type, 9)
+        self.assertEqual(payload.trace.last_log_id, "volc-log-1")
+        self.assertEqual(payload.trace.last_result_text, "请解释阿弥陀佛是什么意思？")
+        self.assertEqual(payload.trace.packets_received, 1)
 
     def test_settings_expose_realtime_defaults(self) -> None:
         from src.settings import settings
@@ -220,6 +232,12 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertIn("fallback_reason", fetched["trace"])
         self.assertIn("fallback_started_abs_ms", fetched["trace"])
         self.assertIn("fallback_done_abs_ms", fetched["trace"])
+        self.assertIn("close_code", fetched["trace"])
+        self.assertIn("close_reason", fetched["trace"])
+        self.assertIn("last_payload_type", fetched["trace"])
+        self.assertIn("last_log_id", fetched["trace"])
+        self.assertIn("last_result_text", fetched["trace"])
+        self.assertIn("packets_received", fetched["trace"])
 
     def test_store_claim_audio_consumer_allows_only_first_consumer(self) -> None:
         from src.storage.realtime_store import InMemoryRealtimeSessionStore

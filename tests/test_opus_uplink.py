@@ -256,6 +256,89 @@ class OpusUplinkProviderTests(unittest.TestCase):
 
         self.assertGreaterEqual(time.perf_counter() - session._started_at, 0.025)
 
+    def test_volcengine_asr_finish_treats_server_close_after_text_as_success(self) -> None:
+        from src.providers import realtime_asr
+
+        class WebSocketConnectionClosedException(Exception):
+            status_code = 1000
+            reason = "normal close"
+
+        def _server_result_frame() -> bytes:
+            payload = {
+                "result": {
+                    "text": "请解释阿弥陀佛是什么意思？",
+                    "additions": {"log_id": "volc-log-1"},
+                }
+            }
+            encoded = realtime_asr.gzip.compress(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            frame = realtime_asr._generate_volcengine_asr_header(
+                0b1001,
+                realtime_asr.POS_SEQUENCE,
+                realtime_asr.JSON_SERIALIZATION,
+                realtime_asr.GZIP_COMPRESSION,
+            )
+            frame.extend((2).to_bytes(4, "big", signed=True))
+            frame.extend(len(encoded).to_bytes(4, "big"))
+            frame.extend(encoded)
+            return bytes(frame)
+
+        class _FakeVolcengineWebSocket:
+            def __init__(self) -> None:
+                self.recv_calls = 0
+                self.sent_frames: list[bytes] = []
+                self.closed = False
+
+            def settimeout(self, _timeout: float) -> None:
+                return None
+
+            def send_binary(self, payload: bytes) -> None:
+                self.sent_frames.append(payload)
+
+            def recv(self) -> bytes:
+                self.recv_calls += 1
+                if self.recv_calls == 1:
+                    return _server_result_frame()
+                raise WebSocketConnectionClosedException("Connection to remote host was lost.")
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake_ws = _FakeVolcengineWebSocket()
+        fake_websocket_module = types.SimpleNamespace(
+            create_connection=lambda *_args, **_kwargs: fake_ws,
+            WebSocketConnectionClosedException=WebSocketConnectionClosedException,
+        )
+
+        def _fake_env_value(key: str, default: str = "") -> str:
+            values = {
+                "VOLCENGINE_SPEECH_APP_ID": "app-id",
+                "VOLCENGINE_SPEECH_ACCESS_TOKEN": "access-token",
+                "VOLCENGINE_ASR_RESOURCE_ID": "resource-id",
+                "VOLCENGINE_ASR_MODEL_NAME": "bigmodel",
+                "VOLCENGINE_ASR_ENDPOINT": "wss://example.invalid/asr",
+                "VOLCENGINE_ASR_TIMEOUT": "1",
+                "VOLCENGINE_ASR_FINAL_DRAIN_TIMEOUT": "0.1",
+            }
+            return values.get(key, default)
+
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket_module}), mock.patch.object(
+            realtime_asr, "_env_value", side_effect=_fake_env_value
+        ):
+            session = realtime_asr.VolcengineRealtimeAsrSession(sample_rate=16000)
+            session.start()
+            session.send_pcm_chunk(b"\x00\x00" * 320)
+            result = session.finish()
+
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.text, "请解释阿弥陀佛是什么意思？")
+        self.assertEqual(result.request_id, "volc-log-1")
+        self.assertEqual(result.close_code, 1000)
+        self.assertIn("Connection to remote host was lost", result.close_reason)
+        self.assertEqual(result.last_log_id, "volc-log-1")
+        self.assertEqual(result.last_result_text, "请解释阿弥陀佛是什么意思？")
+        self.assertEqual(result.packets_received, 1)
+        self.assertTrue(fake_ws.closed)
+
     def test_dashscope_realtime_adapter_ignores_global_default_provider(self) -> None:
         from src.providers import realtime_asr
 
