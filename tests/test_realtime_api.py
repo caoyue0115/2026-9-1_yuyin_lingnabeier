@@ -67,6 +67,19 @@ class RealtimeSchemaTests(unittest.TestCase):
                 "first_tts_chunk_ms": None,
                 "first_audio_byte_ms": None,
                 "done_ms": None,
+                "asr_primary_provider": "volcengine",
+                "asr_provider_used": "dashscope",
+                "asr_fallback_provider": "dashscope",
+                "asr_fallback_used": True,
+                "asr_primary_error_code": "volcengine_asr_finish_failed",
+                "asr_primary_error_message": "Connection to remote host was lost.",
+                "asr_primary_provider_log_id": "volc-log-1",
+                "provider_error_code": None,
+                "provider_error_message": None,
+                "provider_log_id": "dash-log-1",
+                "fallback_reason": "volcengine_asr_finish_failed",
+                "fallback_started_abs_ms": 1200,
+                "fallback_done_abs_ms": 2200,
             },
             error_code=None,
             error_message=None,
@@ -76,6 +89,19 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertIsNone(payload.trace.first_audio_byte_ms)
         self.assertIsNone(payload.trace.tts_warmup_ms)
         self.assertIsNone(payload.trace.tts_warmup_failed)
+        self.assertEqual(payload.trace.asr_primary_provider, "volcengine")
+        self.assertEqual(payload.trace.asr_provider_used, "dashscope")
+        self.assertEqual(payload.trace.asr_fallback_provider, "dashscope")
+        self.assertTrue(payload.trace.asr_fallback_used)
+        self.assertEqual(payload.trace.asr_primary_error_code, "volcengine_asr_finish_failed")
+        self.assertEqual(payload.trace.asr_primary_error_message, "Connection to remote host was lost.")
+        self.assertEqual(payload.trace.asr_primary_provider_log_id, "volc-log-1")
+        self.assertIsNone(payload.trace.provider_error_code)
+        self.assertIsNone(payload.trace.provider_error_message)
+        self.assertEqual(payload.trace.provider_log_id, "dash-log-1")
+        self.assertEqual(payload.trace.fallback_reason, "volcengine_asr_finish_failed")
+        self.assertEqual(payload.trace.fallback_started_abs_ms, 1200)
+        self.assertEqual(payload.trace.fallback_done_abs_ms, 2200)
 
     def test_settings_expose_realtime_defaults(self) -> None:
         from src.settings import settings
@@ -184,6 +210,16 @@ class RealtimeSchemaTests(unittest.TestCase):
             fetched["audio_stream_url"],
             f"http://testserver/api/v3/realtime/sessions/{session['session_id']}/audio",
         )
+        self.assertIn("asr_primary_provider", fetched["trace"])
+        self.assertIn("asr_provider_used", fetched["trace"])
+        self.assertIn("asr_fallback_provider", fetched["trace"])
+        self.assertIn("asr_fallback_used", fetched["trace"])
+        self.assertIn("asr_primary_error_code", fetched["trace"])
+        self.assertIn("asr_primary_error_message", fetched["trace"])
+        self.assertIn("asr_primary_provider_log_id", fetched["trace"])
+        self.assertIn("fallback_reason", fetched["trace"])
+        self.assertIn("fallback_started_abs_ms", fetched["trace"])
+        self.assertIn("fallback_done_abs_ms", fetched["trace"])
 
     def test_store_claim_audio_consumer_allows_only_first_consumer(self) -> None:
         from src.storage.realtime_store import InMemoryRealtimeSessionStore

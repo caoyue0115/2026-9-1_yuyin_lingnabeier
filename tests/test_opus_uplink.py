@@ -1006,25 +1006,26 @@ class OpusUplinkEndpointTests(unittest.TestCase):
             request_id="dash-fallback",
         )
 
-        with mock.patch.object(
-            realtime_api,
-            "create_realtime_asr_session",
-            side_effect=[primary_asr, fallback_asr],
-        ) as factory, mock.patch.object(
-            realtime_api, "start_realtime_session_from_question"
-        ) as start_from_question:
-            asyncio.run(
-                realtime_api.stream_opus_realtime_session(
-                    websocket,
-                    x_device_id="pc-stream",
-                    x_audio_packetization="framed-v1",
-                    x_audio_format="opus",
-                    x_opus_sample_rate=16000,
-                    x_opus_channels=1,
-                    x_opus_frame_duration_ms=60,
-                    x_original_pcm_bytes=len(pcm),
+        with self.assertLogs("src.api.realtime", level="INFO") as logs:
+            with mock.patch.object(
+                realtime_api,
+                "create_realtime_asr_session",
+                side_effect=[primary_asr, fallback_asr],
+            ) as factory, mock.patch.object(
+                realtime_api, "start_realtime_session_from_question"
+            ) as start_from_question:
+                asyncio.run(
+                    realtime_api.stream_opus_realtime_session(
+                        websocket,
+                        x_device_id="pc-stream",
+                        x_audio_packetization="framed-v1",
+                        x_audio_format="opus",
+                        x_opus_sample_rate=16000,
+                        x_opus_channels=1,
+                        x_opus_frame_duration_ms=60,
+                        x_original_pcm_bytes=len(pcm),
+                    )
                 )
-            )
 
         self.assertEqual(factory.call_count, 2)
         self.assertEqual(factory.call_args_list[0].kwargs["provider"], "volcengine")
@@ -1038,7 +1039,20 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertEqual(done_payload["asr_provider_used"], "dashscope")
         self.assertTrue(done_payload["asr_fallback_used"])
         self.assertEqual(done_payload["asr_primary_error_code"], "volcengine_asr_empty_text")
+        self.assertEqual(done_payload["asr_primary_provider_log_id"], "req-test")
+        self.assertEqual(done_payload["fallback_reason"], "volcengine_asr_empty_text")
+        self.assertIsInstance(done_payload["fallback_started_abs_ms"], int)
+        self.assertIsInstance(done_payload["fallback_done_abs_ms"], int)
         self.assertEqual(done_payload["asr_log_id"], "dash-fallback")
+        fallback_logs = "\n".join(logs.output)
+        self.assertIn("event=v5_asr_fallback", fallback_logs)
+        self.assertIn("session_id=pending", fallback_logs)
+        self.assertIn("asr_primary_provider=volcengine", fallback_logs)
+        self.assertIn("asr_primary_error_code=volcengine_asr_empty_text", fallback_logs)
+        self.assertIn("asr_fallback_used=true", fallback_logs)
+        self.assertIn("asr_provider_used=dashscope", fallback_logs)
+        self.assertIn("asr_primary_provider_log_id=req-test", fallback_logs)
+        self.assertIn("provider_log_id=dash-fallback", fallback_logs)
         start_from_question.assert_called_once()
         self.assertEqual(start_from_question.call_args.args[2], "请解释阿弥陀佛是什么意思")
 

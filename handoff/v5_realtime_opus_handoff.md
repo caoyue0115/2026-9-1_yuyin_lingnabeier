@@ -1316,3 +1316,62 @@ docker compose up -d
 ```
 
 如果需要让 v3 恢复公网 80，需先停止或改走 v5 端口，避免 80 端口冲突。
+
+## 2026-05-10 P3.2：ASR fallback 可观测性补齐
+
+真机 v25 三条测试均跑通 v5 Opus WS 上行和下行播放，但板端日志显示实际 `asr_provider=dashscope`，说明云端 Volcengine primary 失败后 fallback 到 DashScope。只读查日志后发现：
+
+- v5 stdout 只有 WebSocket accepted/closed 和 audio GET，不记录 primary 失败原因。
+- status API 的 `RealtimeTrace` response model 未声明 `asr_primary_*`、`asr_fallback_used` 等字段，导致 store 里即使更新也会被 Pydantic 过滤。
+- session store 初始 trace 也缺少 primary/fallback 观测字段。
+
+本轮最小补齐：
+
+- `src/api/realtime.py`：fallback 触发后写结构化 `event=v5_asr_fallback` 日志；保留 primary provider log id、fallback reason、fallback 起止绝对时间。
+- `src/models/realtime.py`：status API trace 暴露 primary/fallback 字段。
+- `src/storage/realtime_store.py`：新 session 初始 trace 包含 primary/fallback 字段。
+- `tests/test_opus_uplink.py`：覆盖 fallback 日志和 done payload 字段。
+- `tests/test_realtime_api.py`：覆盖 status response model 不过滤字段、store 初始 trace 包含字段。
+
+新增/确认字段：
+
+```text
+asr_primary_provider
+asr_provider_used
+asr_fallback_provider
+asr_fallback_used
+asr_primary_error_code
+asr_primary_error_message
+asr_primary_provider_log_id
+provider_error_code
+provider_error_message
+provider_log_id
+fallback_reason
+fallback_started_abs_ms
+fallback_done_abs_ms
+```
+
+fallback 日志样例：
+
+```text
+event=v5_asr_fallback session_id=pending asr_primary_provider=volcengine asr_primary_error_code=volcengine_asr_finish_failed asr_primary_error_message=<message> asr_fallback_used=true asr_provider_used=dashscope asr_fallback_provider=dashscope asr_primary_provider_log_id=<log_id> provider_log_id=<fallback_log_id> fallback_reason=volcengine_asr_finish_failed fallback_started_abs_ms=<ms> fallback_done_abs_ms=<ms>
+```
+
+full-chain session 创建后会再打一行同样 `event=v5_asr_fallback`，此时 `session_id=<realtime_session_id>`，用于和板端 `audio_stream_url` 里的 session id 对齐。
+
+本地验证：
+
+```text
+python -m pytest tests/test_opus_uplink.py tests/test_realtime_api.py -q -> 94 passed, 1 warning
+python -m pytest -q -> 146 passed, 1 warning
+```
+
+本地 PC smoke：
+
+```bash
+python scripts/opus_uplink_stream_smoke.py /tmp/volc_asr_eval/amitabha.wav --base-url http://127.0.0.1:8010 --run-asr --run-full-chain --asr-provider volcengine
+```
+
+结果：通过。本轮本地 smoke 火山 ASR primary 成功，未触发 fallback；`done` 和 status API 均返回新增字段，`asr_provider=volcengine`，`asr_fallback_used=false`，`provider_log_id=20260510115143CD7FE60E8C62D977C6FD`。本地 `/healthz` 在一次 10s curl 中未返回，判断是同步 provider health check 阻塞，未作为本轮代码变更范围处理。
+
+本轮未部署 greenunion-sh，未重启云端容器。

@@ -239,6 +239,10 @@ async def stream_opus_realtime_session(
     asr_fallback_used = False
     asr_primary_error_code: str | None = None
     asr_primary_error_message: str | None = None
+    asr_primary_provider_log_id: str | None = None
+    fallback_reason: str | None = None
+    fallback_started_abs_ms: int | None = None
+    fallback_done_abs_ms: int | None = None
     pending_asr_pcm: list[bytes] = []
     pending_asr_pcm_bytes = 0
     provider_start_abs_ms: int | None = None
@@ -276,6 +280,7 @@ async def stream_opus_realtime_session(
             "asr_fallback_used": asr_fallback_used,
             "asr_primary_error_code": asr_primary_error_code,
             "asr_primary_error_message": asr_primary_error_message,
+            "asr_primary_provider_log_id": asr_primary_provider_log_id,
             "provider_start_abs_ms": provider_start_abs_ms,
             "provider_ready_abs_ms": provider_ready_abs_ms,
             "provider_start_duration_ms": provider_start_duration_ms,
@@ -285,7 +290,31 @@ async def stream_opus_realtime_session(
             "provider_log_id": asr_result.request_id if asr_result is not None else None,
             "provider_error_code": provider_error_code,
             "provider_error_message": provider_error_message,
+            "fallback_reason": fallback_reason,
+            "fallback_started_abs_ms": fallback_started_abs_ms,
+            "fallback_done_abs_ms": fallback_done_abs_ms,
         }
+
+    def _log_asr_fallback(session_id: str | None = None) -> None:
+        logger.info(
+            "event=v5_asr_fallback session_id=%s asr_primary_provider=%s "
+            "asr_primary_error_code=%s asr_primary_error_message=%s "
+            "asr_fallback_used=%s asr_provider_used=%s asr_fallback_provider=%s "
+            "asr_primary_provider_log_id=%s provider_log_id=%s "
+            "fallback_reason=%s fallback_started_abs_ms=%s fallback_done_abs_ms=%s",
+            session_id or "pending",
+            asr_primary_provider,
+            asr_primary_error_code,
+            asr_primary_error_message,
+            str(asr_fallback_used).lower(),
+            asr_provider_used,
+            asr_fallback_provider,
+            asr_primary_provider_log_id,
+            asr_result.request_id if asr_result is not None else None,
+            fallback_reason,
+            fallback_started_abs_ms,
+            fallback_done_abs_ms,
+        )
 
     def _pcm_chunks_for_provider(pcm_bytes: bytes) -> list[bytes]:
         chunk_bytes = max(1, frame_size * x_opus_channels * 2)
@@ -598,18 +627,22 @@ async def stream_opus_realtime_session(
         if asr_result.error_code or not asr_result.text:
             asr_primary_error_code = asr_result.error_code or "asr_empty_text"
             asr_primary_error_message = asr_result.error_message or "ASR failed"
+            asr_primary_provider_log_id = asr_result.request_id
         else:
             asr_provider_used = asr_provider
 
     if run_asr and (asr_result is None or asr_result.error_code or not asr_result.text):
         if asr_fallback_provider is not None:
             asr_fallback_used = True
+            fallback_reason = asr_primary_error_code or provider_error_code or "asr_failed"
             asr_provider = asr_fallback_provider
+            asr_provider_used = asr_fallback_provider
             first_pcm_to_asr_ms = None
             first_pcm_sent_to_provider_abs_ms = None
             first_provider_result_abs_ms = None
             provider_error_code = None
             provider_error_message = None
+            fallback_started_abs_ms = _server_elapsed_ms()
             try:
                 asr_result = await _run_cached_pcm_asr(asr_fallback_provider, bytes(decoded))
             except RealtimeAsrError as exc:
@@ -620,8 +653,10 @@ async def stream_opus_realtime_session(
                     error_code=exc.code,
                     error_message=exc.message,
                 )
+            fallback_done_abs_ms = _server_elapsed_ms()
             provider_error_code = asr_result.error_code
             provider_error_message = asr_result.error_message
+            _log_asr_fallback()
             if asr_result.error_code or not asr_result.text:
                 await _send_asr_terminal_error(asr_result)
                 return
@@ -742,6 +777,7 @@ async def stream_opus_realtime_session(
                 "asr_fallback_used": asr_fallback_used,
                 "asr_primary_error_code": asr_primary_error_code,
                 "asr_primary_error_message": asr_primary_error_message,
+                "asr_primary_provider_log_id": asr_primary_provider_log_id,
                 "asr_log_id": asr_result.request_id,
                 "asr_error_code": None,
                 "asr_error_message": None,
@@ -754,6 +790,9 @@ async def stream_opus_realtime_session(
                 "provider_log_id": asr_result.request_id,
                 "provider_error_code": None,
                 "provider_error_message": None,
+                "fallback_reason": fallback_reason,
+                "fallback_started_abs_ms": fallback_started_abs_ms,
+                "fallback_done_abs_ms": fallback_done_abs_ms,
                 "answer_mode": answer_mode,
                 "stream_to_session_start_abs_ms": stream_to_session_start_abs_ms,
                 "server_stream_accept_abs_ms": 0,
@@ -764,6 +803,8 @@ async def stream_opus_realtime_session(
             }
         )
         store.update_session(session["session_id"], trace=session_trace, question_text=asr_result.text)
+        if asr_fallback_used:
+            _log_asr_fallback(session["session_id"])
         start_realtime_session_from_question(
             store,
             session["session_id"],

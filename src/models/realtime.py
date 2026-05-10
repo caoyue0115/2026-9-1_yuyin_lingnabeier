@@ -34,6 +34,13 @@ class RealtimeTrace(BaseModel):
     asr_final_ms: int | None = None
     realtime_asr_request_id: str | None = None
     asr_provider: str | None = None
+    asr_primary_provider: str | None = None
+    asr_provider_used: str | None = None
+    asr_fallback_provider: str | None = None
+    asr_fallback_used: bool | None = None
+    asr_primary_error_code: str | None = None
+    asr_primary_error_message: str | None = None
+    asr_primary_provider_log_id: str | None = None
     asr_log_id: str | None = None
     asr_error_code: str | None = None
     asr_error_message: str | None = None
@@ -46,6 +53,9 @@ class RealtimeTrace(BaseModel):
     provider_log_id: str | None = None
     provider_error_code: str | None = None
     provider_error_message: str | None = None
+    fallback_reason: str | None = None
+    fallback_started_abs_ms: int | None = None
+    fallback_done_abs_ms: int | None = None
     answer_mode: str | None = None
     retrieval_top_score: float | None = None
     stream_to_session_start_abs_ms: int | None = None

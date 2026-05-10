@@ -188,6 +188,38 @@ fallback_reason=<reason>
 - `heap_free` / `psram_free` watermark
 - 失败时的 `fallback_behavior`、`legacy_audio_fallback`、`fallback_reason`
 
+## P3.2 云端 ASR fallback 可观测性
+
+板端 v25 真机验证显示 v5 Opus WS 上行和下行播放已打通，但多轮实际 ASR provider 为 DashScope。为了定位 Volcengine primary 失败原因，云端 v5 增加 primary/fallback 可观测字段，不修改 Volcengine 协议参数、不改 ASR provider 默认策略。
+
+status API trace 必须保留：
+
+- `asr_primary_provider`
+- `asr_provider_used`
+- `asr_fallback_provider`
+- `asr_fallback_used`
+- `asr_primary_error_code`
+- `asr_primary_error_message`
+- `asr_primary_provider_log_id`
+- `provider_error_code`
+- `provider_error_message`
+- `provider_log_id`
+- `fallback_reason`
+- `fallback_started_abs_ms`
+- `fallback_done_abs_ms`
+
+fallback 触发时，云端 stdout 打一行可 grep 的结构化日志：
+
+```text
+event=v5_asr_fallback session_id=<pending-or-session-id> asr_primary_provider=volcengine asr_primary_error_code=<code> asr_primary_error_message=<message> asr_fallback_used=true asr_provider_used=dashscope asr_fallback_provider=dashscope asr_primary_provider_log_id=<primary_log_id> provider_log_id=<fallback_log_id> fallback_reason=<code> fallback_started_abs_ms=<ms> fallback_done_abs_ms=<ms>
+```
+
+说明：
+
+- fallback 初次触发时 full-chain session 尚未创建，日志中的 `session_id=pending`。
+- full-chain session 创建后再次记录同一事件，`session_id` 为可通过 status API 查询的 realtime session id。
+- 如果本轮 Volcengine primary 成功，则 `asr_fallback_used=false`，上述 fallback 日志不会出现；status API 仍应返回全部字段且 primary error 字段为 `null`。
+
 ## 编译验证方式
 
 云端回归：
