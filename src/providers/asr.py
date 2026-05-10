@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from http import HTTPStatus
+import os
 from pathlib import Path
 import signal
 import threading
@@ -18,12 +19,23 @@ class ASRResult:
 
 
 def _is_asr_configured() -> bool:
-    return bool(settings.dashscope_api_key and settings.asr_model and settings.asr_provider == "dashscope")
+    provider = (settings.asr_provider or "dashscope").strip().lower()
+    if provider == "dashscope":
+        return bool(settings.dashscope_api_key and settings.asr_model)
+    if provider == "volcengine":
+        return bool(
+            os.getenv("VOLCENGINE_SPEECH_APP_ID")
+            and os.getenv("VOLCENGINE_SPEECH_ACCESS_TOKEN")
+            and os.getenv("VOLCENGINE_ASR_RESOURCE_ID")
+        )
+    return False
 
 
 def asr_health() -> bool:
     if not _is_asr_configured():
         return False
+    if (settings.asr_provider or "dashscope").strip().lower() == "volcengine":
+        return True
     try:
         _load_recognition_class()
     except ImportError:

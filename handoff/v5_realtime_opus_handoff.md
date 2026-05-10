@@ -1034,3 +1034,121 @@ idf.py build
 ```
 
 结果：通过。构建产物 `build/esp_idf_demo.bin`，binary size `0x37c40`，factory partition 剩余约 89%。本轮未做真机烧录，未部署云端。
+
+## 2026-05-10 P4：greenunion-sh v5 独立实例
+
+本轮在 `greenunion-sh` 上另起 v5 realtime Opus 独立实例，v3 保持运行不动。
+
+新增部署文档：
+
+```text
+docs/superpowers/specs/2026-05-10-v5-greenunion-deploy.md
+```
+
+新增 v5 专用 compose：
+
+```text
+deploy/greenunion/docker-compose.v5.yml
+```
+
+云端布局：
+
+- v3 目录：`/home/ubuntu/religion_demo_v3_greenunion_app`
+- v3 端口：宿主 `0.0.0.0:80` -> 容器 `8010`
+- v5 目录：`/app/religion_demo_v5_realtime_opus`
+- v5 compose project：`religion_demo_v5_realtime_opus`
+- v5 端口：宿主 `0.0.0.0:8020` -> 容器 `8010`
+- v5 `.env`：`/app/religion_demo_v5_realtime_opus/.env`，未打印真实值，未入库
+- v5 data/indices：`/app/religion_demo_v5_realtime_opus/data`、`/app/religion_demo_v5_realtime_opus/indices`
+
+v5 启动命令：
+
+```bash
+cd /app/religion_demo_v5_realtime_opus
+docker compose -p religion_demo_v5_realtime_opus -f deploy/greenunion/docker-compose.v5.yml up -d --build
+```
+
+v5 停止命令：
+
+```bash
+cd /app/religion_demo_v5_realtime_opus
+docker compose -p religion_demo_v5_realtime_opus -f deploy/greenunion/docker-compose.v5.yml down
+```
+
+当前容器 PID：
+
+```text
+api    1786577
+worker 1786587
+redis  1784596
+```
+
+v5 配置脱敏确认：
+
+- `ASR_PROVIDER=volcengine`
+- `ASR_FALLBACK_PROVIDER=dashscope`
+- DashScope key 存在
+- Volcengine ASR app/token/resource 存在
+- LLM/TTS 配置存在
+- `PUBLIC_BASE_URL=http://106.54.240.51:8020`
+
+数据/索引：
+
+- `data/buddhism` 从 v3 当前目录复制独立副本，73 files
+- `indices` 从 v3 当前目录复制独立副本，2 files
+- index chunks：181
+- indexed doc titles：65
+
+云端 healthz：
+
+```bash
+curl --max-time 5 -sS http://127.0.0.1:8020/healthz
+```
+
+结果：
+
+```json
+{"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+```
+
+v3 主入口保持正常：
+
+```bash
+curl --max-time 5 -sS http://127.0.0.1:80/healthz
+```
+
+结果：
+
+```json
+{"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+```
+
+v5 full-chain smoke：
+
+```bash
+docker exec religion_demo_v5_realtime_opus-api-1 \
+  python scripts/opus_uplink_stream_smoke.py \
+    /app/data/incoming/smoke_amitabha.wav \
+    --base-url http://127.0.0.1:8010 \
+    --frame-ms 60 \
+    --realtime \
+    --run-asr \
+    --run-full-chain \
+    --asr-provider volcengine \
+    --asr-fallback-provider dashscope \
+    --answer-mode short \
+    --timeout 20 \
+    --status-timeout 20 \
+    --max-polls 120
+```
+
+结果：通过。`type=done`，session `status=done`，`final_reason=completed_answer`。本次火山 ASR 首选连接中断，随后 DashScope fallback 成功，属于 L0 正常流程。关键指标：79 frames，Opus 13415 bytes，PCM 150156 bytes，compression ratio 11.193，ASR final 1222 ms，first audio byte 2159 ms，done 8998 ms。
+
+公网 8020 说明：
+
+- 宿主 `ss` 确认 `0.0.0.0:8020` 已监听。
+- 主机 `ufw inactive`，`iptables INPUT ACCEPT`。
+- 但本地和云端本机访问 `http://106.54.240.51:8020/healthz` 均 5 秒超时，当前判断是云安全组或公网入口未放行 8020。
+- 本轮未改 nginx 主入口、未改云安全组。板端目标 base URL 是 `http://106.54.240.51:8020`，但需先放行公网 `8020/tcp` 后才能直连。
+
+部署中补充修正：`/healthz` 的旧 ASR 检查只接受 `ASR_PROVIDER=dashscope`。已最小修正为 Volcengine provider 下检查 Volcengine ASR app/token/resource，避免 v5 `.env` 正确但 healthz 误报 `asr=down`。

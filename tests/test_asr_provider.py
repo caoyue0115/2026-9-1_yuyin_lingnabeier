@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -73,6 +74,18 @@ class TranscribeWavTests(unittest.TestCase):
             asr, "_load_recognition_class", side_effect=ImportError("dashscope missing")
         ):
             self.assertFalse(asr.asr_health())
+
+    def test_asr_health_accepts_volcengine_streaming_credentials(self) -> None:
+        with mock.patch.object(asr.settings, "asr_provider", "volcengine"), mock.patch.dict(
+            os.environ,
+            {
+                "VOLCENGINE_SPEECH_APP_ID": "app-id",
+                "VOLCENGINE_SPEECH_ACCESS_TOKEN": "access-token",
+                "VOLCENGINE_ASR_RESOURCE_ID": "resource-id",
+            },
+            clear=False,
+        ), mock.patch.object(asr, "_load_recognition_class", side_effect=AssertionError("dashscope not used")):
+            self.assertTrue(asr.asr_health())
 
     def test_transcribe_wav_uses_dashscope_recognition_and_returns_sentence(self) -> None:
         _FakeRecognition.result = _FakeSuccessResult()

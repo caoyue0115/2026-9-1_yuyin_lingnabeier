@@ -1,0 +1,34 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.greenunion
+    restart: unless-stopped
+    command: uvicorn src.app:app --host 0.0.0.0 --port 8010
+    env_file:
+      - ${V5_ENV_FILE:-/app/religion_demo_v5_realtime_opus/.env}
+    volumes:
+      - ${V5_DATA_DIR:-/app/religion_demo_v5_realtime_opus/data}:/app/data
+      - ${V5_INDICES_DIR:-/app/religion_demo_v5_realtime_opus/indices}:/app/indices
+    ports:
+      - "${V5_BIND_HOST:-0.0.0.0}:${V5_PUBLIC_PORT:-8020}:8010"
+    depends_on:
+      - redis
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.greenunion
+    restart: unless-stopped
+    command: rq worker -u redis://redis:6379/0 religion_tasks
+    env_file:
+      - ${V5_ENV_FILE:-/app/religion_demo_v5_realtime_opus/.env}
+    volumes:
+      - ${V5_DATA_DIR:-/app/religion_demo_v5_realtime_opus/data}:/app/data
+      - ${V5_INDICES_DIR:-/app/religion_demo_v5_realtime_opus/indices}:/app/indices
+    depends_on:
+      - redis
