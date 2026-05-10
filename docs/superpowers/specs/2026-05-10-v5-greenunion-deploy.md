@@ -330,3 +330,88 @@ docker compose -p religion_demo_v5_realtime_opus -f deploy/greenunion/docker-com
 ```
 
 结论：本次端口切换已尝试，但因修正 `PUBLIC_BASE_URL` 后 v5 公网 80 healthz 失败，已按规则回滚。当前 80 仍是 v3，8020 仍是 v5；板端公网直连 v5 仍需后续解决 80 接管问题或放行 8020。
+
+## 2026-05-10 v5 Long-Running On Public Port 80
+
+用户后续确认 v3 暂时不需要作为公网入口，授权停用 v3 并让 v5 长驻 80 做持续测试。本轮不删除 v3 数据、配置、volume、代码或 `.env`，也不改 nginx。
+
+执行前状态：
+
+| service | before host mapping |
+| --- | --- |
+| v3 | `0.0.0.0:80 -> 8010` |
+| v5 | `0.0.0.0:8020 -> 8010` |
+
+执行动作：
+
+```bash
+cd /home/ubuntu/religion_demo_v3_greenunion_app
+docker compose stop
+```
+
+v5 配置调整：
+
+- compose 端口映射：`${V5_BIND_HOST:-0.0.0.0}:${V5_PUBLIC_PORT:-80}:8010`
+- `.env`：`PUBLIC_BASE_URL=http://106.54.240.51`
+- ASR provider 保持 `volcengine`
+- ASR fallback provider 保持 `dashscope`
+
+v5 重建命令：
+
+```bash
+cd /app/religion_demo_v5_realtime_opus
+docker compose -p religion_demo_v5_realtime_opus -f deploy/greenunion/docker-compose.v5.yml up -d --force-recreate api worker
+```
+
+本轮云端 v5 备份：
+
+```text
+/app/religion_demo_v5_realtime_opus/deploy/greenunion/docker-compose.v5.yml.bak.20260510_104439
+/app/religion_demo_v5_realtime_opus/.env.bak.20260510_104439
+```
+
+当前状态：
+
+| service | current host mapping | status |
+| --- | --- | --- |
+| v3 | none | stopped |
+| v5 | `0.0.0.0:80 -> 8010` | running |
+
+v5 healthz：
+
+```text
+http://127.0.0.1/healthz -> {"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+http://106.54.240.51/healthz -> {"api":"ok","redis":"ok","sqlite":"ok","asr":"ok","llm":"ok","tts":"ok"}
+```
+
+公网 80 full-chain Opus smoke：
+
+```bash
+python scripts/opus_uplink_stream_smoke.py \
+  /tmp/volc_asr_eval/amitabha.wav \
+  --base-url http://106.54.240.51 \
+  --frame-ms 60 \
+  --realtime \
+  --run-asr \
+  --run-full-chain \
+  --answer-mode short
+```
+
+结果：stream `type=done`，session `status=done`，`final_reason=completed_answer`。关键指标：79 frames，Opus 13415 bytes，PCM 150156 bytes，compression ratio 11.193。火山 ASR 首选返回 `volcengine_asr_finish_failed` 后 DashScope fallback 成功，属于 L0 正常流程。
+
+`audio_stream_url` 已修正为公网 80 口径：
+
+```text
+http://106.54.240.51/api/v3/realtime/sessions/<session_id>/audio
+```
+
+不再包含 `:8020`。
+
+v3 恢复命令：
+
+```bash
+cd /home/ubuntu/religion_demo_v3_greenunion_app
+docker compose up -d
+```
+
+如需恢复 v3 到公网 80，需先停止 v5 或调整 v5 端口，避免 80 端口冲突。
