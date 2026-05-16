@@ -9,11 +9,17 @@ ESP_DIR = ROOT / "esp_idf_demo"
 
 
 class EspAssetTests(unittest.TestCase):
-    def test_partition_table_allocates_app_and_spiffs_storage(self) -> None:
+    def test_partition_table_allocates_ab_ota_app_slots_and_spiffs_storage(self) -> None:
         partitions = (ESP_DIR / "partitions.csv").read_text(encoding="utf-8")
+        normalized = partitions.replace(" ", "")
 
-        self.assertIn("factory,app,factory,0x10000,2M", partitions.replace(" ", ""))
-        self.assertIn("storage,data,spiffs,,4M", partitions.replace(" ", ""))
+        self.assertIn("nvs,data,nvs,0x9000,0x6000", normalized)
+        self.assertIn("otadata,data,ota,0xF000,0x2000", normalized)
+        self.assertIn("phy_init,data,phy,0x11000,0x1000", normalized)
+        self.assertIn("ota_0,app,ota_0,0x20000,3M", normalized)
+        self.assertIn("ota_1,app,ota_1,,3M", normalized)
+        self.assertIn("storage,data,spiffs,,4M", normalized)
+        self.assertNotIn("factory,app,factory", normalized)
 
     def test_intro_audio_asset_is_small_pcm_resource(self) -> None:
         intro = ESP_DIR / "spiffs" / "intro_1.pcm"
@@ -64,7 +70,7 @@ class EspAssetTests(unittest.TestCase):
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
 
         self.assertIn("#define DEMO_REALTIME_AUDIO_JITTER_BUFFER_BYTES 122880", config)
-        self.assertIn("#define DEMO_REALTIME_AUDIO_JITTER_PREBUFFER_BYTES 61440", config)
+        self.assertIn("#define DEMO_REALTIME_AUDIO_JITTER_PREBUFFER_BYTES 81920", config)
         self.assertIn("#define DEMO_REALTIME_AUDIO_ENCODED_QUEUE_LENGTH 80", config)
         self.assertIn("#define DEMO_REALTIME_AUDIO_PCM_QUEUE_LENGTH 60", config)
         self.assertIn("#define DEMO_REALTIME_AUDIO_QUEUE_SEND_TIMEOUT_MS 1000", config)
