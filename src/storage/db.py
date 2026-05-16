@@ -46,6 +46,56 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ota_releases (
+                release_id TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                version TEXT NOT NULL,
+                artifact_name TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                force INTEGER NOT NULL DEFAULT 0,
+                min_version TEXT,
+                board TEXT,
+                hw_rev TEXT,
+                priority INTEGER NOT NULL DEFAULT 100,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ota_release_devices (
+                release_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                PRIMARY KEY (release_id, device_id),
+                FOREIGN KEY (release_id) REFERENCES ota_releases(release_id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ota_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                target TEXT NOT NULL,
+                from_version TEXT,
+                to_version TEXT,
+                release_id TEXT,
+                stage TEXT NOT NULL,
+                ok INTEGER NOT NULL,
+                error_code TEXT,
+                error_message TEXT,
+                free_heap INTEGER,
+                rssi INTEGER,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -154,6 +204,131 @@ def mark_task_failed(task_id: str, step: str, error_code: str, error_message: st
         conn.close()
 
 
+def create_ota_release(
+    *,
+    release_id: str,
+    target: str,
+    version: str,
+    artifact_name: str,
+    sha256: str,
+    size: int,
+    min_version: str | None = None,
+    device_ids: list[str] | None = None,
+    enabled: bool = True,
+    force: bool = False,
+    board: str | None = None,
+    hw_rev: str | None = None,
+    priority: int = 100,
+    notes: str | None = None,
+) -> None:
+    conn = connect()
+    try:
+        ts = now_iso()
+        conn.execute(
+            """
+            INSERT INTO ota_releases(
+                release_id, target, version, artifact_name, sha256, size, enabled, force,
+                min_version, board, hw_rev, priority, notes, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                release_id,
+                target,
+                version,
+                artifact_name,
+                sha256,
+                size,
+                1 if enabled else 0,
+                1 if force else 0,
+                min_version,
+                board,
+                hw_rev,
+                priority,
+                notes,
+                ts,
+            ),
+        )
+        for device_id in device_ids or []:
+            conn.execute(
+                "INSERT INTO ota_release_devices(release_id, device_id) VALUES (?, ?)",
+                (release_id, device_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_ota_release_candidates() -> list[dict[str, Any]]:
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                release_id, target, version, artifact_name, sha256, size, enabled, force,
+                min_version, board, hw_rev, priority, notes, created_at
+            FROM ota_releases
+            ORDER BY priority ASC, created_at ASC, release_id ASC
+            """
+        ).fetchall()
+        releases = [dict(row) for row in rows]
+        for release in releases:
+            device_rows = conn.execute(
+                "SELECT device_id FROM ota_release_devices WHERE release_id = ? ORDER BY device_id",
+                (release["release_id"],),
+            ).fetchall()
+            release["device_ids"] = [row["device_id"] for row in device_rows]
+        return releases
+    finally:
+        conn.close()
+
+
+def record_ota_report(payload: dict[str, Any]) -> str:
+    conn = connect()
+    try:
+        ts = now_iso()
+        conn.execute(
+            """
+            INSERT INTO ota_reports(
+                device_id, target, from_version, to_version, release_id, stage, ok,
+                error_code, error_message, free_heap, rssi, payload_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["device_id"],
+                payload["target"],
+                payload.get("from_version"),
+                payload.get("to_version"),
+                payload.get("release_id"),
+                payload["stage"],
+                1 if payload["ok"] else 0,
+                payload.get("error_code"),
+                payload.get("error_message"),
+                payload.get("free_heap"),
+                payload.get("rssi"),
+                json.dumps(payload, ensure_ascii=False),
+                ts,
+            ),
+        )
+        conn.commit()
+        return ts
+    finally:
+        conn.close()
+
+
+def fetch_latest_ota_report(device_id: str) -> dict[str, Any] | None:
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM ota_reports WHERE device_id = ? ORDER BY id DESC LIMIT 1",
+            (device_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def sqlite_ok() -> bool:
     try:
         conn = connect()
@@ -162,4 +337,3 @@ def sqlite_ok() -> bool:
         return True
     except Exception:
         return False
-

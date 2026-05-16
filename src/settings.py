@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     sqlite_path: str = "./data/tasks.db"
     public_base_url: str = "http://localhost:8010"
+    ota_artifact_dir: str = "./data/ota_artifacts"
     queue_name: str = "religion_tasks"
     max_upload_mb: int = 3
     max_audio_seconds: int = 8
@@ -87,6 +88,13 @@ class Settings(BaseSettings):
     @property
     def output_dir(self) -> Path:
         return self.data_dir / "output"
+
+    @property
+    def ota_artifact_path(self) -> Path:
+        raw = Path(self.ota_artifact_dir)
+        if raw.is_absolute():
+            return raw
+        return (self.project_root / raw).resolve()
 
     @property
     def kb_dir(self) -> Path:

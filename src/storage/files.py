@@ -12,6 +12,7 @@ def ensure_data_dirs() -> None:
         settings.data_dir,
         settings.incoming_dir,
         settings.output_dir,
+        settings.ota_artifact_path,
         settings.kb_dir,
         settings.logs_dir,
         settings.indices_dir,
@@ -37,4 +38,3 @@ def output_audio_path(suffix: str = ".wav") -> Path:
 
 def safe_audio_path(filename: str) -> Path:
     return settings.output_dir / Path(filename).name
-
