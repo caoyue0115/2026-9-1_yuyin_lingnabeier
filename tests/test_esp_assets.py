@@ -82,6 +82,24 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("../spiffs", cmake)
         self.assertIn("spiffs_create_partition_image(storage ../spiffs FLASH_IN_PROJECT)", cmake)
 
+    def test_ota_p2_manifest_dry_run_is_present_without_partition_writes(self) -> None:
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        cloud_header = (ESP_DIR / "main" / "cloud_client.h").read_text(encoding="utf-8")
+        cloud_source = (ESP_DIR / "main" / "cloud_client.c").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        combined = "\n".join((cloud_header, cloud_source, main_source))
+
+        self.assertIn("DEMO_OTA_MANIFEST_DRY_RUN_ENABLED", config)
+        self.assertIn("DEMO_OTA_MANIFEST_POLL_INTERVAL_MS", config)
+        self.assertIn("DEMO_OTA_IDLE_AFTER_WS_DELAY_MS", config)
+        self.assertIn("cloud_client_fetch_ota_manifest", cloud_header)
+        self.assertIn("api/v5/ota/manifest", cloud_source)
+        self.assertIn("ota_manifest_dry_run", main_source)
+        self.assertIn("cloud_client_fetch_ota_manifest", main_source)
+        self.assertNotIn("esp_ota_begin", combined)
+        self.assertNotIn("esp_ota_write", combined)
+        self.assertNotIn("esp_ota_set_boot_partition", combined)
+
 
 if __name__ == "__main__":
     unittest.main()

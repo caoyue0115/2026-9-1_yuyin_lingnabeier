@@ -26,6 +26,14 @@
 #define DEMO_CLOUD_ERROR_CODE_MAX_LEN 128
 #endif
 
+#ifndef DEMO_CLOUD_OTA_FIELD_MAX_LEN
+#define DEMO_CLOUD_OTA_FIELD_MAX_LEN 128
+#endif
+
+#ifndef DEMO_CLOUD_OTA_URL_MAX_LEN
+#define DEMO_CLOUD_OTA_URL_MAX_LEN 512
+#endif
+
 #ifndef DEMO_CLOUD_ERR_BASE
 #define DEMO_CLOUD_ERR_BASE 0x7000
 #endif
@@ -58,6 +66,26 @@ typedef struct {
     char status[DEMO_CLOUD_STATUS_MAX_LEN];
     char audio_stream_url[DEMO_CLOUD_AUDIO_URL_MAX_LEN];
 } cloud_realtime_session_t;
+
+typedef struct {
+    char target[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char version[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char artifact[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char url[DEMO_CLOUD_OTA_URL_MAX_LEN];
+    char sha256[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char min_version[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char release_id[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char notes[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    int size;
+    bool force;
+} cloud_ota_update_t;
+
+typedef struct {
+    int http_status;
+    int poll_interval_sec;
+    bool has_update;
+    cloud_ota_update_t update;
+} cloud_ota_manifest_t;
 
 typedef struct cloud_opus_uplink cloud_opus_uplink_t;
 
@@ -129,6 +157,11 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
                                              cloud_realtime_audio_chunk_callback_t callback,
                                              void *user_ctx,
                                              cloud_realtime_audio_metrics_t *metrics);
+
+esp_err_t cloud_client_fetch_ota_manifest(const char *board,
+                                          const char *hw_rev,
+                                          const char *app_version,
+                                          cloud_ota_manifest_t *manifest);
 
 esp_err_t cloud_client_opus_uplink_begin(cloud_opus_uplink_t **out_uplink,
                                          cloud_opus_uplink_metrics_t *metrics);

@@ -6,6 +6,7 @@
 
 #include "esp_err.h"
 #include "esp_event.h"
+#include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -25,6 +26,8 @@ static const char *TAG = "esp_idf_demo";
 static EventGroupHandle_t s_wifi_event_group;
 static int s_wifi_retry_count = 0;
 static TaskHandle_t s_pipeline_task_handle = NULL;
+static int64_t s_last_pipeline_finish_us = 0;
+static int64_t s_next_ota_manifest_check_us = 0;
 
 #define APP_WIFI_CONNECTED_BIT BIT0
 #define APP_WIFI_FAILED_BIT    BIT1
@@ -138,6 +141,9 @@ static void app_log_runtime_config(void)
     ESP_LOGI(TAG, "  audio_output_volume=%d", DEMO_AUDIO_OUTPUT_VOLUME);
     ESP_LOGI(TAG, "  cloud_poll_timeout_ms=%d", DEMO_CLOUD_POLL_TIMEOUT_MS);
     ESP_LOGI(TAG, "  cloud_poll_interval_ms=%d", DEMO_CLOUD_POLL_INTERVAL_MS);
+    ESP_LOGI(TAG, "  ota_manifest_dry_run_enabled=%d", DEMO_OTA_MANIFEST_DRY_RUN_ENABLED);
+    ESP_LOGI(TAG, "  ota_manifest_poll_interval_ms=%d", DEMO_OTA_MANIFEST_POLL_INTERVAL_MS);
+    ESP_LOGI(TAG, "  ota_idle_after_ws_delay_ms=%d", DEMO_OTA_IDLE_AFTER_WS_DELAY_MS);
     ESP_LOGI(TAG, "  realtime_session_timeout_ms=%d", DEMO_REALTIME_SESSION_TIMEOUT_MS);
     ESP_LOGI(TAG, "  v5_uplink_enabled=%d", V5_OPUS_UPLINK_WS_ENABLED);
     ESP_LOGI(TAG, "  v5_uplink_fallback_legacy_audio=%d", V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO);
@@ -1145,6 +1151,7 @@ static void app_pipeline_task(void *arg)
 
     free(task_args);
     s_pipeline_task_handle = NULL;
+    s_last_pipeline_finish_us = esp_timer_get_time();
     ESP_LOGI(TAG, "pipeline task finished");
     vTaskDelete(NULL);
 }
@@ -1180,6 +1187,82 @@ static esp_err_t app_start_pipeline_task(const trigger_event_t *event)
     return ESP_OK;
 }
 
+static bool app_ota_manifest_idle_ready(int64_t now_us)
+{
+    if (s_app_state != APP_STATE_IDLE || s_pipeline_task_handle != NULL) {
+        return false;
+    }
+    if (!app_wifi_is_connected()) {
+        return false;
+    }
+    if (s_last_pipeline_finish_us > 0 &&
+        now_us - s_last_pipeline_finish_us < (int64_t)DEMO_OTA_IDLE_AFTER_WS_DELAY_MS * 1000) {
+        return false;
+    }
+    return true;
+}
+
+static void app_poll_ota_manifest_dry_run_if_due(void)
+{
+#if DEMO_OTA_MANIFEST_DRY_RUN_ENABLED
+    const int64_t now_us = esp_timer_get_time();
+    if (s_next_ota_manifest_check_us > 0 && now_us < s_next_ota_manifest_check_us) {
+        return;
+    }
+    if (!app_ota_manifest_idle_ready(now_us)) {
+        return;
+    }
+
+    s_next_ota_manifest_check_us =
+        now_us + (int64_t)DEMO_OTA_MANIFEST_POLL_INTERVAL_MS * 1000;
+
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    const char *app_version = app_desc != NULL ? app_desc->version : "";
+    cloud_ota_manifest_t manifest = {0};
+    const int64_t start_us = esp_timer_get_time();
+    ESP_LOGI(TAG,
+             "stage=ota_manifest_dry_run event=start device_id=%s board=%s hw_rev=%s app_version=%s",
+             DEMO_DEVICE_ID,
+             DEMO_BOARD_NAME,
+             DEMO_BOARD_REVISION,
+             app_version);
+    esp_err_t ret = cloud_client_fetch_ota_manifest(DEMO_BOARD_NAME,
+                                                    DEMO_BOARD_REVISION,
+                                                    app_version,
+                                                    &manifest);
+    const double elapsed_ms = (double)(esp_timer_get_time() - start_us) / 1000.0;
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "stage=ota_manifest_dry_run event=failed err=%s http_status=%d elapsed_ms=%.1f",
+                 esp_err_to_name(ret),
+                 manifest.http_status,
+                 elapsed_ms);
+        return;
+    }
+    if (!manifest.has_update) {
+        ESP_LOGI(TAG,
+                 "stage=ota_manifest_dry_run event=no_update http_status=%d poll_interval_sec=%d elapsed_ms=%.1f",
+                 manifest.http_status,
+                 manifest.poll_interval_sec,
+                 elapsed_ms);
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "stage=ota_manifest_dry_run event=update_available release_id=%s target=%s version=%s artifact=%s size=%d sha256=%s force=%d min_version=%s url=%s elapsed_ms=%.1f action=log_only",
+             manifest.update.release_id[0] != '\0' ? manifest.update.release_id : "(empty)",
+             manifest.update.target,
+             manifest.update.version,
+             manifest.update.artifact,
+             manifest.update.size,
+             manifest.update.sha256,
+             manifest.update.force,
+             manifest.update.min_version[0] != '\0' ? manifest.update.min_version : "(none)",
+             manifest.update.url,
+             elapsed_ms);
+#endif
+}
+
 void app_main(void)
 {
     trigger_input_t trigger = {0};
@@ -1208,6 +1291,8 @@ void app_main(void)
     app_set_state(&s_app_state, APP_STATE_IDLE);
 
     while (true) {
+        app_poll_ota_manifest_dry_run_if_due();
+
         trigger_event_t event = {0};
         if (trigger_input_poll(&trigger, &event)) {
             if (s_app_state == APP_STATE_IDLE && s_pipeline_task_handle == NULL) {

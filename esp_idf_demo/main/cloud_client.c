@@ -228,6 +228,35 @@ static bool cloud_is_unreserved_path_char(unsigned char c)
     return isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~';
 }
 
+static esp_err_t cloud_url_encode_query_value(const char *input, char *output, size_t output_size)
+{
+    if (input == NULL || output == NULL || output_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    static const char hex[] = "0123456789ABCDEF";
+
+    size_t out_len = 0;
+    for (size_t i = 0; input[i] != '\0'; ++i) {
+        const unsigned char c = (unsigned char)input[i];
+        size_t needed = cloud_is_unreserved_path_char(c) ? 1 : 3;
+        if (out_len + needed + 1 > output_size) {
+            return ESP_ERR_NO_MEM;
+        }
+
+        if (cloud_is_unreserved_path_char(c)) {
+            output[out_len++] = (char)c;
+        } else {
+            output[out_len++] = '%';
+            output[out_len++] = hex[(c >> 4) & 0x0F];
+            output[out_len++] = hex[c & 0x0F];
+        }
+    }
+
+    output[out_len] = '\0';
+    return ESP_OK;
+}
+
 static esp_err_t cloud_url_encode_path_segment(const char *input, char *output, size_t output_size)
 {
     if (input == NULL || output == NULL || output_size == 0) {
@@ -366,6 +395,103 @@ static esp_err_t cloud_json_parse_realtime_session(const char *json, cloud_realt
     }
     if (ret == ESP_OK) {
         ret = cloud_json_get_string(root, "audio_stream_url", true, session->audio_stream_url, sizeof(session->audio_stream_url));
+    }
+
+    cJSON_Delete(root);
+    return ret;
+}
+
+static int cloud_json_get_int_default(const cJSON *object, const char *key, int default_value)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (!cJSON_IsNumber(item)) {
+        return default_value;
+    }
+    return item->valueint;
+}
+
+static bool cloud_json_get_bool_default_early(const cJSON *object, const char *key, bool default_value)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (item == NULL || cJSON_IsNull(item)) {
+        return default_value;
+    }
+    return cJSON_IsTrue(item);
+}
+
+static esp_err_t cloud_json_parse_ota_manifest(const char *json, cloud_ota_manifest_t *manifest)
+{
+    if (json == NULL || manifest == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(manifest, 0, sizeof(*manifest));
+
+    cJSON *root = cJSON_Parse(json);
+    if (root == NULL) {
+        return DEMO_CLOUD_ERR_INVALID_RESPONSE;
+    }
+
+    manifest->poll_interval_sec = cloud_json_get_int_default(root, "poll_interval_sec", 0);
+    const cJSON *updates = cJSON_GetObjectItemCaseSensitive(root, "updates");
+    if (!cJSON_IsArray(updates)) {
+        cJSON_Delete(root);
+        return DEMO_CLOUD_ERR_INVALID_RESPONSE;
+    }
+
+    const cJSON *first_update = cJSON_GetArrayItem(updates, 0);
+    if (first_update == NULL) {
+        cJSON_Delete(root);
+        return ESP_OK;
+    }
+    if (!cJSON_IsObject(first_update)) {
+        cJSON_Delete(root);
+        return DEMO_CLOUD_ERR_INVALID_RESPONSE;
+    }
+
+    manifest->has_update = true;
+    esp_err_t ret = cloud_json_get_string(first_update, "target", true,
+                                          manifest->update.target,
+                                          sizeof(manifest->update.target));
+    if (ret == ESP_OK) {
+        ret = cloud_json_get_string(first_update, "version", true,
+                                    manifest->update.version,
+                                    sizeof(manifest->update.version));
+    }
+    if (ret == ESP_OK) {
+        ret = cloud_json_get_string(first_update, "artifact", true,
+                                    manifest->update.artifact,
+                                    sizeof(manifest->update.artifact));
+    }
+    if (ret == ESP_OK) {
+        ret = cloud_json_get_string(first_update, "url", true,
+                                    manifest->update.url,
+                                    sizeof(manifest->update.url));
+    }
+    if (ret == ESP_OK) {
+        ret = cloud_json_get_string(first_update, "sha256", true,
+                                    manifest->update.sha256,
+                                    sizeof(manifest->update.sha256));
+    }
+    if (ret == ESP_OK) {
+        ret = cloud_json_get_string(first_update, "min_version", false,
+                                    manifest->update.min_version,
+                                    sizeof(manifest->update.min_version));
+    }
+    if (ret == ESP_OK) {
+        ret = cloud_json_get_string(first_update, "release_id", false,
+                                    manifest->update.release_id,
+                                    sizeof(manifest->update.release_id));
+    }
+    if (ret == ESP_OK) {
+        ret = cloud_json_get_string(first_update, "notes", false,
+                                    manifest->update.notes,
+                                    sizeof(manifest->update.notes));
+    }
+    manifest->update.size = cloud_json_get_int_default(first_update, "size", 0);
+    manifest->update.force = cloud_json_get_bool_default_early(first_update, "force", false);
+    if (ret == ESP_OK && manifest->update.size <= 0) {
+        ret = DEMO_CLOUD_ERR_INVALID_RESPONSE;
     }
 
     cJSON_Delete(root);
@@ -1799,6 +1925,84 @@ void cloud_client_opus_uplink_abort(cloud_opus_uplink_t *uplink)
     free(uplink->opus_frame);
     free(uplink->ws_frame);
     free(uplink);
+}
+
+esp_err_t cloud_client_fetch_ota_manifest(const char *board,
+                                          const char *hw_rev,
+                                          const char *app_version,
+                                          cloud_ota_manifest_t *manifest)
+{
+    if (manifest == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (DEMO_SERVER_BASE_URL[0] == '\0' || DEMO_DEVICE_ID[0] == '\0') {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char device_id_q[96] = {0};
+    char board_q[96] = {0};
+    char hw_rev_q[96] = {0};
+    char app_version_q[96] = {0};
+    esp_err_t ret = cloud_url_encode_query_value(DEMO_DEVICE_ID, device_id_q, sizeof(device_id_q));
+    if (ret == ESP_OK) {
+        ret = cloud_url_encode_query_value(board != NULL ? board : "", board_q, sizeof(board_q));
+    }
+    if (ret == ESP_OK) {
+        ret = cloud_url_encode_query_value(hw_rev != NULL ? hw_rev : "", hw_rev_q, sizeof(hw_rev_q));
+    }
+    if (ret == ESP_OK) {
+        ret = cloud_url_encode_query_value(app_version != NULL ? app_version : "",
+                                           app_version_q,
+                                           sizeof(app_version_q));
+    }
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    char path[384] = {0};
+    int written = snprintf(path,
+                           sizeof(path),
+                           "api/v5/ota/manifest?device_id=%s&board=%s&hw_rev=%s&app_version=%s",
+                           device_id_q,
+                           board_q,
+                           hw_rev_q,
+                           app_version_q);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    char url[512] = {0};
+    ret = cloud_build_url(url, sizeof(url), path);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    cloud_response_buffer_t response = {0};
+    ret = cloud_response_buffer_init(&response, 1024);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    int status_code = 0;
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_GET,
+        .timeout_ms = DEMO_OTA_MANIFEST_REQUEST_TIMEOUT_MS,
+    };
+    ret = cloud_http_execute(&config, NULL, 0, &response, &status_code);
+    if (ret == ESP_OK) {
+        manifest->http_status = status_code;
+        if (status_code != 200) {
+            ret = ESP_FAIL;
+        }
+    }
+    if (ret == ESP_OK) {
+        ret = cloud_json_parse_ota_manifest(response.data, manifest);
+        manifest->http_status = status_code;
+    }
+
+    cloud_response_buffer_free(&response);
+    return ret;
 }
 
 esp_err_t cloud_client_submit_pcm_task(const uint8_t *pcm,
