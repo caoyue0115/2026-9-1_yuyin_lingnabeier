@@ -21,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "mbedtls/sha256.h"
 
 static const char *TAG = "cloud_client";
 
@@ -517,9 +518,23 @@ static esp_err_t cloud_build_url(char *out, size_t out_size, const char *path)
     return ESP_OK;
 }
 
+static void cloud_hex_encode_sha256(const uint8_t digest[32], char *out, size_t out_size)
+{
+    static const char hex[] = "0123456789abcdef";
+    if (digest == NULL || out == NULL || out_size < 65) {
+        return;
+    }
+    for (size_t i = 0; i < 32; ++i) {
+        out[i * 2] = hex[(digest[i] >> 4) & 0x0f];
+        out[i * 2 + 1] = hex[digest[i] & 0x0f];
+    }
+    out[64] = '\0';
+}
+
 static esp_err_t cloud_http_execute(const esp_http_client_config_t *config,
                                     const uint8_t *body,
                                     size_t body_len,
+                                    const char *content_type,
                                     cloud_response_buffer_t *response,
                                     int *status_code)
 {
@@ -541,6 +556,13 @@ static esp_err_t cloud_http_execute(const esp_http_client_config_t *config,
     }
 
     esp_err_t ret = ESP_OK;
+    if (content_type != NULL && content_type[0] != '\0') {
+        ret = esp_http_client_set_header(client, "Content-Type", content_type);
+        if (ret != ESP_OK) {
+            esp_http_client_cleanup(client);
+            return ret;
+        }
+    }
     if (body != NULL && body_len > 0) {
         ret = esp_http_client_set_post_field(client, (const char *)body, (int)body_len);
         if (ret != ESP_OK) {
@@ -1989,7 +2011,7 @@ esp_err_t cloud_client_fetch_ota_manifest(const char *board,
         .method = HTTP_METHOD_GET,
         .timeout_ms = DEMO_OTA_MANIFEST_REQUEST_TIMEOUT_MS,
     };
-    ret = cloud_http_execute(&config, NULL, 0, &response, &status_code);
+    ret = cloud_http_execute(&config, NULL, 0, NULL, &response, &status_code);
     if (ret == ESP_OK) {
         manifest->http_status = status_code;
         if (status_code != 200) {
@@ -2002,6 +2024,243 @@ esp_err_t cloud_client_fetch_ota_manifest(const char *board,
     }
 
     cloud_response_buffer_free(&response);
+    return ret;
+}
+
+esp_err_t cloud_client_stream_ota_artifact(const cloud_ota_update_t *update,
+                                           cloud_ota_artifact_verify_t *result,
+                                           cloud_ota_artifact_chunk_callback_t callback,
+                                           void *user_ctx)
+{
+    if (update == NULL || result == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (update->url[0] == '\0' || update->size <= 0 || update->sha256[0] == '\0') {
+        return DEMO_CLOUD_ERR_INVALID_RESPONSE;
+    }
+
+    memset(result, 0, sizeof(*result));
+    result->partition_subtype = -1;
+    result->expected_size = update->size;
+    snprintf(result->expected_sha256, sizeof(result->expected_sha256), "%s", update->sha256);
+
+    esp_http_client_config_t config = {
+        .url = update->url,
+        .method = HTTP_METHOD_GET,
+        .timeout_ms = DEMO_OTA_MANIFEST_REQUEST_TIMEOUT_MS,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        return ESP_FAIL;
+    }
+
+    esp_err_t ret = esp_http_client_open(client, 0);
+    if (ret != ESP_OK) {
+        esp_http_client_cleanup(client);
+        return ret;
+    }
+
+    int64_t content_length = esp_http_client_fetch_headers(client);
+    result->http_status = esp_http_client_get_status_code(client);
+    if (result->http_status != 200) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+    if (content_length >= 0 && content_length != update->size) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return DEMO_CLOUD_ERR_INVALID_RESPONSE;
+    }
+
+    uint8_t *chunk = malloc(1024);
+    if (chunk == NULL) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_NO_MEM;
+    }
+
+    uint8_t digest[32] = {0};
+    mbedtls_sha256_context sha_ctx;
+    mbedtls_sha256_init(&sha_ctx);
+    ret = mbedtls_sha256_starts(&sha_ctx, 0) == 0 ? ESP_OK : ESP_FAIL;
+    while (ret == ESP_OK) {
+        int read_len = esp_http_client_read(client, (char *)chunk, 1024);
+        if (read_len < 0) {
+            ret = ESP_FAIL;
+            break;
+        }
+        if (read_len == 0) {
+            if (esp_http_client_is_complete_data_received(client)) {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (mbedtls_sha256_update(&sha_ctx, chunk, (size_t)read_len) != 0) {
+            ret = ESP_FAIL;
+            break;
+        }
+        result->bytes_read += read_len;
+        if (result->bytes_read > update->size) {
+            ret = DEMO_CLOUD_ERR_INVALID_RESPONSE;
+            break;
+        }
+        if (callback != NULL) {
+            ret = callback(chunk, (size_t)read_len, user_ctx);
+            if (ret != ESP_OK) {
+                break;
+            }
+            result->bytes_written += read_len;
+        }
+    }
+    if (ret == ESP_OK && mbedtls_sha256_finish(&sha_ctx, digest) != 0) {
+        ret = ESP_FAIL;
+    }
+    mbedtls_sha256_free(&sha_ctx);
+    free(chunk);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    cloud_hex_encode_sha256(digest, result->sha256, sizeof(result->sha256));
+    if (result->bytes_read != update->size) {
+        return DEMO_CLOUD_ERR_AUDIO_STREAM_EARLY_EOF;
+    }
+    if (strcasecmp(result->sha256, update->sha256) != 0) {
+        return DEMO_CLOUD_ERR_INVALID_RESPONSE;
+    }
+    return ESP_OK;
+}
+
+esp_err_t cloud_client_verify_ota_artifact(const cloud_ota_update_t *update,
+                                           cloud_ota_artifact_verify_t *result)
+{
+    return cloud_client_stream_ota_artifact(update, result, NULL, NULL);
+}
+
+static const char *cloud_json_safe_string(const char *value)
+{
+    return value != NULL && value[0] != '\0' ? value : NULL;
+}
+
+esp_err_t cloud_client_submit_ota_report(const cloud_ota_report_t *report,
+                                         int *http_status)
+{
+    if (report == NULL || report->stage == NULL || report->stage[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (DEMO_SERVER_BASE_URL[0] == '\0' || DEMO_DEVICE_ID[0] == '\0') {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char url[512] = {0};
+    esp_err_t ret = cloud_build_url(url, sizeof(url), "api/v5/ota/report");
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON_AddStringToObject(root, "device_id", DEMO_DEVICE_ID);
+    const char *target = cloud_json_safe_string(report->target);
+    cJSON_AddStringToObject(root, "target", target != NULL ? target : "esp32s3");
+    cJSON_AddStringToObject(root, "stage", report->stage);
+    cJSON_AddBoolToObject(root, "ok", report->ok);
+    if (cloud_json_safe_string(report->from_version) != NULL) {
+        cJSON_AddStringToObject(root, "from_version", report->from_version);
+    }
+    if (cloud_json_safe_string(report->to_version) != NULL) {
+        cJSON_AddStringToObject(root, "to_version", report->to_version);
+    }
+    if (cloud_json_safe_string(report->release_id) != NULL) {
+        cJSON_AddStringToObject(root, "release_id", report->release_id);
+    }
+    if (cloud_json_safe_string(report->error_code) != NULL) {
+        cJSON_AddStringToObject(root, "error_code", report->error_code);
+    }
+    if (cloud_json_safe_string(report->error_message) != NULL) {
+        cJSON_AddStringToObject(root, "error_message", report->error_message);
+    }
+    if (report->free_heap >= 0) {
+        cJSON_AddNumberToObject(root, "free_heap", report->free_heap);
+    }
+    if (report->rssi != 0) {
+        cJSON_AddNumberToObject(root, "rssi", report->rssi);
+    }
+    if (cloud_json_safe_string(report->boot_partition_before) != NULL) {
+        cJSON_AddStringToObject(root, "boot_partition_before", report->boot_partition_before);
+    }
+    if (cloud_json_safe_string(report->boot_partition_after_set) != NULL) {
+        cJSON_AddStringToObject(root, "boot_partition_after_set", report->boot_partition_after_set);
+    }
+    if (cloud_json_safe_string(report->running_partition_after_reboot) != NULL) {
+        cJSON_AddStringToObject(root, "running_partition_after_reboot", report->running_partition_after_reboot);
+    }
+    if (cloud_json_safe_string(report->reboot_reason) != NULL) {
+        cJSON_AddStringToObject(root, "reboot_reason", report->reboot_reason);
+    }
+    if (report->verify != NULL) {
+        cJSON_AddNumberToObject(root, "http_status", report->verify->http_status);
+        cJSON_AddNumberToObject(root, "bytes_read", report->verify->bytes_read);
+        cJSON_AddNumberToObject(root, "bytes_written", report->verify->bytes_written);
+        cJSON_AddNumberToObject(root, "expected_size", report->verify->expected_size);
+        if (report->verify->partition_label[0] != '\0') {
+            cJSON_AddStringToObject(root, "partition_label", report->verify->partition_label);
+        }
+        if (report->verify->partition_subtype >= 0) {
+            cJSON_AddNumberToObject(root, "partition_subtype", report->verify->partition_subtype);
+        }
+        if (report->verify->partition_address > 0) {
+            cJSON_AddNumberToObject(root, "partition_address", report->verify->partition_address);
+        }
+        cJSON_AddStringToObject(root,
+                                "sha256",
+                                report->verify->sha256[0] != '\0' ? report->verify->sha256 : "");
+        cJSON_AddStringToObject(root,
+                                "expected_sha256",
+                                report->verify->expected_sha256[0] != '\0'
+                                    ? report->verify->expected_sha256
+                                    : "");
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    cloud_response_buffer_t response = {0};
+    ret = cloud_response_buffer_init(&response, 256);
+    if (ret != ESP_OK) {
+        cJSON_free(json);
+        return ret;
+    }
+
+    int status_code = 0;
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = DEMO_OTA_MANIFEST_REQUEST_TIMEOUT_MS,
+    };
+    ret = cloud_http_execute(&config,
+                             (const uint8_t *)json,
+                             strlen(json),
+                             "application/json",
+                             &response,
+                             &status_code);
+    cJSON_free(json);
+    cloud_response_buffer_free(&response);
+    if (http_status != NULL) {
+        *http_status = status_code;
+    }
+    if (ret == ESP_OK && status_code != 202) {
+        ret = ESP_FAIL;
+    }
     return ret;
 }
 
@@ -2278,7 +2537,7 @@ esp_err_t cloud_client_poll_task(const char *task_id,
 
         int status_code = 0;
         const int64_t poll_start_us = esp_timer_get_time();
-        last_ret = cloud_http_execute(&config, NULL, 0, &response, &status_code);
+        last_ret = cloud_http_execute(&config, NULL, 0, NULL, &response, &status_code);
         const int64_t poll_elapsed_us = esp_timer_get_time() - poll_start_us;
         if (last_ret != ESP_OK) {
             if (cloud_is_retryable_poll_error(last_ret)) {

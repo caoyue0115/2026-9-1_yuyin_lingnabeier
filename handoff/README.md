@@ -15,15 +15,43 @@
 - 硬件/固件联调同事
 - 后续接手当前 Demo 的工程同事
 
+## ESP/硬件交付口径
+
+后续 ESP/硬件同事日常交付统一使用 compile-only 小包：
+
+- 命名：`esp_compile_only_YYYY-MM-DD_vNN.tar.gz`
+- 内容：只包含 `esp_idf_demo/` 工程源码、`CMakeLists.txt`、`sdkconfig`、`partitions.csv`、`spiffs/` 和 ESP-IDF 组件依赖声明
+- 用途：同事解压后在本机 ESP-IDF 环境执行 `idf.py build` / `idf.py flash monitor`
+
+不要把 flash-only 包作为默认交付物。flash-only 只用于已经明确“不需要编译、只要快速烧录采日志”的临时场景。
+
+不要把 `esp_hardware_handoff_YYYY-MM-DD_vNN.tar.gz` 大包作为日常硬件传输包。大包只保留为归档/完整源码交接用途。
+
 当前默认设备端基线：
 
 - 开发板：`ESP-VoCat v1.2`
 - 核心模组：`ESP32-S3-WROOM-1`
 - 工具链：`ESP-IDF 5.5.4`
 - 触发方式：`触摸屏`
+- 版本口径：`v34 OTA P3c 002 canary 已通过 + no-intro`
+- 录音前提示音：保留 `record_prompt_1.pcm`
+- 回答前开场提示音：默认关闭 `DEMO_REALTIME_INTRO_ENABLED=0`
+- OTA：P3c 机制已在 002 canary 打通；设备写入 inactive OTA partition，显式设置下一次启动分区，重启后从 OTA 分区启动，并上报 `post_reboot_confirm ok=1`
+
+P3b 不等于已经完成 OTA 启动切换。P3c 才允许 `esp_ota_set_boot_partition()` 和 `esp_restart()`。当前 P3c 仅按 002 单机 canary 收口，不代表全量 OTA 放开；后续扩展到 003 或更多设备必须单独授权、单独 release、单独验证。
+
+当前 OTA 设备口径：
+
+- `miaoban-v1p2-001` 不参与 OTA，继续作为非白名单/no_update 参考样机。
+- `miaoban-v1p2-002` 已完成 P3c v34 单机 canary：成功从 OTA 分区启动，`App version=v34-p3c-canary`，Wi-Fi/server/device_id 配置正常，`post_reboot_confirm ok=1`。
+- `miaoban-v1p2-003` 当前仍按 P3a/P3b 既有口径处理，不默认加入 P3c。
 
 当前默认云端基线：
 
-- 服务地址：`http://<CURRENT_BASE_URL>`
-- 接口：`/api/v2/tasks -> poll -> audio_url`
-
+- 服务地址：`http://106.54.240.51`
+- 上行接口：`/api/v5/realtime/opus-stream`
+- 状态接口：`/api/v3/realtime/sessions/{session_id}`
+- OTA manifest：`/api/v5/ota/manifest`
+- OTA report：`/api/v5/ota/report`
+- OTA report schema：greenunion-sh 当前支持 v34 P3c report 字段，包括 P3b `partition_write` 字段，以及 `boot_partition_before`、`boot_partition_after_set`、`running_partition_after_reboot`、`reboot_reason`
+- OTA manifest 防重复：同一 `device_id + release_id` 已上报 `boot_switch_scheduled ok=1` 或 `post_reboot_confirm ok=1` 后，manifest 不应再返回同一个 release；不要把手动删除 002 白名单作为标准流程。

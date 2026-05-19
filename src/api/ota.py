@@ -9,10 +9,14 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from src.settings import settings
-from src.storage.db import list_ota_release_candidates, record_ota_report
+from src.storage.db import has_successful_ota_report_stage, list_ota_release_candidates, record_ota_report
 
 OTA_POLL_INTERVAL_SEC = 3600
 OTA_TARGET_ESP32S3 = "esp32s3"
+# A successful P3c boot switch means this device has already consumed that
+# exact release. Suppress only the same device_id + release_id pair so later
+# releases, other devices, and P3a/P3b reports continue to work normally.
+OTA_RELEASE_SUPPRESS_STAGES = ["boot_switch_scheduled", "post_reboot_confirm"]
 
 router = APIRouter()
 
@@ -29,6 +33,19 @@ class OtaReportRequest(BaseModel):
     error_message: str | None = None
     free_heap: int | None = None
     rssi: int | None = None
+    http_status: int | None = None
+    bytes_read: int | None = None
+    expected_size: int | None = None
+    sha256: str | None = None
+    expected_sha256: str | None = None
+    partition_label: str | None = None
+    partition_subtype: int | None = None
+    partition_address: int | None = None
+    bytes_written: int | None = None
+    boot_partition_before: str | None = None
+    boot_partition_after_set: str | None = None
+    running_partition_after_reboot: str | None = None
+    reboot_reason: str | None = None
 
 
 def _version_key(version: str | None) -> tuple[int, ...]:
@@ -68,6 +85,8 @@ def _release_matches(
     if release.get("hw_rev") and release["hw_rev"] != hw_rev:
         return False
     if not release["force"] and not _version_at_least(app_version, release.get("min_version")):
+        return False
+    if has_successful_ota_report_stage(device_id, release["release_id"], OTA_RELEASE_SUPPRESS_STAGES):
         return False
     return bool(release.get("artifact_name") and release.get("sha256") and release.get("size"))
 

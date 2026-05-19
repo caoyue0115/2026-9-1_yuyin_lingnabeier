@@ -10,12 +10,16 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_spiffs.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 
 #include <stdbool.h>
@@ -26,11 +30,20 @@ static const char *TAG = "esp_idf_demo";
 static EventGroupHandle_t s_wifi_event_group;
 static int s_wifi_retry_count = 0;
 static TaskHandle_t s_pipeline_task_handle = NULL;
+static TaskHandle_t s_ota_manifest_task_handle = NULL;
 static int64_t s_last_pipeline_finish_us = 0;
 static int64_t s_next_ota_manifest_check_us = 0;
 
 #define APP_WIFI_CONNECTED_BIT BIT0
 #define APP_WIFI_FAILED_BIT    BIT1
+
+#define APP_OTA_P3C_NVS_NAMESPACE "ota_p3c"
+#define APP_OTA_P3C_KEY_PENDING   "pending"
+#define APP_OTA_P3C_KEY_RELEASE   "rel"
+#define APP_OTA_P3C_KEY_VERSION   "ver"
+#define APP_OTA_P3C_KEY_LABEL     "label"
+#define APP_OTA_P3C_KEY_ADDRESS   "addr"
+#define APP_OTA_P3C_KEY_SHA256    "sha"
 
 typedef enum {
     APP_STATE_IDLE = 0,
@@ -144,6 +157,10 @@ static void app_log_runtime_config(void)
     ESP_LOGI(TAG, "  ota_manifest_dry_run_enabled=%d", DEMO_OTA_MANIFEST_DRY_RUN_ENABLED);
     ESP_LOGI(TAG, "  ota_manifest_poll_interval_ms=%d", DEMO_OTA_MANIFEST_POLL_INTERVAL_MS);
     ESP_LOGI(TAG, "  ota_idle_after_ws_delay_ms=%d", DEMO_OTA_IDLE_AFTER_WS_DELAY_MS);
+    ESP_LOGI(TAG, "  ota_manifest_task_stack_size=%d", DEMO_OTA_MANIFEST_TASK_STACK_SIZE);
+    ESP_LOGI(TAG, "  ota_partition_write_enabled=%d", DEMO_OTA_PARTITION_WRITE_ENABLED);
+    ESP_LOGI(TAG, "  ota_boot_switch_enabled=%d", DEMO_OTA_BOOT_SWITCH_ENABLED);
+    ESP_LOGI(TAG, "  ota_post_reboot_task_stack_size=%d", DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE);
     ESP_LOGI(TAG, "  realtime_session_timeout_ms=%d", DEMO_REALTIME_SESSION_TIMEOUT_MS);
     ESP_LOGI(TAG, "  v5_uplink_enabled=%d", V5_OPUS_UPLINK_WS_ENABLED);
     ESP_LOGI(TAG, "  v5_uplink_fallback_legacy_audio=%d", V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO);
@@ -322,6 +339,7 @@ static esp_err_t app_realtime_audio_chunk_sink(const uint8_t *chunk,
     return ESP_OK;
 }
 
+#if DEMO_REALTIME_INTRO_ENABLED && DEMO_REALTIME_INTRO_AUDIO_PARALLEL_ENABLED
 static void app_realtime_parallel_stream_task(void *arg)
 {
     app_realtime_parallel_task_t *task = (app_realtime_parallel_task_t *)arg;
@@ -339,6 +357,7 @@ static void app_realtime_parallel_stream_task(void *arg)
     task->task_handle = NULL;
     vTaskDelete(NULL);
 }
+#endif
 
 static void app_log_stage_start(const char *stage)
 {
@@ -541,20 +560,22 @@ static esp_err_t app_wifi_connect(void)
         return ret;
     }
 
-    wifi_config_t wifi_cfg = {0};
-    snprintf((char *)wifi_cfg.sta.ssid, sizeof(wifi_cfg.sta.ssid), "%s", DEMO_WIFI_SSID);
-    snprintf((char *)wifi_cfg.sta.password, sizeof(wifi_cfg.sta.password), "%s", DEMO_WIFI_PASSWORD);
-    wifi_cfg.sta.threshold.authmode =
-        DEMO_WIFI_PASSWORD[0] == '\0' ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
-    wifi_cfg.sta.pmf_cfg.capable = true;
-    wifi_cfg.sta.pmf_cfg.required = false;
-
     ret = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (ret == ESP_OK) {
+    if (ret == ESP_OK && DEMO_WIFI_PASSWORD[0] != '\0') {
+        wifi_config_t wifi_cfg = {0};
+        snprintf((char *)wifi_cfg.sta.ssid, sizeof(wifi_cfg.sta.ssid), "%s", DEMO_WIFI_SSID);
+        snprintf((char *)wifi_cfg.sta.password, sizeof(wifi_cfg.sta.password), "%s", DEMO_WIFI_PASSWORD);
+        wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+        wifi_cfg.sta.pmf_cfg.capable = true;
+        wifi_cfg.sta.pmf_cfg.required = false;
         ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
+    } else if (ret == ESP_OK) {
+        ESP_LOGW(TAG,
+                 "DEMO_WIFI_PASSWORD is empty; using stored Wi-Fi station credentials from NVS for SSID %s",
+                 DEMO_WIFI_SSID);
     }
     if (ret == ESP_OK) {
-    ret = esp_wifi_start();
+        ret = esp_wifi_start();
     }
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start Wi-Fi station: %s", esp_err_to_name(ret));
@@ -1189,7 +1210,8 @@ static esp_err_t app_start_pipeline_task(const trigger_event_t *event)
 
 static bool app_ota_manifest_idle_ready(int64_t now_us)
 {
-    if (s_app_state != APP_STATE_IDLE || s_pipeline_task_handle != NULL) {
+    if (s_app_state != APP_STATE_IDLE || s_pipeline_task_handle != NULL ||
+        s_ota_manifest_task_handle != NULL) {
         return false;
     }
     if (!app_wifi_is_connected()) {
@@ -1202,19 +1224,589 @@ static bool app_ota_manifest_idle_ready(int64_t now_us)
     return true;
 }
 
-static void app_poll_ota_manifest_dry_run_if_due(void)
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
+static const char *app_partition_label_or_empty(const esp_partition_t *partition)
 {
-#if DEMO_OTA_MANIFEST_DRY_RUN_ENABLED
-    const int64_t now_us = esp_timer_get_time();
-    if (s_next_ota_manifest_check_us > 0 && now_us < s_next_ota_manifest_check_us) {
+    return partition != NULL ? partition->label : "";
+}
+
+typedef struct {
+    bool pending;
+    char release_id[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char version[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char partition_label[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char sha256[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    uint32_t partition_address;
+} app_ota_p3c_pending_t;
+
+static const char *app_reset_reason_to_string(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_POWERON:
+        return "poweron";
+    case ESP_RST_EXT:
+        return "external_reset";
+    case ESP_RST_SW:
+        return "software_reset";
+    case ESP_RST_PANIC:
+        return "panic";
+    case ESP_RST_INT_WDT:
+        return "interrupt_watchdog";
+    case ESP_RST_TASK_WDT:
+        return "task_watchdog";
+    case ESP_RST_WDT:
+        return "watchdog";
+    case ESP_RST_DEEPSLEEP:
+        return "deepsleep";
+    case ESP_RST_BROWNOUT:
+        return "brownout";
+    case ESP_RST_SDIO:
+        return "sdio";
+    case ESP_RST_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
+
+static esp_err_t app_ota_p3c_clear_pending(void)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t ret = nvs_open(APP_OTA_P3C_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = nvs_erase_all(handle);
+    if (ret == ESP_OK || ret == ESP_ERR_NVS_NOT_FOUND) {
+        ret = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return ret;
+}
+
+static esp_err_t app_ota_p3c_store_pending(const cloud_ota_update_t *update,
+                                           const cloud_ota_artifact_verify_t *verify)
+{
+    if (update == NULL || verify == NULL || verify->partition_label[0] == '\0' ||
+        verify->partition_address == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle = 0;
+    esp_err_t ret = nvs_open(APP_OTA_P3C_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_set_u8(handle, APP_OTA_P3C_KEY_PENDING, 1);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_set_str(handle, APP_OTA_P3C_KEY_RELEASE, update->release_id);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_set_str(handle, APP_OTA_P3C_KEY_VERSION, update->version);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_set_str(handle, APP_OTA_P3C_KEY_LABEL, verify->partition_label);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_set_u32(handle, APP_OTA_P3C_KEY_ADDRESS, verify->partition_address);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_set_str(handle, APP_OTA_P3C_KEY_SHA256, verify->sha256);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return ret;
+}
+
+static esp_err_t app_ota_p3c_load_pending(app_ota_p3c_pending_t *pending)
+{
+    if (pending == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(pending, 0, sizeof(*pending));
+
+    nvs_handle_t handle = 0;
+    esp_err_t ret = nvs_open(APP_OTA_P3C_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    uint8_t pending_flag = 0;
+    ret = nvs_get_u8(handle, APP_OTA_P3C_KEY_PENDING, &pending_flag);
+    if (ret != ESP_OK || pending_flag == 0) {
+        nvs_close(handle);
+        return ret == ESP_OK ? ESP_ERR_NOT_FOUND : ret;
+    }
+
+    size_t len = sizeof(pending->release_id);
+    ret = nvs_get_str(handle, APP_OTA_P3C_KEY_RELEASE, pending->release_id, &len);
+    if (ret == ESP_OK) {
+        len = sizeof(pending->version);
+        ret = nvs_get_str(handle, APP_OTA_P3C_KEY_VERSION, pending->version, &len);
+    }
+    if (ret == ESP_OK) {
+        len = sizeof(pending->partition_label);
+        ret = nvs_get_str(handle, APP_OTA_P3C_KEY_LABEL, pending->partition_label, &len);
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_get_u32(handle, APP_OTA_P3C_KEY_ADDRESS, &pending->partition_address);
+    }
+    if (ret == ESP_OK) {
+        len = sizeof(pending->sha256);
+        ret = nvs_get_str(handle, APP_OTA_P3C_KEY_SHA256, pending->sha256, &len);
+    }
+    nvs_close(handle);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    pending->pending = true;
+    return ESP_OK;
+}
+
+static esp_err_t app_ota_find_partition_from_verify(const cloud_ota_artifact_verify_t *verify,
+                                                    const esp_partition_t **partition)
+{
+    if (verify == NULL || partition == NULL || verify->partition_label[0] == '\0' ||
+        verify->partition_subtype < 0 || verify->partition_address == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_partition_t *found =
+        esp_partition_find_first(ESP_PARTITION_TYPE_APP,
+                                 (esp_partition_subtype_t)verify->partition_subtype,
+                                 verify->partition_label);
+    if (found == NULL || found->address != verify->partition_address) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    *partition = found;
+    return ESP_OK;
+}
+#endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
+
+typedef struct {
+    esp_ota_handle_t handle;
+    bool handle_started;
+} app_ota_partition_write_ctx_t;
+
+static const char *app_validate_ota_update_for_partition_write(const cloud_ota_update_t *update)
+{
+    if (update == NULL) {
+        return "missing_update";
+    }
+    if (update->url[0] == '\0') {
+        return "missing_url";
+    }
+    if (update->size <= 0) {
+        return "missing_size";
+    }
+    if (update->sha256[0] == '\0') {
+        return "missing_sha256";
+    }
+    if (update->release_id[0] == '\0') {
+        return "missing_release_id";
+    }
+    if (update->target[0] == '\0') {
+        return "missing_target";
+    }
+    if (strcmp(update->target, "esp32s3") != 0) {
+        return "unsupported_target";
+    }
+    return NULL;
+}
+
+static void app_ota_result_set_partition_info(cloud_ota_artifact_verify_t *result,
+                                              const esp_partition_t *partition)
+{
+    if (result == NULL || partition == NULL) {
         return;
     }
-    if (!app_ota_manifest_idle_ready(now_us)) {
+    snprintf(result->partition_label, sizeof(result->partition_label), "%s", partition->label);
+    result->partition_subtype = (int)partition->subtype;
+    result->partition_address = partition->address;
+}
+
+static esp_err_t app_ota_partition_write_chunk(const uint8_t *chunk,
+                                               size_t chunk_bytes,
+                                               void *user_ctx)
+{
+    app_ota_partition_write_ctx_t *ctx = (app_ota_partition_write_ctx_t *)user_ctx;
+    if (chunk == NULL || chunk_bytes == 0 || ctx == NULL || !ctx->handle_started) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return esp_ota_write(ctx->handle, chunk, chunk_bytes);
+}
+
+static esp_err_t app_write_ota_inactive_partition(const cloud_ota_update_t *update,
+                                                  cloud_ota_artifact_verify_t *result,
+                                                  char *error_code,
+                                                  size_t error_code_size,
+                                                  char *error_message,
+                                                  size_t error_message_size)
+{
+    if (result == NULL || error_code == NULL || error_code_size == 0 ||
+        error_message == NULL || error_message_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(result, 0, sizeof(*result));
+    result->partition_subtype = -1;
+    error_code[0] = '\0';
+    error_message[0] = '\0';
+
+    const char *validation_error = app_validate_ota_update_for_partition_write(update);
+    if (validation_error != NULL) {
+        snprintf(error_code, error_code_size, "%s", validation_error);
+        snprintf(error_message, error_message_size, "ota manifest missing required field");
+        if (update != NULL) {
+            result->expected_size = update->size;
+            snprintf(result->expected_sha256, sizeof(result->expected_sha256), "%s", update->sha256);
+        }
+        return DEMO_CLOUD_ERR_INVALID_RESPONSE;
+    }
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
+    if (running == NULL || partition == NULL) {
+        snprintf(error_code, error_code_size, "%s", "partition_not_found");
+        snprintf(error_message, error_message_size, "ota partition lookup failed");
+        result->expected_size = update->size;
+        snprintf(result->expected_sha256, sizeof(result->expected_sha256), "%s", update->sha256);
+        return ESP_ERR_NOT_FOUND;
+    }
+    app_ota_result_set_partition_info(result, partition);
+    result->expected_size = update->size;
+    snprintf(result->expected_sha256, sizeof(result->expected_sha256), "%s", update->sha256);
+
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
+    const esp_partition_t *boot_before = esp_ota_get_boot_partition();
+    ESP_LOGI(TAG,
+             "stage=ota_partition_write event=start release_id=%s running_partition=%s update_partition=%s boot_partition_before=%s partition_label=%s partition_subtype=%d partition_address=0x%lx expected_size=%d expected_sha256=%s action=write_switch_reboot no_boot_switch=0 reboot_scheduled=0",
+             update->release_id,
+             running->label,
+             partition->label,
+             app_partition_label_or_empty(boot_before),
+             result->partition_label,
+             result->partition_subtype,
+             (unsigned long)result->partition_address,
+             result->expected_size,
+             result->expected_sha256);
+#else
+    ESP_LOGI(TAG,
+             "stage=ota_partition_write event=start release_id=%s running_partition=%s update_partition=%s partition_label=%s partition_subtype=%d partition_address=0x%lx expected_size=%d expected_sha256=%s action=write_inactive_only no_boot_switch=1 no_reboot=1",
+             update->release_id,
+             running->label,
+             partition->label,
+             result->partition_label,
+             result->partition_subtype,
+             (unsigned long)result->partition_address,
+             result->expected_size,
+             result->expected_sha256);
+#endif
+
+    if (partition == running || partition->address == running->address) {
+        snprintf(error_code, error_code_size, "%s", "update_partition_is_running");
+        snprintf(error_message, error_message_size, "ota update partition matches running partition");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    app_ota_partition_write_ctx_t write_ctx = {0};
+    esp_err_t ret = esp_ota_begin(partition, update->size, &write_ctx.handle);
+    if (ret != ESP_OK) {
+        snprintf(error_code, error_code_size, "%s", esp_err_to_name(ret));
+        snprintf(error_message, error_message_size, "ota begin failed");
+        return ret;
+    }
+    write_ctx.handle_started = true;
+
+    ret = cloud_client_stream_ota_artifact(update,
+                                           result,
+                                           app_ota_partition_write_chunk,
+                                           &write_ctx);
+    app_ota_result_set_partition_info(result, partition);
+    if (ret == ESP_OK) {
+        ret = esp_ota_end(write_ctx.handle);
+        write_ctx.handle_started = false;
+        if (ret != ESP_OK) {
+            snprintf(error_code, error_code_size, "%s", esp_err_to_name(ret));
+            snprintf(error_message, error_message_size, "ota end failed");
+            return ret;
+        }
+    } else {
+        if (write_ctx.handle_started) {
+            (void)esp_ota_abort(write_ctx.handle);
+            write_ctx.handle_started = false;
+        }
+        snprintf(error_code, error_code_size, "%s", esp_err_to_name(ret));
+        snprintf(error_message, error_message_size, "ota artifact partition write failed");
+        return ret;
+    }
+
+    if (result->bytes_written != update->size) {
+        snprintf(error_code, error_code_size, "%s", "bytes_written_mismatch");
+        snprintf(error_message, error_message_size, "ota written byte count mismatch");
+        return DEMO_CLOUD_ERR_AUDIO_STREAM_EARLY_EOF;
+    }
+    if (strcasecmp(result->sha256, update->sha256) != 0) {
+        snprintf(error_code, error_code_size, "%s", "sha256_mismatch");
+        snprintf(error_message, error_message_size, "ota artifact sha256 mismatch");
+        return DEMO_CLOUD_ERR_INVALID_RESPONSE;
+    }
+    return ESP_OK;
+}
+
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
+static esp_err_t app_submit_ota_boot_report(const char *stage,
+                                            bool ok,
+                                            const cloud_ota_update_t *update,
+                                            const char *app_version,
+                                            const char *error_code,
+                                            const char *error_message,
+                                            const char *boot_partition_before,
+                                            const char *boot_partition_after_set,
+                                            const char *running_partition_after_reboot,
+                                            const char *reboot_reason,
+                                            int *http_status)
+{
+    cloud_ota_report_t report = {
+        .stage = stage,
+        .ok = ok,
+        .target = update != NULL && update->target[0] != '\0' ? update->target : "esp32s3",
+        .from_version = app_version,
+        .to_version = update != NULL ? update->version : NULL,
+        .release_id = update != NULL ? update->release_id : NULL,
+        .error_code = ok ? NULL : error_code,
+        .error_message = ok ? NULL : error_message,
+        .free_heap = (int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+        .rssi = 0,
+        .boot_partition_before = boot_partition_before,
+        .boot_partition_after_set = boot_partition_after_set,
+        .running_partition_after_reboot = running_partition_after_reboot,
+        .reboot_reason = reboot_reason,
+        .verify = NULL,
+    };
+    return cloud_client_submit_ota_report(&report, http_status);
+}
+
+static void app_ota_schedule_boot_switch(const cloud_ota_update_t *update,
+                                         const cloud_ota_artifact_verify_t *verify,
+                                         const char *app_version)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *update_partition = NULL;
+    const esp_partition_t *boot_before = esp_ota_get_boot_partition();
+    const char *error_code = NULL;
+    const char *error_message = NULL;
+    int report_http_status = 0;
+
+    ESP_LOGI(TAG,
+             "stage=ota_boot_switch event=start release_id=%s running_partition=%s update_partition=%s boot_partition_before=%s action=write_switch_reboot no_boot_switch=0 reboot_scheduled=0",
+             update != NULL && update->release_id[0] != '\0' ? update->release_id : "(empty)",
+             app_partition_label_or_empty(running),
+             verify != NULL && verify->partition_label[0] != '\0' ? verify->partition_label : "(empty)",
+             app_partition_label_or_empty(boot_before));
+
+    esp_err_t ret = app_ota_find_partition_from_verify(verify, &update_partition);
+    if (ret != ESP_OK) {
+        error_code = esp_err_to_name(ret);
+        error_message = "ota update partition lookup failed";
+        goto fail;
+    }
+    if (running == NULL || update_partition == running ||
+        update_partition->address == running->address) {
+        ret = ESP_ERR_INVALID_STATE;
+        error_code = "update_partition_is_running";
+        error_message = "ota update partition matches running partition";
+        goto fail;
+    }
+
+    ret = app_ota_p3c_store_pending(update, verify);
+    if (ret != ESP_OK) {
+        error_code = esp_err_to_name(ret);
+        error_message = "ota pending boot state persist failed";
+        goto fail;
+    }
+
+    ret = esp_ota_set_boot_partition(update_partition);
+    if (ret != ESP_OK) {
+        (void)app_ota_p3c_clear_pending();
+        error_code = esp_err_to_name(ret);
+        error_message = "ota set boot partition failed";
+        goto fail;
+    }
+
+    const esp_partition_t *boot_after = esp_ota_get_boot_partition();
+    if (boot_after == NULL || boot_after->address != update_partition->address) {
+        (void)app_ota_p3c_clear_pending();
+        error_code = "boot_partition_after_set_mismatch";
+        error_message = "ota boot partition confirmation mismatch";
+        ret = ESP_ERR_INVALID_STATE;
+        goto fail;
+    }
+
+    ESP_LOGI(TAG,
+             "stage=ota_boot_switch event=done release_id=%s running_partition=%s update_partition=%s boot_partition_before=%s boot_partition_after_set=%s action=write_switch_reboot no_boot_switch=0 reboot_scheduled=1",
+             update->release_id,
+             app_partition_label_or_empty(running),
+             update_partition->label,
+             app_partition_label_or_empty(boot_before),
+             app_partition_label_or_empty(boot_after));
+    esp_err_t report_ret = app_submit_ota_boot_report("boot_switch_scheduled",
+                                                      true,
+                                                      update,
+                                                      app_version,
+                                                      NULL,
+                                                      NULL,
+                                                      app_partition_label_or_empty(boot_before),
+                                                      app_partition_label_or_empty(boot_after),
+                                                      NULL,
+                                                      NULL,
+                                                      &report_http_status);
+    if (report_ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "stage=ota_report event=done report_stage=boot_switch_scheduled http_status=%d ok=1 release_id=%s",
+                 report_http_status,
+                 update->release_id);
+    } else {
+        ESP_LOGW(TAG,
+                 "stage=ota_report event=failed report_stage=boot_switch_scheduled err=%s http_status=%d ok=1 release_id=%s",
+                 esp_err_to_name(report_ret),
+                 report_http_status,
+                 update->release_id);
+    }
+    ESP_LOGI(TAG,
+             "stage=ota_reboot event=scheduled release_id=%s update_partition=%s reboot_scheduled=1",
+             update->release_id,
+             update_partition->label);
+    esp_restart();
+    return;
+
+fail:
+    ESP_LOGW(TAG,
+             "stage=ota_boot_switch event=failed release_id=%s err=%s error_code=%s running_partition=%s update_partition=%s boot_partition_before=%s action=write_switch_reboot no_boot_switch=0 reboot_scheduled=0",
+             update != NULL && update->release_id[0] != '\0' ? update->release_id : "(empty)",
+             esp_err_to_name(ret),
+             error_code != NULL ? error_code : esp_err_to_name(ret),
+             app_partition_label_or_empty(running),
+             update_partition != NULL ? update_partition->label
+                                      : (verify != NULL && verify->partition_label[0] != '\0'
+                                             ? verify->partition_label
+                                             : "(empty)"),
+             app_partition_label_or_empty(boot_before));
+    esp_err_t fail_report_ret =
+        app_submit_ota_boot_report("boot_switch_scheduled",
+                                   false,
+                                   update,
+                                   app_version,
+                                   error_code != NULL ? error_code : esp_err_to_name(ret),
+                                   error_message != NULL ? error_message : "ota boot switch failed",
+                                   app_partition_label_or_empty(boot_before),
+                                   NULL,
+                                   NULL,
+                                   NULL,
+                                   &report_http_status);
+    if (fail_report_ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "stage=ota_report event=done report_stage=boot_switch_scheduled http_status=%d ok=0 release_id=%s",
+                 report_http_status,
+                 update != NULL && update->release_id[0] != '\0' ? update->release_id : "(empty)");
+    } else {
+        ESP_LOGW(TAG,
+                 "stage=ota_report event=failed report_stage=boot_switch_scheduled err=%s http_status=%d ok=0 release_id=%s",
+                 esp_err_to_name(fail_report_ret),
+                 report_http_status,
+                 update != NULL && update->release_id[0] != '\0' ? update->release_id : "(empty)");
+    }
+}
+
+static void app_ota_post_reboot_confirm_if_pending(const char *app_version)
+{
+    app_ota_p3c_pending_t pending = {0};
+    esp_err_t ret = app_ota_p3c_load_pending(&pending);
+    if (ret == ESP_ERR_NVS_NOT_FOUND || ret == ESP_ERR_NVS_NOT_INITIALIZED) {
+        return;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "stage=ota_post_reboot_confirm event=failed err=%s", esp_err_to_name(ret));
         return;
     }
 
-    s_next_ota_manifest_check_us =
-        now_us + (int64_t)DEMO_OTA_MANIFEST_POLL_INTERVAL_MS * 1000;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const char *running_label = app_partition_label_or_empty(running);
+    const char *reboot_reason = app_reset_reason_to_string(esp_reset_reason());
+    const bool ok = running != NULL &&
+                    running->address == pending.partition_address &&
+                    strcmp(running->label, pending.partition_label) == 0;
+    ESP_LOGI(TAG,
+             "stage=ota_post_reboot_confirm event=start release_id=%s expected_partition=%s expected_address=0x%lx running_partition_after_reboot=%s reboot_reason=%s",
+             pending.release_id,
+             pending.partition_label,
+             (unsigned long)pending.partition_address,
+             running_label[0] != '\0' ? running_label : "(empty)",
+             reboot_reason);
+    if (ok) {
+        ESP_LOGI(TAG,
+                 "stage=ota_post_reboot_confirm event=done release_id=%s running_partition_after_reboot=%s",
+                 pending.release_id,
+                 running_label);
+    } else {
+        ESP_LOGW(TAG,
+                 "stage=ota_post_reboot_confirm event=failed release_id=%s error_code=running_partition_after_reboot_mismatch expected_partition=%s running_partition_after_reboot=%s",
+                 pending.release_id,
+                 pending.partition_label,
+                 running_label[0] != '\0' ? running_label : "(empty)");
+    }
+
+    cloud_ota_update_t update = {0};
+    snprintf(update.target, sizeof(update.target), "%s", "esp32s3");
+    snprintf(update.version, sizeof(update.version), "%s", pending.version);
+    snprintf(update.release_id, sizeof(update.release_id), "%s", pending.release_id);
+    int report_http_status = 0;
+    esp_err_t report_ret =
+        app_submit_ota_boot_report("post_reboot_confirm",
+                                   ok,
+                                   &update,
+                                   app_version,
+                                   ok ? NULL : "running_partition_after_reboot_mismatch",
+                                   ok ? NULL : "ota post reboot partition mismatch",
+                                   NULL,
+                                   NULL,
+                                   running_label,
+                                   reboot_reason,
+                                   &report_http_status);
+    if (report_ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "stage=ota_report event=done report_stage=post_reboot_confirm http_status=%d ok=%d release_id=%s",
+                 report_http_status,
+                 ok ? 1 : 0,
+                 pending.release_id);
+        (void)app_ota_p3c_clear_pending();
+    } else {
+        ESP_LOGW(TAG,
+                 "stage=ota_report event=failed report_stage=post_reboot_confirm err=%s http_status=%d ok=%d release_id=%s",
+                 esp_err_to_name(report_ret),
+                 report_http_status,
+                 ok ? 1 : 0,
+                 pending.release_id);
+    }
+}
+
+static void app_ota_post_reboot_confirm_task(void *arg)
+{
+    (void)arg;
+
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    app_ota_post_reboot_confirm_if_pending(app_desc != NULL ? app_desc->version : "");
+    vTaskDelete(NULL);
+}
+#endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
+
+static void app_ota_manifest_dry_run_task(void *arg)
+{
+    (void)arg;
 
     const esp_app_desc_t *app_desc = esp_app_get_description();
     const char *app_version = app_desc != NULL ? app_desc->version : "";
@@ -1237,7 +1829,7 @@ static void app_poll_ota_manifest_dry_run_if_due(void)
                  esp_err_to_name(ret),
                  manifest.http_status,
                  elapsed_ms);
-        return;
+        goto finish;
     }
     if (!manifest.has_update) {
         ESP_LOGI(TAG,
@@ -1245,11 +1837,15 @@ static void app_poll_ota_manifest_dry_run_if_due(void)
                  manifest.http_status,
                  manifest.poll_interval_sec,
                  elapsed_ms);
-        return;
+        goto finish;
     }
 
+    cloud_ota_artifact_verify_t verify = {0};
+    int report_http_status = 0;
+#if DEMO_OTA_PARTITION_WRITE_ENABLED
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
     ESP_LOGI(TAG,
-             "stage=ota_manifest_dry_run event=update_available release_id=%s target=%s version=%s artifact=%s size=%d sha256=%s force=%d min_version=%s url=%s elapsed_ms=%.1f action=log_only",
+             "stage=ota_manifest_dry_run event=update_available release_id=%s target=%s version=%s artifact=%s size=%d sha256=%s force=%d min_version=%s url=%s elapsed_ms=%.1f action=write_switch_reboot",
              manifest.update.release_id[0] != '\0' ? manifest.update.release_id : "(empty)",
              manifest.update.target,
              manifest.update.version,
@@ -1260,6 +1856,234 @@ static void app_poll_ota_manifest_dry_run_if_due(void)
              manifest.update.min_version[0] != '\0' ? manifest.update.min_version : "(none)",
              manifest.update.url,
              elapsed_ms);
+#else
+    ESP_LOGI(TAG,
+             "stage=ota_manifest_dry_run event=update_available release_id=%s target=%s version=%s artifact=%s size=%d sha256=%s force=%d min_version=%s url=%s elapsed_ms=%.1f action=write_inactive_only",
+             manifest.update.release_id[0] != '\0' ? manifest.update.release_id : "(empty)",
+             manifest.update.target,
+             manifest.update.version,
+             manifest.update.artifact,
+             manifest.update.size,
+             manifest.update.sha256,
+             manifest.update.force,
+             manifest.update.min_version[0] != '\0' ? manifest.update.min_version : "(none)",
+             manifest.update.url,
+             elapsed_ms);
+#endif
+
+    char ota_error_code[64] = {0};
+    char ota_error_message[128] = {0};
+    const int64_t partition_start_us = esp_timer_get_time();
+    ret = app_write_ota_inactive_partition(&manifest.update,
+                                           &verify,
+                                           ota_error_code,
+                                           sizeof(ota_error_code),
+                                           ota_error_message,
+                                           sizeof(ota_error_message));
+    const double partition_elapsed_ms = (double)(esp_timer_get_time() - partition_start_us) / 1000.0;
+    if (ret == ESP_OK) {
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
+        const esp_partition_t *boot_before = esp_ota_get_boot_partition();
+        ESP_LOGI(TAG,
+                 "stage=ota_partition_write event=done http_status=%d bytes_read=%d bytes_written=%d expected_size=%d sha256=%s expected_sha256=%s partition_label=%s partition_subtype=%d partition_address=0x%lx boot_partition_before=%s elapsed_ms=%.1f action=write_switch_reboot no_boot_switch=0 reboot_scheduled=0",
+                 verify.http_status,
+                 verify.bytes_read,
+                 verify.bytes_written,
+                 verify.expected_size,
+                 verify.sha256,
+                 verify.expected_sha256,
+                 verify.partition_label,
+                 verify.partition_subtype,
+                 (unsigned long)verify.partition_address,
+                 app_partition_label_or_empty(boot_before),
+                 partition_elapsed_ms);
+#else
+        ESP_LOGI(TAG,
+                 "stage=ota_partition_write event=done http_status=%d bytes_read=%d bytes_written=%d expected_size=%d sha256=%s expected_sha256=%s partition_label=%s partition_subtype=%d partition_address=0x%lx elapsed_ms=%.1f action=write_inactive_only no_boot_switch=1 no_reboot=1",
+                 verify.http_status,
+                 verify.bytes_read,
+                 verify.bytes_written,
+                 verify.expected_size,
+                 verify.sha256,
+                 verify.expected_sha256,
+                 verify.partition_label,
+                 verify.partition_subtype,
+                 (unsigned long)verify.partition_address,
+                 partition_elapsed_ms);
+#endif
+    } else {
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
+        ESP_LOGW(TAG,
+                 "stage=ota_partition_write event=failed err=%s error_code=%s http_status=%d bytes_read=%d bytes_written=%d expected_size=%d sha256=%s expected_sha256=%s partition_label=%s partition_subtype=%d partition_address=0x%lx elapsed_ms=%.1f action=write_switch_reboot no_boot_switch=0 reboot_scheduled=0",
+                 esp_err_to_name(ret),
+                 ota_error_code[0] != '\0' ? ota_error_code : esp_err_to_name(ret),
+                 verify.http_status,
+                 verify.bytes_read,
+                 verify.bytes_written,
+                 verify.expected_size,
+                 verify.sha256[0] != '\0' ? verify.sha256 : "(empty)",
+                 verify.expected_sha256[0] != '\0' ? verify.expected_sha256 : manifest.update.sha256,
+                 verify.partition_label[0] != '\0' ? verify.partition_label : "(empty)",
+                 verify.partition_subtype,
+                 (unsigned long)verify.partition_address,
+                 partition_elapsed_ms);
+#else
+        ESP_LOGW(TAG,
+                 "stage=ota_partition_write event=failed err=%s error_code=%s http_status=%d bytes_read=%d bytes_written=%d expected_size=%d sha256=%s expected_sha256=%s partition_label=%s partition_subtype=%d partition_address=0x%lx elapsed_ms=%.1f action=write_inactive_only no_boot_switch=1 no_reboot=1",
+                 esp_err_to_name(ret),
+                 ota_error_code[0] != '\0' ? ota_error_code : esp_err_to_name(ret),
+                 verify.http_status,
+                 verify.bytes_read,
+                 verify.bytes_written,
+                 verify.expected_size,
+                 verify.sha256[0] != '\0' ? verify.sha256 : "(empty)",
+                 verify.expected_sha256[0] != '\0' ? verify.expected_sha256 : manifest.update.sha256,
+                 verify.partition_label[0] != '\0' ? verify.partition_label : "(empty)",
+                 verify.partition_subtype,
+                 (unsigned long)verify.partition_address,
+                 partition_elapsed_ms);
+#endif
+    }
+    const esp_err_t verify_ret = ret;
+    cloud_ota_report_t report = {
+        .stage = "partition_write",
+        .ok = verify_ret == ESP_OK,
+        .target = manifest.update.target[0] != '\0' ? manifest.update.target : "esp32s3",
+        .from_version = app_version,
+        .to_version = manifest.update.version,
+        .release_id = manifest.update.release_id,
+        .error_code = verify_ret == ESP_OK ? NULL
+                                           : (ota_error_code[0] != '\0' ? ota_error_code : esp_err_to_name(verify_ret)),
+        .error_message = verify_ret == ESP_OK ? NULL
+                                              : (ota_error_message[0] != '\0'
+                                                     ? ota_error_message
+                                                     : "ota inactive partition write failed"),
+        .free_heap = (int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+        .rssi = 0,
+        .verify = &verify,
+    };
+    esp_err_t report_ret = cloud_client_submit_ota_report(&report, &report_http_status);
+    if (report_ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "stage=ota_report event=done report_stage=partition_write http_status=%d ok=%d release_id=%s",
+                 report_http_status,
+                 verify_ret == ESP_OK ? 1 : 0,
+                 manifest.update.release_id[0] != '\0' ? manifest.update.release_id : "(empty)");
+    } else {
+        ESP_LOGW(TAG,
+                 "stage=ota_report event=failed report_stage=partition_write err=%s http_status=%d ok=%d release_id=%s",
+                 esp_err_to_name(report_ret),
+                 report_http_status,
+                 verify_ret == ESP_OK ? 1 : 0,
+                 manifest.update.release_id[0] != '\0' ? manifest.update.release_id : "(empty)");
+    }
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
+    if (verify_ret == ESP_OK) {
+        app_ota_schedule_boot_switch(&manifest.update, &verify, app_version);
+    }
+#endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
+#else
+    ESP_LOGI(TAG,
+             "stage=ota_manifest_dry_run event=update_available release_id=%s target=%s version=%s artifact=%s size=%d sha256=%s force=%d min_version=%s url=%s elapsed_ms=%.1f action=download_verify_only",
+             manifest.update.release_id[0] != '\0' ? manifest.update.release_id : "(empty)",
+             manifest.update.target,
+             manifest.update.version,
+             manifest.update.artifact,
+             manifest.update.size,
+             manifest.update.sha256,
+             manifest.update.force,
+             manifest.update.min_version[0] != '\0' ? manifest.update.min_version : "(none)",
+             manifest.update.url,
+             elapsed_ms);
+
+    const int64_t verify_start_us = esp_timer_get_time();
+    ESP_LOGI(TAG,
+             "stage=ota_artifact_verify event=start release_id=%s artifact=%s size=%d sha256=%s action=download_verify_only",
+             manifest.update.release_id[0] != '\0' ? manifest.update.release_id : "(empty)",
+             manifest.update.artifact,
+             manifest.update.size,
+             manifest.update.sha256);
+    ret = cloud_client_verify_ota_artifact(&manifest.update, &verify);
+    const double verify_elapsed_ms = (double)(esp_timer_get_time() - verify_start_us) / 1000.0;
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "stage=ota_artifact_verify event=done http_status=%d bytes=%d expected_size=%d sha256=%s elapsed_ms=%.1f action=download_verify_only",
+                 verify.http_status,
+                 verify.bytes_read,
+                 verify.expected_size,
+                 verify.sha256,
+                 verify_elapsed_ms);
+    } else {
+        ESP_LOGW(TAG,
+                 "stage=ota_artifact_verify event=failed err=%s http_status=%d bytes=%d expected_size=%d sha256=%s expected_sha256=%s elapsed_ms=%.1f action=download_verify_only",
+                 esp_err_to_name(ret),
+                 verify.http_status,
+                 verify.bytes_read,
+                 verify.expected_size,
+                 verify.sha256[0] != '\0' ? verify.sha256 : "(empty)",
+                 verify.expected_sha256[0] != '\0' ? verify.expected_sha256 : manifest.update.sha256,
+                 verify_elapsed_ms);
+    }
+    const esp_err_t verify_ret = ret;
+    cloud_ota_report_t report = {
+        .stage = "artifact_verify",
+        .ok = verify_ret == ESP_OK,
+        .target = manifest.update.target[0] != '\0' ? manifest.update.target : "esp32s3",
+        .from_version = app_version,
+        .to_version = manifest.update.version,
+        .release_id = manifest.update.release_id,
+        .error_code = verify_ret == ESP_OK ? NULL : esp_err_to_name(verify_ret),
+        .error_message = verify_ret == ESP_OK ? NULL : "ota artifact download verification failed",
+        .free_heap = (int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+        .rssi = 0,
+        .verify = &verify,
+    };
+    esp_err_t report_ret = cloud_client_submit_ota_report(&report, &report_http_status);
+    if (report_ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "stage=ota_report event=done report_stage=artifact_verify http_status=%d ok=%d release_id=%s",
+                 report_http_status,
+                 verify_ret == ESP_OK ? 1 : 0,
+                 manifest.update.release_id[0] != '\0' ? manifest.update.release_id : "(empty)");
+    } else {
+        ESP_LOGW(TAG,
+                 "stage=ota_report event=failed report_stage=artifact_verify err=%s http_status=%d ok=%d release_id=%s",
+                 esp_err_to_name(report_ret),
+                 report_http_status,
+                 verify_ret == ESP_OK ? 1 : 0,
+                 manifest.update.release_id[0] != '\0' ? manifest.update.release_id : "(empty)");
+    }
+#endif
+
+finish:
+    s_ota_manifest_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void app_poll_ota_manifest_dry_run_if_due(void)
+{
+#if DEMO_OTA_MANIFEST_DRY_RUN_ENABLED
+    const int64_t now_us = esp_timer_get_time();
+    if (s_next_ota_manifest_check_us > 0 && now_us < s_next_ota_manifest_check_us) {
+        return;
+    }
+    if (!app_ota_manifest_idle_ready(now_us)) {
+        return;
+    }
+
+    s_next_ota_manifest_check_us =
+        now_us + (int64_t)DEMO_OTA_MANIFEST_POLL_INTERVAL_MS * 1000;
+
+    BaseType_t ok = xTaskCreate(app_ota_manifest_dry_run_task,
+                                "ota_manifest",
+                                DEMO_OTA_MANIFEST_TASK_STACK_SIZE,
+                                NULL,
+                                tskIDLE_PRIORITY + 1,
+                                &s_ota_manifest_task_handle);
+    if (ok != pdPASS) {
+        s_ota_manifest_task_handle = NULL;
+        ESP_LOGW(TAG, "stage=ota_manifest_dry_run event=task_start_failed");
+    }
 #endif
 }
 
@@ -1273,7 +2097,7 @@ void app_main(void)
     app_log_runtime_config();
     ESP_LOGI(TAG, "========================================");
 
-    if (DEMO_REALTIME_INTRO_ENABLED) {
+    if (DEMO_REALTIME_INTRO_ENABLED || DEMO_RECORD_PROMPT_ENABLED) {
         (void)app_mount_spiffs();
     }
 
@@ -1282,6 +2106,18 @@ void app_main(void)
         ESP_LOGE(TAG, "Wi-Fi initialization failed; stopping demo");
         return;
     }
+
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
+    BaseType_t ota_confirm_task_ok = xTaskCreate(app_ota_post_reboot_confirm_task,
+                                                 "ota_post_reboot",
+                                                 DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE,
+                                                 NULL,
+                                                 tskIDLE_PRIORITY + 1,
+                                                 NULL);
+    if (ota_confirm_task_ok != pdPASS) {
+        ESP_LOGW(TAG, "stage=ota_post_reboot_confirm event=task_start_failed");
+    }
+#endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
 
     if (trigger_input_init(&trigger) != ESP_OK) {
         app_set_state(&s_app_state, APP_STATE_ERROR);

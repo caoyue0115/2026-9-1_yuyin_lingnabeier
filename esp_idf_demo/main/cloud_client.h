@@ -87,6 +87,40 @@ typedef struct {
     cloud_ota_update_t update;
 } cloud_ota_manifest_t;
 
+typedef struct {
+    int http_status;
+    int expected_size;
+    int bytes_read;
+    int bytes_written;
+    int partition_subtype;
+    uint32_t partition_address;
+    char partition_label[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char expected_sha256[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char sha256[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+} cloud_ota_artifact_verify_t;
+
+typedef struct {
+    const char *stage;
+    bool ok;
+    const char *target;
+    const char *from_version;
+    const char *to_version;
+    const char *release_id;
+    const char *error_code;
+    const char *error_message;
+    int free_heap;
+    int rssi;
+    const char *boot_partition_before;
+    const char *boot_partition_after_set;
+    const char *running_partition_after_reboot;
+    const char *reboot_reason;
+    const cloud_ota_artifact_verify_t *verify;
+} cloud_ota_report_t;
+
+typedef esp_err_t (*cloud_ota_artifact_chunk_callback_t)(const uint8_t *chunk,
+                                                         size_t chunk_bytes,
+                                                         void *user_ctx);
+
 typedef struct cloud_opus_uplink cloud_opus_uplink_t;
 
 typedef struct {
@@ -162,6 +196,17 @@ esp_err_t cloud_client_fetch_ota_manifest(const char *board,
                                           const char *hw_rev,
                                           const char *app_version,
                                           cloud_ota_manifest_t *manifest);
+
+esp_err_t cloud_client_verify_ota_artifact(const cloud_ota_update_t *update,
+                                           cloud_ota_artifact_verify_t *result);
+
+esp_err_t cloud_client_stream_ota_artifact(const cloud_ota_update_t *update,
+                                           cloud_ota_artifact_verify_t *result,
+                                           cloud_ota_artifact_chunk_callback_t callback,
+                                           void *user_ctx);
+
+esp_err_t cloud_client_submit_ota_report(const cloud_ota_report_t *report,
+                                         int *http_status);
 
 esp_err_t cloud_client_opus_uplink_begin(cloud_opus_uplink_t **out_uplink,
                                          cloud_opus_uplink_metrics_t *metrics);

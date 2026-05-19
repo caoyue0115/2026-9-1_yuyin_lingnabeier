@@ -283,6 +283,29 @@ def list_ota_release_candidates() -> list[dict[str, Any]]:
         conn.close()
 
 
+def has_successful_ota_report_stage(device_id: str, release_id: str, stages: list[str]) -> bool:
+    if not stages:
+        return False
+    conn = connect()
+    try:
+        placeholders = ", ".join("?" for _ in stages)
+        row = conn.execute(
+            f"""
+            SELECT 1
+            FROM ota_reports
+            WHERE device_id = ?
+              AND release_id = ?
+              AND ok = 1
+              AND stage IN ({placeholders})
+            LIMIT 1
+            """,
+            (device_id, release_id, *stages),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
 def record_ota_report(payload: dict[str, Any]) -> str:
     conn = connect()
     try:

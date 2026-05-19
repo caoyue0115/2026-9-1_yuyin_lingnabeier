@@ -2,10 +2,33 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ESP_DIR = ROOT / "esp_idf_demo"
+
+
+def _read_macro_value(source: str, name: str) -> str:
+    match = re.search(rf"^\s*#define\s+{re.escape(name)}\s+(.+?)\s*$", source, re.MULTILINE)
+    if match is None:
+        raise AssertionError(f"missing macro {name}")
+    return match.group(1)
+
+
+def _strip_p3c_boot_switch_blocks(source: str) -> str:
+    return re.sub(
+        r"(?ms)^#if DEMO_OTA_BOOT_SWITCH_ENABLED\b.*?^#endif\s*/\*\s*DEMO_OTA_BOOT_SWITCH_ENABLED\s*\*/\s*$",
+        "",
+        source,
+    )
+
+
+def _p3c_boot_switch_blocks(source: str) -> list[str]:
+    return re.findall(
+        r"(?ms)^#if DEMO_OTA_BOOT_SWITCH_ENABLED\b.*?^#endif\s*/\*\s*DEMO_OTA_BOOT_SWITCH_ENABLED\s*\*/\s*$",
+        source,
+    )
 
 
 class EspAssetTests(unittest.TestCase):
@@ -49,6 +72,7 @@ class EspAssetTests(unittest.TestCase):
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
 
         self.assertIn("DEMO_REALTIME_INTRO_ENABLED", config)
+        self.assertEqual("0", _read_macro_value(config, "DEMO_REALTIME_INTRO_ENABLED"))
         self.assertIn("DEMO_REALTIME_INTRO_PATH", config)
         self.assertIn("DEMO_REALTIME_INTRO_AUDIO_PARALLEL_ENABLED", config)
         self.assertIn("DEMO_REALTIME_AUDIO_PARALLEL_TASK_STACK_SIZE", config)
@@ -58,6 +82,7 @@ class EspAssetTests(unittest.TestCase):
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
 
         self.assertIn("DEMO_RECORD_PROMPT_ENABLED", config)
+        self.assertEqual("1", _read_macro_value(config, "DEMO_RECORD_PROMPT_ENABLED"))
         self.assertIn("DEMO_RECORD_PROMPT_PATH", config)
         self.assertIn("DEMO_RECORD_RETRY_REARM_PROMPT_PATH", config)
         self.assertIn("DEMO_RECORD_RETRY_TIMEOUT_PROMPT_PATH", config)
@@ -65,6 +90,12 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_WAITING_SPEECH_RETRY_COUNT", config)
         self.assertIn("DEMO_MIC_INIT_RETRY_COUNT", config)
         self.assertIn("DEMO_MIC_INIT_RETRY_DELAY_MS", config)
+
+    def test_spiffs_mount_is_kept_for_record_prompt_when_intro_is_disabled(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+
+        self.assertIn("DEMO_REALTIME_INTRO_ENABLED || DEMO_RECORD_PROMPT_ENABLED", main_source)
+        self.assertNotIn("if (DEMO_REALTIME_INTRO_ENABLED) {\n        (void)app_mount_spiffs();", main_source)
 
     def test_realtime_audio_defaults_leave_headroom_for_parallel_intro(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
@@ -92,13 +123,147 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_OTA_MANIFEST_DRY_RUN_ENABLED", config)
         self.assertIn("DEMO_OTA_MANIFEST_POLL_INTERVAL_MS", config)
         self.assertIn("DEMO_OTA_IDLE_AFTER_WS_DELAY_MS", config)
+        self.assertIn("DEMO_OTA_MANIFEST_TASK_STACK_SIZE", config)
         self.assertIn("cloud_client_fetch_ota_manifest", cloud_header)
         self.assertIn("api/v5/ota/manifest", cloud_source)
         self.assertIn("ota_manifest_dry_run", main_source)
         self.assertIn("cloud_client_fetch_ota_manifest", main_source)
-        self.assertNotIn("esp_ota_begin", combined)
-        self.assertNotIn("esp_ota_write", combined)
-        self.assertNotIn("esp_ota_set_boot_partition", combined)
+        self.assertIn("app_ota_manifest_dry_run_task", main_source)
+        self.assertIn("xTaskCreate(app_ota_manifest_dry_run_task", main_source)
+        non_p3c_combined = _strip_p3c_boot_switch_blocks(combined)
+        self.assertNotIn("esp_ota_set_boot_partition", non_p3c_combined)
+        self.assertNotIn("esp_restart", non_p3c_combined)
+        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", combined)
+        self.assertNotIn("esp_ota_mark_app_invalid_rollback_and_reboot", combined)
+
+    def test_ota_p3a_download_verify_is_present_without_partition_writes(self) -> None:
+        cloud_header = (ESP_DIR / "main" / "cloud_client.h").read_text(encoding="utf-8")
+        cloud_source = (ESP_DIR / "main" / "cloud_client.c").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        combined = "\n".join((cloud_header, cloud_source, main_source))
+
+        self.assertIn("cloud_ota_artifact_verify_t", cloud_header)
+        self.assertIn("cloud_client_verify_ota_artifact", cloud_header)
+        self.assertIn("mbedtls_sha256_context", cloud_source)
+        self.assertIn("cloud_hex_encode_sha256", cloud_source)
+        self.assertIn("stage=ota_artifact_verify event=start", main_source)
+        self.assertIn("stage=ota_artifact_verify event=done", main_source)
+        self.assertIn("stage=ota_artifact_verify event=failed", main_source)
+        self.assertIn("cloud_client_submit_ota_report", cloud_header)
+        self.assertIn("api/v5/ota/report", cloud_source)
+        self.assertIn("stage=ota_report event=done", main_source)
+        self.assertIn("stage=ota_report event=failed", main_source)
+        self.assertIn("action=download_verify_only", main_source)
+        non_p3c_combined = _strip_p3c_boot_switch_blocks(combined)
+        self.assertNotIn("esp_ota_set_boot_partition", non_p3c_combined)
+        self.assertNotIn("esp_restart", non_p3c_combined)
+        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", combined)
+        self.assertNotIn("esp_ota_mark_app_invalid_rollback_and_reboot", combined)
+
+    def test_ota_p3b_partition_write_is_present_without_boot_switch_or_reboot(self) -> None:
+        cloud_header = (ESP_DIR / "main" / "cloud_client.h").read_text(encoding="utf-8")
+        cloud_source = (ESP_DIR / "main" / "cloud_client.c").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        combined = "\n".join((cloud_header, cloud_source, main_source))
+
+        self.assertIn("DEMO_OTA_PARTITION_WRITE_ENABLED", config)
+        self.assertIn("esp_ota_get_running_partition", main_source)
+        self.assertIn("esp_ota_get_next_update_partition", main_source)
+        self.assertIn("esp_ota_begin", main_source)
+        self.assertIn("esp_ota_write", main_source)
+        self.assertIn("esp_ota_end", main_source)
+        self.assertIn("esp_ota_abort", main_source)
+        self.assertIn("cloud_client_stream_ota_artifact", cloud_header)
+        self.assertIn("cloud_client_stream_ota_artifact", cloud_source)
+        self.assertIn("stage=ota_partition_write event=start", main_source)
+        self.assertIn("stage=ota_partition_write event=done", main_source)
+        self.assertIn("stage=ota_partition_write event=failed", main_source)
+        self.assertIn("action=write_inactive_only", main_source)
+        self.assertIn("no_boot_switch=1", main_source)
+        self.assertIn("no_reboot=1", main_source)
+        self.assertIn("running_partition", main_source)
+        self.assertIn("update_partition", main_source)
+        self.assertIn("report_stage=partition_write", main_source)
+        self.assertIn("partition_label", cloud_header)
+        self.assertIn("partition_subtype", cloud_header)
+        self.assertIn("partition_address", cloud_header)
+        self.assertIn("bytes_written", cloud_header)
+        non_p3c_combined = _strip_p3c_boot_switch_blocks(combined)
+        self.assertNotIn("esp_ota_set_boot_partition", non_p3c_combined)
+        self.assertNotIn("esp_restart", non_p3c_combined)
+        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", combined)
+        self.assertNotIn("esp_ota_mark_app_invalid_rollback_and_reboot", combined)
+
+    def test_ota_p3c_boot_switch_is_default_off_and_gated(self) -> None:
+        cloud_header = (ESP_DIR / "main" / "cloud_client.h").read_text(encoding="utf-8")
+        cloud_source = (ESP_DIR / "main" / "cloud_client.c").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        combined = "\n".join((cloud_header, cloud_source, main_source))
+
+        self.assertIn("DEMO_OTA_BOOT_SWITCH_ENABLED", config)
+        self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_BOOT_SWITCH_ENABLED"))
+        self.assertIn("ota_boot_switch_enabled", main_source)
+
+        p3c_blocks = "\n".join(_p3c_boot_switch_blocks(main_source))
+        self.assertIn("esp_ota_set_boot_partition", p3c_blocks)
+        self.assertIn("esp_restart", p3c_blocks)
+        self.assertNotIn("esp_ota_set_boot_partition", _strip_p3c_boot_switch_blocks(combined))
+        self.assertNotIn("esp_restart", _strip_p3c_boot_switch_blocks(combined))
+
+        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", combined)
+        self.assertNotIn("esp_ota_mark_app_invalid_rollback_and_reboot", combined)
+
+    def test_ota_p3c_logs_and_report_fields_are_present(self) -> None:
+        cloud_header = (ESP_DIR / "main" / "cloud_client.h").read_text(encoding="utf-8")
+        cloud_source = (ESP_DIR / "main" / "cloud_client.c").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        api_source = (ROOT / "src" / "api" / "ota.py").read_text(encoding="utf-8")
+
+        self.assertIn("action=download_verify_only", main_source)
+        self.assertIn("action=write_inactive_only", main_source)
+        self.assertIn("action=write_switch_reboot", main_source)
+        self.assertIn("no_boot_switch=0", main_source)
+        self.assertIn("reboot_scheduled=1", main_source)
+        self.assertIn("boot_partition_before", main_source)
+        self.assertIn("boot_partition_after_set", main_source)
+        self.assertIn("stage=ota_boot_switch event=start", main_source)
+        self.assertIn("stage=ota_boot_switch event=done", main_source)
+        self.assertIn("stage=ota_boot_switch event=failed", main_source)
+        self.assertIn("report_stage=boot_switch_scheduled", main_source)
+        self.assertIn("stage=ota_post_reboot_confirm", main_source)
+        self.assertIn("report_stage=post_reboot_confirm", main_source)
+
+        for field in (
+            "boot_partition_before",
+            "boot_partition_after_set",
+            "running_partition_after_reboot",
+            "reboot_reason",
+        ):
+            self.assertIn(field, cloud_header)
+            self.assertIn(field, cloud_source)
+            self.assertIn(field, api_source)
+
+    def test_ota_p3c_post_reboot_confirm_runs_in_dedicated_task(self) -> None:
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        app_main_source = main_source.split("void app_main(void)", 1)[1]
+
+        self.assertIn("DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE", config)
+        self.assertEqual("8192", _read_macro_value(config, "DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE"))
+        self.assertIn("app_ota_post_reboot_confirm_task", main_source)
+        self.assertIn("xTaskCreate(app_ota_post_reboot_confirm_task", main_source)
+        self.assertIn("DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE", main_source)
+        self.assertIn("vTaskDelete(NULL)", main_source)
+        self.assertNotIn("app_ota_post_reboot_confirm_if_pending(", app_main_source)
+
+    def test_wifi_password_empty_preserves_stored_station_config(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+
+        self.assertIn("DEMO_WIFI_PASSWORD[0] != '\\0'", main_source)
+        self.assertIn("using stored Wi-Fi station credentials from NVS", main_source)
+        self.assertIn("esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg)", main_source)
 
 
 if __name__ == "__main__":
