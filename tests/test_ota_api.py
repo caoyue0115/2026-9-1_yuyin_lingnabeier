@@ -189,6 +189,12 @@ class OtaApiTests(unittest.TestCase):
 
         self.assertEqual(self._manifest_release_ids(), ["2026-05-18-v34-002-p3c"])
 
+    def test_manifest_suppression_ignores_partition_write_stage(self) -> None:
+        self._create_release("2026-05-19-v35-002-p3c")
+        self._record_report(release_id="2026-05-19-v35-002-p3c", stage="partition_write", ok=True)
+
+        self.assertEqual(self._manifest_release_ids(), ["2026-05-19-v35-002-p3c"])
+
     def test_firmware_rejects_path_traversal(self) -> None:
         (self.tmp_path / "secret.bin").write_bytes(b"secret")
 
