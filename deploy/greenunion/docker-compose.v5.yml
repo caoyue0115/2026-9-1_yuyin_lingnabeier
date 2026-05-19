@@ -15,7 +15,7 @@ services:
       - ${V5_DATA_DIR:-/app/religion_demo_v5_realtime_opus/data}:/app/data
       - ${V5_INDICES_DIR:-/app/religion_demo_v5_realtime_opus/indices}:/app/indices
     ports:
-      - "${V5_BIND_HOST:-0.0.0.0}:${V5_PUBLIC_PORT:-8020}:8010"
+      - "${V5_BIND_HOST:-0.0.0.0}:${V5_PUBLIC_PORT:-80}:8010"
     depends_on:
       - redis
 
