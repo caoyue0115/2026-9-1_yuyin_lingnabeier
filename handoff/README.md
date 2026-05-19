@@ -33,7 +33,7 @@
 - 核心模组：`ESP32-S3-WROOM-1`
 - 工具链：`ESP-IDF 5.5.4`
 - 触发方式：`触摸屏`
-- 版本口径：`v34 OTA P3c 002 canary 已通过 + no-intro`
+- 版本口径：`v35 OTA P3c 002 canary 已通过并 closeout + no-intro`
 - 录音前提示音：保留 `record_prompt_1.pcm`
 - 回答前开场提示音：默认关闭 `DEMO_REALTIME_INTRO_ENABLED=0`
 - OTA：P3c 机制已在 002 canary 打通；设备写入 inactive OTA partition，显式设置下一次启动分区，重启后从 OTA 分区启动，并上报 `post_reboot_confirm ok=1`
@@ -43,7 +43,7 @@ P3b 不等于已经完成 OTA 启动切换。P3c 才允许 `esp_ota_set_boot_par
 当前 OTA 设备口径：
 
 - `miaoban-v1p2-001` 不参与 OTA，继续作为非白名单/no_update 参考样机。
-- `miaoban-v1p2-002` 已完成 P3c v34 单机 canary：成功从 OTA 分区启动，`App version=v34-p3c-canary`，Wi-Fi/server/device_id 配置正常，`post_reboot_confirm ok=1`。
+- `miaoban-v1p2-002` 已完成 P3c v35 单机 canary：成功写入 OTA 分区、切 boot、重启进入 `ota_1`，`App version=v35-p3c-canary`，Wi-Fi/server/device_id 配置正常，`partition_write` / `boot_switch_scheduled` / `post_reboot_confirm` 均 `ok=1`，release `2026-05-19-v35-002-p3c` 已 closeout 为 `enabled=0`。
 - `miaoban-v1p2-003` 当前仍按 P3a/P3b 既有口径处理，不默认加入 P3c。
 
 当前默认云端基线：
@@ -56,4 +56,4 @@ P3b 不等于已经完成 OTA 启动切换。P3c 才允许 `esp_ota_set_boot_par
 - OTA report schema：greenunion-sh 当前支持 v34 P3c report 字段，包括 P3b `partition_write` 字段，以及 `boot_partition_before`、`boot_partition_after_set`、`running_partition_after_reboot`、`reboot_reason`
 - OTA manifest 防重复：同一 `device_id + release_id` 已上报 `boot_switch_scheduled ok=1` 或 `post_reboot_confirm ok=1` 后，manifest 不应再返回同一个 release；不要把手动删除 002 白名单作为标准流程。
 
-P3c formalization is semi-automatic: release creation must use strict P3c validation, successful canaries are protected by manifest suppress, and canary closeout disables the release instead of deleting whitelist rows.
+P3c formalization is semi-automatic: release creation must use strict P3c validation, successful canaries are protected by manifest suppress, and canary closeout disables the release instead of deleting whitelist rows. greenunion-sh v5 must stay published on port 80 because device firmware uses `http://106.54.240.51` without an explicit port.

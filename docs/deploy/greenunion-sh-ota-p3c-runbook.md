@@ -1,13 +1,14 @@
 # greenunion-sh OTA P3c Canary Runbook
 
-This runbook records the P3c canary operating rules after the 002 v34 validation.
+This runbook records the P3c canary operating rules after the 002 v35 validation and closeout.
 
 ## Current Status
 
 - P3c mechanism passed on `miaoban-v1p2-002`.
-- The device booted from the OTA partition with `App version=v34-p3c-canary`.
+- The device booted from the OTA partition with `App version=v35-p3c-canary`.
 - Runtime Wi-Fi, server, and device id configuration were present after reboot.
-- `post_reboot_confirm ok=1` was reported successfully.
+- `partition_write ok=1`, `boot_switch_scheduled ok=1`, and `post_reboot_confirm ok=1` were reported successfully for `2026-05-19-v35-002-p3c`.
+- The v35 release has been closed out with `enabled=0`.
 - `miaoban-v1p2-001` remains excluded from OTA.
 - `miaoban-v1p2-003` is not automatically included in P3c.
 
@@ -26,6 +27,12 @@ v34 suppress deployment issue:
 - The first server-side suppress fix was copied to the host source tree but the API image was not rebuilt.
 - Because the API container runs code from the image, a simple container restart did not activate the source change.
 - Rebuilding and recreating the API container made suppress effective.
+
+v35 port mapping issue:
+
+- A source sync overwrote the greenunion-sh v5 compose default port back to `8020`.
+- Device firmware uses `http://106.54.240.51` without an explicit port, so public port 80 must serve v5.
+- The mapping was restored to `0.0.0.0:80->8010/tcp` and committed as `bb60c9d Restore greenunion v5 public port default`.
 
 ## Manifest Suppress Rule
 
@@ -63,14 +70,14 @@ Manual removal of `miaoban-v1p2-002` from a release whitelist was a one-time sto
 
 Create a P3c release only after a new artifact has been uploaded to the OTA artifact directory and the release scope has been explicitly authorized.
 
-Example disabled creation:
+Example disabled creation from inside the API container:
 
 ```bash
 python scripts/ota_release_create.py \
   --p3c \
   --release-id 2026-05-19-v35-002-p3c \
   --version v35 \
-  --artifact /app/religion_demo_v5_realtime_opus/data/ota_artifacts/esp_idf_demo_v35_p3c.bin \
+  --artifact /app/data/ota_artifacts/esp_idf_demo_v35_p3c_002_20260519.bin \
   --device-id miaoban-v1p2-002 \
   --board ESP-VoCat \
   --hw-rev v1.2 \
@@ -91,6 +98,20 @@ python scripts/ota_release_closeout.py \
 
 Then verify the target device manifest returns `updates=[]`.
 
+## 2026-05-19 v35 002 Canary Result
+
+- release_id: `2026-05-19-v35-002-p3c`
+- artifact: `esp_idf_demo_v35_p3c_002_20260519.bin`
+- bytes: `1248352`
+- sha256: `4b8a1111977d2da7b07151135de98bf5e72c37c372c48540fd9d7ff8ee7eddaa`
+- device whitelist: `miaoban-v1p2-002` only
+- boot result: loaded from `ota_1` at offset `0x320000`
+- app version after reboot: `v35-p3c-canary`
+- reports: `partition_write ok=1`, `boot_switch_scheduled ok=1`, `post_reboot_confirm ok=1`
+- post reboot confirm: `running_partition_after_reboot=ota_1`, `reboot_reason=software_reset`
+- closeout: release set to `enabled=0`
+- final manifests: 001 `updates=[]`, 002 `updates=[]`, 003 still follows its existing v31 P3a scope
+
 ## Deployment Note
 
 On greenunion-sh, the API container code comes from the Docker image. After changing `src/` backend code, a plain restart is not enough.
@@ -101,6 +122,8 @@ Required deployment shape after explicit deployment authorization:
 docker compose build api
 docker compose up -d api
 ```
+
+The v5 API must be published on public port 80. Do not let source sync or compose defaults move it back to 8020 while device firmware uses `http://106.54.240.51`.
 
 Do not deploy, restart, or recreate containers without explicit authorization.
 
