@@ -140,6 +140,16 @@ stage=ota_app_validation event=timeout release_id=... timeout_ms=...
 
 The timeout path must not report `app_validated ok=1`.
 
+Optional observability enhancement:
+
+After a timeout-triggered reset rolls back to the previous valid partition, the old app may detect the failed validation attempt and report:
+
+```text
+stage=ota_rollback event=recovered previous_release_id=... previous_partition=...
+```
+
+This is useful for measuring rollback rate and distinguishing successful upgrades from automatic recovery. It is not required for the first P3d implementation if preserving enough cross-partition metadata would add risk.
+
 ## Closeout Rule
 
 P3d closeout must require all four successful stages for the same `device_id + release_id`:
@@ -177,6 +187,8 @@ If `post_reboot_confirm` cannot be reported:
 - Do not mark valid.
 - Keep pending state so the board can retry on a later boot or idle window.
 - Let the validation timeout reset the board if confirmation never succeeds.
+- If Wi-Fi cannot be established after the configured retry budget, for example three retries in a P3d build, the validation timeout should reset the board without attempting further cloud reports. A device that cannot reach Wi-Fi cannot receive corrective cloud instructions.
+- If Wi-Fi is connected but the report fails with HTTP 4xx/5xx or a transient transport error, retry within the validation timeout window. Do not mark valid until a successful `post_reboot_confirm` report is accepted.
 
 ### Business Initialization Failure
 
