@@ -8,6 +8,8 @@ data/tasks.db
 indices/
 tmp/
 bug*.txt
+.codex
+*.code-workspace
 
 # Local build/dependency artifacts and handoff archives.
 esp_idf_demo/managed_components/
