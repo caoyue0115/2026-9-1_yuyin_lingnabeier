@@ -102,6 +102,39 @@ class OtaReleaseCloseoutCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
 
+    def test_p3d_closeout_rejects_missing_app_validated(self) -> None:
+        self._record_report("partition_write")
+        self._record_report("boot_switch_scheduled")
+        self._record_report("post_reboot_confirm")
+        cli = _load_cli_module()
+
+        exit_code = cli.main([
+            "--release-id",
+            "2026-05-19-v35-002-p3c",
+            "--device-id",
+            "miaoban-v1p2-002",
+            "--p3d",
+        ])
+
+        self.assertEqual(exit_code, 2)
+
+    def test_p3d_closeout_disables_release_after_app_validated(self) -> None:
+        self._record_report("partition_write")
+        self._record_report("boot_switch_scheduled")
+        self._record_report("post_reboot_confirm")
+        self._record_report("app_validated")
+        cli = _load_cli_module()
+
+        exit_code = cli.main([
+            "--release-id",
+            "2026-05-19-v35-002-p3c",
+            "--device-id",
+            "miaoban-v1p2-002",
+            "--p3d",
+        ])
+
+        self.assertEqual(exit_code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
