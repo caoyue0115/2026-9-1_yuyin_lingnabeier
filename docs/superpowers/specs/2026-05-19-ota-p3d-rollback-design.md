@@ -29,6 +29,8 @@ Current P3c source has:
 
 P3d must preserve the P3c path and add rollback validation behind a separate compile-time switch.
 
+Rollback support is a bootloader feature. An app-only OTA artifact cannot retrofit rollback into a device whose currently flashed bootloader was built without `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`. Before a customer handoff, `miaoban-v1p2-002` must either already have a rollback-enabled bootloader or receive a controlled full flash package that includes the rollback-enabled bootloader, partition table, otadata, and P3d app. A P3d app-only OTA is valid only after that bootloader prerequisite is proven.
+
 ## Configuration
 
 Add a separate source-default-off switch:
@@ -45,7 +47,6 @@ P3d artifacts must explicitly build with:
 DEMO_OTA_BOOT_SWITCH_ENABLED=1
 DEMO_OTA_ROLLBACK_VALIDATION_ENABLED=1
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
-CONFIG_APP_ROLLBACK_ENABLE=y
 ```
 
 The repository default must remain safe for normal compile-only builds:

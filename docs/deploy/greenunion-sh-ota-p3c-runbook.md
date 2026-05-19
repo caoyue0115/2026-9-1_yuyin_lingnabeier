@@ -118,12 +118,15 @@ Do not ship `miaoban-v1p2-002` to a customer on a new OTA artifact unless P3d ro
 
 P3d requires:
 
+- rollback-enabled bootloader on the device; app-only OTA cannot add bootloader rollback support
 - rollback-enabled artifact, not the completed v35 P3c artifact
 - new release id, for example `2026-05-19-v36-002-p3d`
 - whitelist only `miaoban-v1p2-002`
 - successful reports for `partition_write`, `boot_switch_scheduled`, `post_reboot_confirm`, and `app_validated`
 - `scripts/ota_release_closeout.py --p3d`
 - a fault-injection or timeout validation showing that no `app_validated` report is emitted when business initialization hangs
+
+If 002's current bootloader was built without `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, do not rely on an OTA app artifact for customer rollback safety. Prepare and flash a controlled full package with rollback-enabled bootloader before treating P3d as effective.
 
 Do not include `miaoban-v1p2-003` in P3d.
 

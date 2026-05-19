@@ -308,7 +308,9 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_OTA_BOOT_SWITCH_ENABLED 1", script)
         self.assertIn("DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1", script)
         self.assertIn("CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y", script)
-        self.assertIn("CONFIG_APP_ROLLBACK_ENABLE=y", script)
+        self.assertIn("# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set", script)
+        self.assertIn("SDKCONFIG=", script)
+        self.assertIn("rollback config was not enabled", script)
         self.assertIn("CANARY_DEVICE_ID=${CANARY_DEVICE_ID:-miaoban-v1p2-002}", script)
         self.assertNotIn("DEMO_WIFI_PASSWORD", script)
 

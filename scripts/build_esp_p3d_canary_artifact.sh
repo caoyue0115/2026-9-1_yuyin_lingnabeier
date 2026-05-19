@@ -27,14 +27,15 @@ tar \
 ln -s "${ROOT_DIR}/esp_idf_demo/managed_components" "${SRC_DIR}/esp_idf_demo/managed_components"
 
 CONFIG_H="${SRC_DIR}/esp_idf_demo/main/config.h"
+SDKCONFIG="${SRC_DIR}/esp_idf_demo/sdkconfig"
 perl -0pi -e 's/#define DEMO_OTA_BOOT_SWITCH_ENABLED 0/#define DEMO_OTA_BOOT_SWITCH_ENABLED 1/' "${CONFIG_H}"
 perl -0pi -e 's/#define DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 0/#define DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1/' "${CONFIG_H}"
 perl -0pi -e "s/#define DEMO_WIFI_SSID\s+\"\"/#define DEMO_WIFI_SSID           \"${CANARY_WIFI_SSID}\"/" "${CONFIG_H}"
 perl -0pi -e "s|#define DEMO_SERVER_BASE_URL\s+\"\"|#define DEMO_SERVER_BASE_URL     \"${CANARY_SERVER_BASE_URL}\"|" "${CONFIG_H}"
 perl -0pi -e "s/#define DEMO_DEVICE_ID\s+\"\"/#define DEMO_DEVICE_ID           \"${CANARY_DEVICE_ID}\"/" "${CONFIG_H}"
+perl -0pi -e 's/# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set/CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y/' "${SDKCONFIG}"
 cat >> "${SRC_DIR}/esp_idf_demo/sdkconfig.defaults" <<'EOF'
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
-CONFIG_APP_ROLLBACK_ENABLE=y
 EOF
 
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -46,6 +47,10 @@ export IDF_PATH_FORCE=1
 . "${IDF_PATH}/export.sh"
 
 idf.py -C "${SRC_DIR}/esp_idf_demo" -B "${BUILD_DIR}" -D "PROJECT_VER=${PROJECT_VER}" build
+if ! rg -q '^CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y$' "${SRC_DIR}/esp_idf_demo/sdkconfig"; then
+  echo "rollback config was not enabled in ${SRC_DIR}/esp_idf_demo/sdkconfig" >&2
+  exit 1
+fi
 cp "${BUILD_DIR}/esp_idf_demo.bin" "${OUT_BIN}"
 
 stat -c 'path=%n bytes=%s' "${OUT_BIN}"

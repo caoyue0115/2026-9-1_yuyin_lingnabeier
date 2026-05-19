@@ -14,7 +14,7 @@
 
 - `esp_idf_demo/main/config.h`: Add default-off rollback validation macros and timeout defaults.
 - `esp_idf_demo/main/main.c`: Add P3d validation state, timeout task, mark-valid path, and `app_validated` report.
-- `esp_idf_demo/sdkconfig.defaults`: Add rollback Kconfig defaults only if the project already uses this file; otherwise keep rollback Kconfig in the P3d build script.
+- `scripts/build_esp_p3d_canary_artifact.sh`: Force the copied build source to use `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` and fail if the generated app source still has rollback disabled.
 - `scripts/build_esp_p3d_canary_artifact.sh`: Create controlled v36 P3d artifact builder for 002 only.
 - `scripts/ota_release_closeout.py`: Add `--p3d` mode requiring `app_validated`.
 - `tests/test_esp_assets.py`: Static tests for rollback guards, mark-valid ordering, no invalid rollback call, timeout edge case.
@@ -429,7 +429,9 @@ Add this test to `tests/test_esp_assets.py`:
         self.assertIn("DEMO_OTA_BOOT_SWITCH_ENABLED 1", script)
         self.assertIn("DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1", script)
         self.assertIn("CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y", script)
-        self.assertIn("CONFIG_APP_ROLLBACK_ENABLE=y", script)
+        self.assertIn("# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set", script)
+        self.assertIn("SDKCONFIG=", script)
+        self.assertIn("rollback config was not enabled", script)
         self.assertIn("CANARY_DEVICE_ID=${CANARY_DEVICE_ID:-miaoban-v1p2-002}", script)
         self.assertNotIn("DEMO_WIFI_PASSWORD", script)
 ```
@@ -458,11 +460,21 @@ PROJECT_VER="${PROJECT_VER:-v36-p3d-canary}"
 After enabling `DEMO_OTA_BOOT_SWITCH_ENABLED`, add:
 
 ```bash
+SDKCONFIG="${SRC_DIR}/esp_idf_demo/sdkconfig"
 perl -0pi -e 's/#define DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 0/#define DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1/' "${CONFIG_H}"
+perl -0pi -e 's/# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set/CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y/' "${SDKCONFIG}"
 cat >> "${SRC_DIR}/esp_idf_demo/sdkconfig.defaults" <<'EOF'
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
-CONFIG_APP_ROLLBACK_ENABLE=y
 EOF
+```
+
+After `idf.py ... build`, add:
+
+```bash
+if ! rg -q '^CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y$' "${SRC_DIR}/esp_idf_demo/sdkconfig"; then
+  echo "rollback config was not enabled in ${SRC_DIR}/esp_idf_demo/sdkconfig" >&2
+  exit 1
+fi
 ```
 
 Keep the existing no-password behavior: set SSID, server URL, and device id only. Do not add `DEMO_WIFI_PASSWORD`.
@@ -513,6 +525,7 @@ Do not ship `miaoban-v1p2-002` to a customer on a new OTA artifact unless P3d ro
 
 P3d requires:
 
+- rollback-enabled bootloader on `miaoban-v1p2-002`; app-only OTA cannot retrofit bootloader rollback support
 - rollback-enabled artifact, not the completed v35 P3c artifact
 - new release id, for example `2026-05-19-v36-002-p3d`
 - whitelist only `miaoban-v1p2-002`
