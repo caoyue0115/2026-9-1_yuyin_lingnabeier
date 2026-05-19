@@ -301,6 +301,17 @@ class EspAssetTests(unittest.TestCase):
         mark_valid_pos = main_source.index("esp_ota_mark_app_valid_cancel_rollback")
         self.assertLess(mark_valid_pos, timeout_pos)
 
+    def test_p3d_canary_build_script_enables_rollback_without_password(self) -> None:
+        script = (ROOT / "scripts" / "build_esp_p3d_canary_artifact.sh").read_text(encoding="utf-8")
+
+        self.assertIn("PROJECT_VER=${PROJECT_VER:-v36-p3d-canary}", script)
+        self.assertIn("DEMO_OTA_BOOT_SWITCH_ENABLED 1", script)
+        self.assertIn("DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1", script)
+        self.assertIn("CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y", script)
+        self.assertIn("CONFIG_APP_ROLLBACK_ENABLE=y", script)
+        self.assertIn("CANARY_DEVICE_ID=${CANARY_DEVICE_ID:-miaoban-v1p2-002}", script)
+        self.assertNotIn("DEMO_WIFI_PASSWORD", script)
+
     def test_wifi_password_empty_preserves_stored_station_config(self) -> None:
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
 
