@@ -115,6 +115,164 @@ class OtaReleaseCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
 
+    def test_p3c_mode_rejects_missing_board_hw_rev_min_version_notes(self) -> None:
+        artifact = self.artifact_dir / "esp_idf_demo_v35_p3c.bin"
+        artifact.write_bytes(b"firmware-v35")
+        cli = _load_cli_module()
+
+        exit_code = cli.main(
+            [
+                "--p3c",
+                "--release-id",
+                "2026-05-19-v35-002-p3c",
+                "--version",
+                "v35",
+                "--artifact",
+                str(artifact),
+                "--device-id",
+                "miaoban-v1p2-002",
+                "--enable",
+            ]
+        )
+
+        self.assertEqual(exit_code, 2)
+
+    def test_p3c_mode_requires_explicit_enable_or_disabled(self) -> None:
+        artifact = self.artifact_dir / "esp_idf_demo_v35_p3c.bin"
+        artifact.write_bytes(b"firmware-v35")
+        cli = _load_cli_module()
+
+        exit_code = cli.main(
+            [
+                "--p3c",
+                "--release-id",
+                "2026-05-19-v35-002-p3c",
+                "--version",
+                "v35",
+                "--artifact",
+                str(artifact),
+                "--device-id",
+                "miaoban-v1p2-002",
+                "--board",
+                "ESP-VoCat",
+                "--hw-rev",
+                "v1.2",
+                "--min-version",
+                "1",
+                "--notes",
+                "P3c formalization test",
+            ]
+        )
+
+        self.assertEqual(exit_code, 2)
+
+    def test_p3c_mode_rejects_blocked_release_id(self) -> None:
+        artifact = self.artifact_dir / "esp_idf_demo_v34_p3c.bin"
+        artifact.write_bytes(b"firmware-v34")
+        cli = _load_cli_module()
+
+        exit_code = cli.main(
+            [
+                "--p3c",
+                "--release-id",
+                "2026-05-18-v34-002-p3c",
+                "--version",
+                "v34",
+                "--artifact",
+                str(artifact),
+                "--device-id",
+                "miaoban-v1p2-002",
+                "--board",
+                "ESP-VoCat",
+                "--hw-rev",
+                "v1.2",
+                "--min-version",
+                "1",
+                "--notes",
+                "blocked id",
+                "--enable",
+            ]
+        )
+
+        self.assertEqual(exit_code, 2)
+
+    def test_p3c_mode_can_create_explicitly_enabled_release(self) -> None:
+        artifact = self.artifact_dir / "esp_idf_demo_v35_p3c.bin"
+        artifact_bytes = b"firmware-v35"
+        artifact.write_bytes(artifact_bytes)
+        expected_sha = hashlib.sha256(artifact_bytes).hexdigest()
+        cli = _load_cli_module()
+
+        exit_code = cli.main(
+            [
+                "--p3c",
+                "--release-id",
+                "2026-05-19-v35-002-p3c",
+                "--version",
+                "v35",
+                "--artifact",
+                str(artifact),
+                "--device-id",
+                "miaoban-v1p2-002",
+                "--board",
+                "ESP-VoCat",
+                "--hw-rev",
+                "v1.2",
+                "--min-version",
+                "1",
+                "--notes",
+                "P3c formalization test",
+                "--enable",
+            ]
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = ota_api.get_ota_manifest(
+            device_id="miaoban-v1p2-002",
+            board="ESP-VoCat",
+            hw_rev="v1.2",
+            app_version="1",
+        )
+        self.assertEqual(payload["updates"][0]["release_id"], "2026-05-19-v35-002-p3c")
+        self.assertEqual(payload["updates"][0]["sha256"], expected_sha)
+
+    def test_p3c_mode_can_create_disabled_release(self) -> None:
+        artifact = self.artifact_dir / "esp_idf_demo_v35_p3c.bin"
+        artifact.write_bytes(b"firmware-v35")
+        cli = _load_cli_module()
+
+        exit_code = cli.main(
+            [
+                "--p3c",
+                "--release-id",
+                "2026-05-19-v35-002-p3c",
+                "--version",
+                "v35",
+                "--artifact",
+                str(artifact),
+                "--device-id",
+                "miaoban-v1p2-002",
+                "--board",
+                "ESP-VoCat",
+                "--hw-rev",
+                "v1.2",
+                "--min-version",
+                "1",
+                "--notes",
+                "P3c formalization test",
+                "--disabled",
+            ]
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = ota_api.get_ota_manifest(
+            device_id="miaoban-v1p2-002",
+            board="ESP-VoCat",
+            hw_rev="v1.2",
+            app_version="1",
+        )
+        self.assertEqual(payload["updates"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,11 @@ if str(ROOT) not in sys.path:
 from src.settings import settings
 from src.storage import db as storage_db
 
+P3C_BLOCKED_RELEASE_IDS = {
+    "2026-05-18-v32-002-p3b",
+    "2026-05-18-v34-002-p3c",
+}
+
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -57,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority", type=int, default=100)
     parser.add_argument("--notes")
     parser.add_argument("--disabled", action="store_true")
+    parser.add_argument("--p3c", action="store_true", help="Enable strict P3c release validation")
+    parser.add_argument("--enable", action="store_true", help="Explicitly create the release enabled")
     parser.add_argument("--force", action="store_true")
     return parser
 
@@ -64,6 +71,26 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.enable and args.disabled:
+        return _fail("--enable and --disabled are mutually exclusive")
+    if args.p3c:
+        missing = [
+            name
+            for name, value in [
+                ("--board", args.board),
+                ("--hw-rev", args.hw_rev),
+                ("--min-version", args.min_version),
+                ("--notes", args.notes),
+            ]
+            if not value
+        ]
+        if missing:
+            return _fail(f"P3c release requires {', '.join(missing)}")
+        if not args.enable and not args.disabled:
+            return _fail("P3c release requires explicit --enable or --disabled")
+        if args.release_id in P3C_BLOCKED_RELEASE_IDS:
+            return _fail(f"P3c release id must not be reused: {args.release_id}")
 
     artifact_root = settings.ota_artifact_path.resolve()
     artifact_path = Path(args.artifact).expanduser().resolve()
@@ -86,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         size=artifact_path.stat().st_size,
         min_version=args.min_version,
         device_ids=device_ids,
-        enabled=not args.disabled,
+        enabled=args.enable if args.p3c else not args.disabled,
         force=args.force,
         board=args.board,
         hw_rev=args.hw_rev,
