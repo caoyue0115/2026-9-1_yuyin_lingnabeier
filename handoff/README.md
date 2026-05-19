@@ -57,3 +57,5 @@ P3b 不等于已经完成 OTA 启动切换。P3c 才允许 `esp_ota_set_boot_par
 - OTA manifest 防重复：同一 `device_id + release_id` 已上报 `boot_switch_scheduled ok=1` 或 `post_reboot_confirm ok=1` 后，manifest 不应再返回同一个 release；不要把手动删除 002 白名单作为标准流程。
 
 P3c formalization is semi-automatic: release creation must use strict P3c validation, successful canaries are protected by manifest suppress, and canary closeout disables the release instead of deleting whitelist rows. greenunion-sh v5 must stay published on port 80 because device firmware uses `http://106.54.240.51` without an explicit port.
+
+002 发客户前必须通过 P3d rollback validation：使用 v36 / `2026-05-19-v36-002-p3d` 口径的 rollback-enabled artifact，确认 `partition_write`、`boot_switch_scheduled`、`post_reboot_confirm`、`app_validated` 四阶段均 `ok=1`，并使用 `scripts/ota_release_closeout.py --p3d` 收口。P3d 不包含 003。

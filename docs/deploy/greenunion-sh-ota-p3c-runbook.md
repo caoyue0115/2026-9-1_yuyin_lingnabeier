@@ -112,6 +112,21 @@ Then verify the target device manifest returns `updates=[]`.
 - closeout: release set to `enabled=0`
 - final manifests: 001 `updates=[]`, 002 `updates=[]`, 003 still follows its existing v31 P3a scope
 
+## P3d Rollback Gate Before Customer Handoff
+
+Do not ship `miaoban-v1p2-002` to a customer on a new OTA artifact unless P3d rollback validation has passed.
+
+P3d requires:
+
+- rollback-enabled artifact, not the completed v35 P3c artifact
+- new release id, for example `2026-05-19-v36-002-p3d`
+- whitelist only `miaoban-v1p2-002`
+- successful reports for `partition_write`, `boot_switch_scheduled`, `post_reboot_confirm`, and `app_validated`
+- `scripts/ota_release_closeout.py --p3d`
+- a fault-injection or timeout validation showing that no `app_validated` report is emitted when business initialization hangs
+
+Do not include `miaoban-v1p2-003` in P3d.
+
 ## Deployment Note
 
 On greenunion-sh, the API container code comes from the Docker image. After changing `src/` backend code, a plain restart is not enough.
