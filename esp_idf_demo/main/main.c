@@ -161,6 +161,8 @@ static void app_log_runtime_config(void)
     ESP_LOGI(TAG, "  ota_partition_write_enabled=%d", DEMO_OTA_PARTITION_WRITE_ENABLED);
     ESP_LOGI(TAG, "  ota_boot_switch_enabled=%d", DEMO_OTA_BOOT_SWITCH_ENABLED);
     ESP_LOGI(TAG, "  ota_post_reboot_task_stack_size=%d", DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE);
+    ESP_LOGI(TAG, "  ota_rollback_validation_enabled=%d", DEMO_OTA_ROLLBACK_VALIDATION_ENABLED);
+    ESP_LOGI(TAG, "  ota_rollback_validation_timeout_ms=%d", DEMO_OTA_ROLLBACK_VALIDATION_TIMEOUT_MS);
     ESP_LOGI(TAG, "  realtime_session_timeout_ms=%d", DEMO_REALTIME_SESSION_TIMEOUT_MS);
     ESP_LOGI(TAG, "  v5_uplink_enabled=%d", V5_OPUS_UPLINK_WS_ENABLED);
     ESP_LOGI(TAG, "  v5_uplink_fallback_legacy_audio=%d", V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO);
@@ -1239,6 +1241,14 @@ typedef struct {
     uint32_t partition_address;
 } app_ota_p3c_pending_t;
 
+#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+static volatile bool s_ota_rollback_validation_pending = false;
+static volatile bool s_ota_rollback_business_ready = false;
+static TaskHandle_t s_ota_rollback_timeout_task_handle = NULL;
+static app_ota_p3c_pending_t s_ota_rollback_pending = {0};
+static void app_ota_rollback_validation_timeout_task(void *arg);
+#endif
+
 static const char *app_reset_reason_to_string(esp_reset_reason_t reason)
 {
     switch (reason) {
@@ -1591,6 +1601,33 @@ static esp_err_t app_submit_ota_boot_report(const char *stage,
     return cloud_client_submit_ota_report(&report, http_status);
 }
 
+#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+static esp_err_t app_submit_ota_app_validated_report(const app_ota_p3c_pending_t *pending,
+                                                     const char *app_version,
+                                                     bool ok,
+                                                     const char *error_code,
+                                                     int *http_status)
+{
+    cloud_ota_update_t update = {0};
+    snprintf(update.target, sizeof(update.target), "%s", "esp32s3");
+    if (pending != NULL) {
+        snprintf(update.version, sizeof(update.version), "%s", pending->version);
+        snprintf(update.release_id, sizeof(update.release_id), "%s", pending->release_id);
+    }
+    return app_submit_ota_boot_report("app_validated",
+                                      ok,
+                                      &update,
+                                      app_version,
+                                      ok ? NULL : error_code,
+                                      ok ? NULL : "ota app validation failed",
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      app_reset_reason_to_string(esp_reset_reason()),
+                                      http_status);
+}
+#endif
+
 static void app_ota_schedule_boot_switch(const cloud_ota_update_t *update,
                                          const cloud_ota_artifact_verify_t *verify,
                                          const char *app_version)
@@ -1783,7 +1820,29 @@ static void app_ota_post_reboot_confirm_if_pending(const char *app_version)
                  report_http_status,
                  ok ? 1 : 0,
                  pending.release_id);
+#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+        if (ok) {
+            s_ota_rollback_pending = pending;
+            s_ota_rollback_validation_pending = true;
+            s_ota_rollback_business_ready = false;
+            BaseType_t timeout_ok = xTaskCreate(app_ota_rollback_validation_timeout_task,
+                                                "ota_valid_timeout",
+                                                DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE,
+                                                NULL,
+                                                tskIDLE_PRIORITY + 1,
+                                                &s_ota_rollback_timeout_task_handle);
+            if (timeout_ok != pdPASS) {
+                s_ota_rollback_timeout_task_handle = NULL;
+                ESP_LOGW(TAG,
+                         "stage=ota_app_validation_timeout event=task_start_failed release_id=%s",
+                         pending.release_id);
+            }
+        } else {
+            (void)app_ota_p3c_clear_pending();
+        }
+#else
         (void)app_ota_p3c_clear_pending();
+#endif
     } else {
         ESP_LOGW(TAG,
                  "stage=ota_report event=failed report_stage=post_reboot_confirm err=%s http_status=%d ok=%d release_id=%s",
@@ -1802,6 +1861,72 @@ static void app_ota_post_reboot_confirm_task(void *arg)
     app_ota_post_reboot_confirm_if_pending(app_desc != NULL ? app_desc->version : "");
     vTaskDelete(NULL);
 }
+
+#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+static void app_ota_rollback_note_business_ready(const char *app_version)
+{
+    if (!s_ota_rollback_validation_pending || s_ota_rollback_business_ready) {
+        return;
+    }
+    s_ota_rollback_business_ready = true;
+    ESP_LOGI(TAG,
+             "stage=ota_app_validation event=start release_id=%s running_partition=%s",
+             s_ota_rollback_pending.release_id,
+             app_partition_label_or_empty(esp_ota_get_running_partition()));
+
+    esp_err_t ret = esp_ota_mark_app_valid_cancel_rollback();
+    int report_http_status = 0;
+    esp_err_t report_ret = app_submit_ota_app_validated_report(&s_ota_rollback_pending,
+                                                               app_version,
+                                                               ret == ESP_OK,
+                                                               esp_err_to_name(ret),
+                                                               &report_http_status);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "stage=ota_app_validation event=done release_id=%s running_partition=%s",
+                 s_ota_rollback_pending.release_id,
+                 app_partition_label_or_empty(esp_ota_get_running_partition()));
+    } else {
+        ESP_LOGW(TAG,
+                 "stage=ota_app_validation event=failed release_id=%s error_code=%s",
+                 s_ota_rollback_pending.release_id,
+                 esp_err_to_name(ret));
+    }
+    if (report_ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "stage=ota_report event=done report_stage=app_validated http_status=%d ok=%d release_id=%s",
+                 report_http_status,
+                 ret == ESP_OK ? 1 : 0,
+                 s_ota_rollback_pending.release_id);
+    } else {
+        ESP_LOGW(TAG,
+                 "stage=ota_report event=failed report_stage=app_validated err=%s http_status=%d ok=%d release_id=%s",
+                 esp_err_to_name(report_ret),
+                 report_http_status,
+                 ret == ESP_OK ? 1 : 0,
+                 s_ota_rollback_pending.release_id);
+    }
+    if (ret == ESP_OK && report_ret == ESP_OK) {
+        (void)app_ota_p3c_clear_pending();
+        s_ota_rollback_validation_pending = false;
+    }
+}
+
+static void app_ota_rollback_validation_timeout_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(DEMO_OTA_ROLLBACK_VALIDATION_TIMEOUT_MS));
+    if (s_ota_rollback_validation_pending && !s_ota_rollback_business_ready) {
+        ESP_LOGW(TAG,
+                 "stage=ota_app_validation event=timeout release_id=%s timeout_ms=%d",
+                 s_ota_rollback_pending.release_id,
+                 DEMO_OTA_ROLLBACK_VALIDATION_TIMEOUT_MS);
+        esp_restart();
+    }
+    s_ota_rollback_timeout_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+#endif
 #endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
 
 static void app_ota_manifest_dry_run_task(void *arg)
@@ -2125,8 +2250,15 @@ void app_main(void)
         return;
     }
     app_set_state(&s_app_state, APP_STATE_IDLE);
+#if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+    const esp_app_desc_t *rollback_app_desc = esp_app_get_description();
+    app_ota_rollback_note_business_ready(rollback_app_desc != NULL ? rollback_app_desc->version : "");
+#endif
 
     while (true) {
+#if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+        app_ota_rollback_note_business_ready(rollback_app_desc != NULL ? rollback_app_desc->version : "");
+#endif
         app_poll_ota_manifest_dry_run_if_due();
 
         trigger_event_t event = {0};

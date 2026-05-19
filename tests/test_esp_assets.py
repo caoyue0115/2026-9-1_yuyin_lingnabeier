@@ -31,6 +31,14 @@ def _p3c_boot_switch_blocks(source: str) -> list[str]:
     )
 
 
+def _strip_p3d_rollback_blocks(source: str) -> str:
+    return re.sub(
+        r"(?ms)^#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED\b.*?^#endif\s*$",
+        "",
+        source,
+    )
+
+
 class EspAssetTests(unittest.TestCase):
     def test_partition_table_allocates_ab_ota_app_slots_and_spiffs_storage(self) -> None:
         partitions = (ESP_DIR / "partitions.csv").read_text(encoding="utf-8")
@@ -133,7 +141,7 @@ class EspAssetTests(unittest.TestCase):
         non_p3c_combined = _strip_p3c_boot_switch_blocks(combined)
         self.assertNotIn("esp_ota_set_boot_partition", non_p3c_combined)
         self.assertNotIn("esp_restart", non_p3c_combined)
-        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", combined)
+        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", _strip_p3d_rollback_blocks(combined))
         self.assertNotIn("esp_ota_mark_app_invalid_rollback_and_reboot", combined)
 
     def test_ota_p3a_download_verify_is_present_without_partition_writes(self) -> None:
@@ -157,7 +165,7 @@ class EspAssetTests(unittest.TestCase):
         non_p3c_combined = _strip_p3c_boot_switch_blocks(combined)
         self.assertNotIn("esp_ota_set_boot_partition", non_p3c_combined)
         self.assertNotIn("esp_restart", non_p3c_combined)
-        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", combined)
+        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", _strip_p3d_rollback_blocks(combined))
         self.assertNotIn("esp_ota_mark_app_invalid_rollback_and_reboot", combined)
 
     def test_ota_p3b_partition_write_is_present_without_boot_switch_or_reboot(self) -> None:
@@ -192,7 +200,7 @@ class EspAssetTests(unittest.TestCase):
         non_p3c_combined = _strip_p3c_boot_switch_blocks(combined)
         self.assertNotIn("esp_ota_set_boot_partition", non_p3c_combined)
         self.assertNotIn("esp_restart", non_p3c_combined)
-        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", combined)
+        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", _strip_p3d_rollback_blocks(combined))
         self.assertNotIn("esp_ota_mark_app_invalid_rollback_and_reboot", combined)
 
     def test_ota_p3c_boot_switch_is_default_off_and_gated(self) -> None:
@@ -212,7 +220,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertNotIn("esp_ota_set_boot_partition", _strip_p3c_boot_switch_blocks(combined))
         self.assertNotIn("esp_restart", _strip_p3c_boot_switch_blocks(combined))
 
-        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", combined)
+        self.assertNotIn("esp_ota_mark_app_valid_cancel_rollback", _strip_p3d_rollback_blocks(combined))
         self.assertNotIn("esp_ota_mark_app_invalid_rollback_and_reboot", combined)
 
     def test_ota_p3c_logs_and_report_fields_are_present(self) -> None:
@@ -257,6 +265,41 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE", main_source)
         self.assertIn("vTaskDelete(NULL)", main_source)
         self.assertNotIn("app_ota_post_reboot_confirm_if_pending(", app_main_source)
+
+    def test_ota_p3d_rollback_validation_is_default_off_and_gated(self) -> None:
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        combined = "\n".join((config, main_source))
+
+        self.assertIn("DEMO_OTA_ROLLBACK_VALIDATION_ENABLED", config)
+        self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_ROLLBACK_VALIDATION_ENABLED"))
+        self.assertIn("DEMO_OTA_ROLLBACK_VALIDATION_TIMEOUT_MS", config)
+        self.assertIn("#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED", main_source)
+        self.assertIn("esp_ota_mark_app_valid_cancel_rollback", main_source)
+        self.assertNotIn("esp_ota_mark_app_invalid_rollback_and_reboot", combined)
+
+    def test_ota_p3d_marks_valid_only_after_business_ready(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+
+        post_confirm_pos = main_source.index("report_stage=post_reboot_confirm")
+        business_ready_pos = main_source.index("app_ota_rollback_note_business_ready")
+        mark_valid_pos = main_source.index("esp_ota_mark_app_valid_cancel_rollback")
+        app_validated_report_pos = main_source.index("report_stage=app_validated")
+
+        self.assertLess(post_confirm_pos, business_ready_pos)
+        self.assertLess(business_ready_pos, mark_valid_pos)
+        self.assertLess(mark_valid_pos, app_validated_report_pos)
+
+    def test_ota_p3d_business_hang_edge_case_has_timeout_without_mark_valid(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+
+        self.assertIn("app_ota_rollback_validation_timeout_task", main_source)
+        self.assertIn("stage=ota_app_validation event=timeout", main_source)
+        self.assertIn("DEMO_OTA_ROLLBACK_VALIDATION_TIMEOUT_MS", main_source)
+        self.assertIn("esp_restart()", main_source)
+        timeout_pos = main_source.index("stage=ota_app_validation event=timeout")
+        mark_valid_pos = main_source.index("esp_ota_mark_app_valid_cancel_rollback")
+        self.assertLess(mark_valid_pos, timeout_pos)
 
     def test_wifi_password_empty_preserves_stored_station_config(self) -> None:
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
