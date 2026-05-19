@@ -55,3 +55,5 @@ P3b 不等于已经完成 OTA 启动切换。P3c 才允许 `esp_ota_set_boot_par
 - OTA report：`/api/v5/ota/report`
 - OTA report schema：greenunion-sh 当前支持 v34 P3c report 字段，包括 P3b `partition_write` 字段，以及 `boot_partition_before`、`boot_partition_after_set`、`running_partition_after_reboot`、`reboot_reason`
 - OTA manifest 防重复：同一 `device_id + release_id` 已上报 `boot_switch_scheduled ok=1` 或 `post_reboot_confirm ok=1` 后，manifest 不应再返回同一个 release；不要把手动删除 002 白名单作为标准流程。
+
+P3c formalization is semi-automatic: release creation must use strict P3c validation, successful canaries are protected by manifest suppress, and canary closeout disables the release instead of deleting whitelist rows.

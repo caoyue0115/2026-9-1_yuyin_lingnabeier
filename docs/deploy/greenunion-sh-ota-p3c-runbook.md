@@ -59,6 +59,38 @@ Manual removal of `miaoban-v1p2-002` from a release whitelist was a one-time sto
 - Do not add `miaoban-v1p2-003` to P3c by default.
 - After a canary passes, keep suppress as the automatic anti-repeat mechanism, then set the canary release `enabled=0` as an operational closeout to prevent accidental whitelist expansion or release reuse.
 
+## Semi-Automatic P3c Workflow
+
+Create a P3c release only after a new artifact has been uploaded to the OTA artifact directory and the release scope has been explicitly authorized.
+
+Example disabled creation:
+
+```bash
+python scripts/ota_release_create.py \
+  --p3c \
+  --release-id 2026-05-19-v35-002-p3c \
+  --version v35 \
+  --artifact /app/religion_demo_v5_realtime_opus/data/ota_artifacts/esp_idf_demo_v35_p3c.bin \
+  --device-id miaoban-v1p2-002 \
+  --board ESP-VoCat \
+  --hw-rev v1.2 \
+  --min-version 1 \
+  --notes "P3c 002 canary" \
+  --disabled
+```
+
+Use `--enable` only when the release should immediately become visible to the whitelisted device.
+
+After the canary passes and reports `partition_write ok=1`, `boot_switch_scheduled ok=1`, and `post_reboot_confirm ok=1`, close it out:
+
+```bash
+python scripts/ota_release_closeout.py \
+  --release-id 2026-05-19-v35-002-p3c \
+  --device-id miaoban-v1p2-002
+```
+
+Then verify the target device manifest returns `updates=[]`.
+
 ## Deployment Note
 
 On greenunion-sh, the API container code comes from the Docker image. After changing `src/` backend code, a plain restart is not enough.
