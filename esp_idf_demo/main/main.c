@@ -121,6 +121,8 @@ typedef struct {
     trigger_event_t event;
 } app_pipeline_task_args_t;
 
+static void app_runtime_task(void *arg);
+
 static void app_cleanup_pipeline_resources(void)
 {
     audio_in_deinit();
@@ -135,6 +137,7 @@ static void app_log_runtime_config(void)
     ESP_LOGI(TAG, "  wifi_ssid=%s", DEMO_WIFI_SSID);
     ESP_LOGI(TAG, "  server_base_url=%s", DEMO_SERVER_BASE_URL);
     ESP_LOGI(TAG, "  device_id=%s", DEMO_DEVICE_ID);
+    ESP_LOGI(TAG, "  app_runtime_task_stack_size=%d", DEMO_APP_RUNTIME_TASK_STACK_SIZE);
     ESP_LOGI(TAG, "  audio_mode=%s", app_audio_mode_name());
     ESP_LOGI(TAG, "  wifi_power_save_none=%d", DEMO_WIFI_POWER_SAVE_NONE);
     ESP_LOGI(TAG, "  audio_format=%dHz/%d-bit/%dch", DEMO_AUDIO_SAMPLE_RATE,
@@ -164,6 +167,7 @@ static void app_log_runtime_config(void)
     ESP_LOGI(TAG, "  ota_post_reboot_task_stack_size=%d", DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE);
     ESP_LOGI(TAG, "  ota_rollback_validation_enabled=%d", DEMO_OTA_ROLLBACK_VALIDATION_ENABLED);
     ESP_LOGI(TAG, "  ota_rollback_validation_timeout_ms=%d", DEMO_OTA_ROLLBACK_VALIDATION_TIMEOUT_MS);
+    ESP_LOGI(TAG, "  ota_rollback_validation_task_stack_size=%d", DEMO_OTA_ROLLBACK_VALIDATION_TASK_STACK_SIZE);
     ESP_LOGI(TAG, "  realtime_session_timeout_ms=%d", DEMO_REALTIME_SESSION_TIMEOUT_MS);
     ESP_LOGI(TAG, "  v5_uplink_enabled=%d", V5_OPUS_UPLINK_WS_ENABLED);
     ESP_LOGI(TAG, "  v5_uplink_fallback_legacy_audio=%d", V5_OPUS_UPLINK_FALLBACK_LEGACY_AUDIO);
@@ -1246,8 +1250,10 @@ typedef struct {
 #if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
 static volatile bool s_ota_rollback_validation_pending = false;
 static volatile bool s_ota_rollback_business_ready = false;
+static TaskHandle_t s_ota_rollback_validation_task_handle = NULL;
 static TaskHandle_t s_ota_rollback_timeout_task_handle = NULL;
 static app_ota_p3c_pending_t s_ota_rollback_pending = {0};
+static void app_ota_rollback_validation_task(void *arg);
 static void app_ota_rollback_validation_timeout_task(void *arg);
 #endif
 
@@ -1964,6 +1970,7 @@ static void app_ota_post_reboot_confirm_task(void *arg)
 #if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
 static void app_ota_rollback_note_business_ready(const char *app_version)
 {
+    (void)app_version;
     if (!s_ota_rollback_validation_pending || s_ota_rollback_business_ready) {
         return;
     }
@@ -1973,6 +1980,26 @@ static void app_ota_rollback_note_business_ready(const char *app_version)
              "stage=ota_app_validation event=start release_id=%s running_partition=%s",
              s_ota_rollback_pending.release_id,
              app_partition_label_or_empty(esp_ota_get_running_partition()));
+    BaseType_t ok = xTaskCreate(app_ota_rollback_validation_task,
+                                "ota_app_validate",
+                                DEMO_OTA_ROLLBACK_VALIDATION_TASK_STACK_SIZE,
+                                NULL,
+                                tskIDLE_PRIORITY + 1,
+                                &s_ota_rollback_validation_task_handle);
+    if (ok != pdPASS) {
+        s_ota_rollback_validation_task_handle = NULL;
+        s_ota_rollback_business_ready = false;
+        ESP_LOGW(TAG,
+                 "stage=ota_app_validation event=task_start_failed release_id=%s",
+                 s_ota_rollback_pending.release_id);
+    }
+}
+
+static void app_ota_rollback_validation_task(void *arg)
+{
+    (void)arg;
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    const char *app_version = app_desc != NULL ? app_desc->version : "";
 
     esp_err_t ret = esp_ota_mark_app_valid_cancel_rollback();
     int report_http_status = 0;
@@ -2010,7 +2037,11 @@ static void app_ota_rollback_note_business_ready(const char *app_version)
         (void)app_ota_p3c_store_last_stage("app_validation_done");
         (void)app_ota_p3c_clear_pending();
         s_ota_rollback_validation_pending = false;
+    } else {
+        s_ota_rollback_business_ready = false;
     }
+    s_ota_rollback_validation_task_handle = NULL;
+    vTaskDelete(NULL);
 }
 
 static void app_ota_rollback_validation_timeout_task(void *arg)
@@ -2316,6 +2347,21 @@ static void app_poll_ota_manifest_dry_run_if_due(void)
 
 void app_main(void)
 {
+    BaseType_t ok = xTaskCreate(app_runtime_task,
+                                "app_runtime",
+                                DEMO_APP_RUNTIME_TASK_STACK_SIZE,
+                                NULL,
+                                tskIDLE_PRIORITY + 1,
+                                NULL);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start app_runtime task");
+    }
+    vTaskDelete(NULL);
+}
+
+static void app_runtime_task(void *arg)
+{
+    (void)arg;
     trigger_input_t trigger = {0};
 
     ESP_LOGI(TAG, "========================================");
@@ -2331,6 +2377,7 @@ void app_main(void)
     if (app_wifi_connect() != ESP_OK) {
         app_set_state(&s_app_state, APP_STATE_ERROR);
         ESP_LOGE(TAG, "Wi-Fi initialization failed; stopping demo");
+        vTaskDelete(NULL);
         return;
     }
 #if DEMO_OTA_BOOT_SWITCH_ENABLED
@@ -2355,6 +2402,7 @@ void app_main(void)
     if (trigger_input_init(&trigger) != ESP_OK) {
         app_set_state(&s_app_state, APP_STATE_ERROR);
         ESP_LOGE(TAG, "Trigger initialization failed; stopping demo");
+        vTaskDelete(NULL);
         return;
     }
 #if DEMO_OTA_BOOT_SWITCH_ENABLED

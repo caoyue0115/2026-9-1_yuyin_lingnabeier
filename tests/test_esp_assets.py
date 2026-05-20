@@ -336,6 +336,28 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("vTaskDelete(NULL)", main_source)
         self.assertNotIn("app_ota_post_reboot_confirm_if_pending(", app_main_source)
 
+    def test_app_main_only_starts_runtime_task_and_deletes_itself(self) -> None:
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        app_main_source = main_source.split("void app_main(void)", 1)[1]
+        app_main_body = app_main_source.split("static void app_runtime_task", 1)[0]
+
+        self.assertIn("DEMO_APP_RUNTIME_TASK_STACK_SIZE", config)
+        self.assertIn("app_runtime_task", main_source)
+        self.assertIn("xTaskCreate(app_runtime_task", app_main_body)
+        self.assertIn("DEMO_APP_RUNTIME_TASK_STACK_SIZE", app_main_body)
+        self.assertIn("vTaskDelete(NULL)", app_main_body)
+
+        for forbidden in (
+            "app_wifi_connect(",
+            "app_mount_spiffs(",
+            "app_poll_ota_manifest_dry_run_if_due(",
+            "trigger_input_poll(",
+            "cloud_client_submit_ota_report(",
+            "while (true)",
+        ):
+            self.assertNotIn(forbidden, app_main_body)
+
     def test_ota_p3d_rollback_validation_is_default_off_and_gated(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
@@ -359,6 +381,15 @@ class EspAssetTests(unittest.TestCase):
         self.assertLess(post_confirm_pos, business_ready_pos)
         self.assertLess(business_ready_pos, mark_valid_pos)
         self.assertLess(mark_valid_pos, app_validated_report_pos)
+
+    def test_ota_p3d_app_validation_runs_in_dedicated_task(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        app_main_source = main_source.split("void app_main(void)", 1)[1]
+
+        self.assertIn("app_ota_rollback_validation_task", main_source)
+        self.assertIn("xTaskCreate(app_ota_rollback_validation_task", main_source)
+        self.assertNotIn("cloud_client_submit_ota_report", app_main_source)
+        self.assertNotIn("app_submit_ota_app_validated_report", app_main_source)
 
     def test_ota_p3d_business_hang_edge_case_has_timeout_without_mark_valid(self) -> None:
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
@@ -399,6 +430,19 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("SDKCONFIG=", script)
         self.assertIn("rollback config was not enabled", script)
         self.assertIn("CANARY_DEVICE_ID=${CANARY_DEVICE_ID:-miaoban-v1p2-002}", script)
+        self.assertNotIn("DEMO_WIFI_PASSWORD", script)
+
+    def test_compile_only_package_injects_p3d_canary_config_without_password(self) -> None:
+        script = (ROOT / "scripts" / "package_esp_compile_only.py").read_text(encoding="utf-8")
+
+        self.assertIn('--wifi-ssid", default="GMT-G60"', script)
+        self.assertIn('--server-base-url", default="http://106.54.240.51"', script)
+        self.assertIn("DEMO_WIFI_SSID", script)
+        self.assertIn("DEMO_SERVER_BASE_URL", script)
+        self.assertIn("DEMO_DEVICE_ID", script)
+        self.assertIn("DEMO_OTA_BOOT_SWITCH_ENABLED 1", script)
+        self.assertIn("DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1", script)
+        self.assertIn("CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y", script)
         self.assertNotIn("DEMO_WIFI_PASSWORD", script)
 
     def test_wifi_password_empty_preserves_stored_station_config(self) -> None:

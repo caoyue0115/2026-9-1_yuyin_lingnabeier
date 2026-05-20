@@ -45,6 +45,66 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8", newline="\n")
 
 
+def _replace_required(text: str, old: str, new: str, *, path: Path) -> str:
+    if old not in text:
+        raise SystemExit(f"missing expected text in {path}: {old}")
+    return text.replace(old, new, 1)
+
+
+def _inject_p3d_canary_config(
+    esp_dest: Path,
+    *,
+    wifi_ssid: str,
+    server_base_url: str,
+    device_id: str,
+) -> None:
+    config_path = esp_dest / "main" / "config.h"
+    if not config_path.exists():
+        return
+
+    config = config_path.read_text(encoding="utf-8")
+    config = _replace_required(
+        config,
+        '#define DEMO_WIFI_SSID           ""',
+        f'#define DEMO_WIFI_SSID           "{wifi_ssid}"',
+        path=config_path,
+    )
+    config = _replace_required(
+        config,
+        '#define DEMO_SERVER_BASE_URL     ""',
+        f'#define DEMO_SERVER_BASE_URL     "{server_base_url}"',
+        path=config_path,
+    )
+    config = _replace_required(
+        config,
+        '#define DEMO_DEVICE_ID           ""',
+        f'#define DEMO_DEVICE_ID           "{device_id}"',
+        path=config_path,
+    )
+    config = _replace_required(
+        config,
+        "#define DEMO_OTA_BOOT_SWITCH_ENABLED 0",
+        "#define DEMO_OTA_BOOT_SWITCH_ENABLED 1",
+        path=config_path,
+    )
+    config = _replace_required(
+        config,
+        "#define DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 0",
+        "#define DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1",
+        path=config_path,
+    )
+    config_path.write_text(config, encoding="utf-8", newline="\n")
+
+    sdkconfig_defaults = esp_dest / "sdkconfig.defaults"
+    if not sdkconfig_defaults.exists():
+        return
+
+    defaults = sdkconfig_defaults.read_text(encoding="utf-8")
+    if "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" not in defaults:
+        defaults = defaults.rstrip() + "\nCONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n"
+        sdkconfig_defaults.write_text(defaults, encoding="utf-8", newline="\n")
+
+
 def _inject_hardware_entrypoints(
     esp_dest: Path,
     *,
@@ -182,6 +242,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True, help="Output .tar.gz path")
     parser.add_argument("--project-version", default="v37-p3d-canary")
     parser.add_argument("--device-id", default="miaoban-v1p2-002")
+    parser.add_argument("--wifi-ssid", default="GMT-G60")
+    parser.add_argument("--server-base-url", default="http://106.54.240.51")
     parser.add_argument("--default-port", default="COM3")
     args = parser.parse_args()
 
@@ -191,6 +253,12 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="esp_compile_only_") as tmp:
         staging_root = Path(tmp)
         esp_dest = _copy_source_tree(source_root, staging_root)
+        _inject_p3d_canary_config(
+            esp_dest,
+            wifi_ssid=args.wifi_ssid,
+            server_base_url=args.server_base_url,
+            device_id=args.device_id,
+        )
         _inject_hardware_entrypoints(
             esp_dest,
             project_version=args.project_version,
