@@ -88,9 +88,17 @@ $ErrorActionPreference = "Stop"
 $ProjectVer = "{project_version}"
 $env:PROJECT_VER = $ProjectVer
 
+function Invoke-Idf {{
+    $idfCommand = Get-Command idf.py -ErrorAction Stop
+    python $idfCommand.Source @args
+    if ($LASTEXITCODE -ne 0) {{
+        throw "idf.py failed with exit code $LASTEXITCODE"
+    }}
+}}
+
 Write-Host "PROJECT_VER=$ProjectVer"
-idf.py fullclean
-idf.py -D "PROJECT_VER=$ProjectVer" build
+Invoke-Idf fullclean
+Invoke-Idf -D "PROJECT_VER=$ProjectVer" build
 
 $descriptionPath = Join-Path "build" "project_description.json"
 if (!(Test-Path $descriptionPath)) {{
@@ -108,7 +116,7 @@ if ($NoFlash) {{
     exit 0
 }}
 
-idf.py -p $Port flash monitor
+Invoke-Idf -p $Port flash monitor
 """,
     )
 
