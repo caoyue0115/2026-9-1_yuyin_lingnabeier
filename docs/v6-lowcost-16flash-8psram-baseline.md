@@ -17,3 +17,21 @@ board adaptation.
 - Keep `DEMO_OTA_BOOT_SWITCH_ENABLED` defaulting to `0`.
 - Keep `DEMO_OTA_ROLLBACK_VALIDATION_ENABLED` defaulting to `0`.
 - Do not claim customer readiness from compile-only or boot-only validation.
+
+## Stage 1 Profile
+
+The first implementation stage uses an explicit ESP-IDF defaults profile:
+
+```bash
+SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.vocat_lowcost_16m8m"
+idf.py -C esp_idf_demo build
+```
+
+Stage 1 intentionally keeps `esp_idf_demo/partitions.csv` unchanged. The 8MB
+Flash partition layout will be designed separately because it changes
+OTA/storage geometry and must not be mixed with the first 16MB Flash + 8MB PSRAM
+profile.
+
+Compile-only validation is not customer readiness. Runtime validation must still
+capture free heap, largest SPIRAM block, task stack watermarks, realtime jitter
+underruns, audio latency, OTA size, and P3c/P3d safety gates.

@@ -55,6 +55,43 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("storage,data,spiffs,,4M", normalized)
         self.assertNotIn("factory,app,factory", normalized)
 
+    def test_vocat_lowcost_16m8m_profile_is_explicit_and_keeps_safety_defaults(self) -> None:
+        profile_path = ESP_DIR / "sdkconfig.defaults.vocat_lowcost_16m8m"
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        partitions = (ESP_DIR / "partitions.csv").read_text(encoding="utf-8").replace(" ", "")
+
+        self.assertTrue(profile_path.exists())
+        profile = profile_path.read_text(encoding="utf-8")
+
+        for required in (
+            "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y",
+            "CONFIG_SPIRAM=y",
+            "CONFIG_SPIRAM_MODE_OCT=y",
+            "CONFIG_SPIRAM_TYPE_AUTO=y",
+            "CONFIG_SPIRAM_SPEED_80M=y",
+            "CONFIG_SPIRAM_USE_MALLOC=y",
+            "CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y",
+            "CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y",
+            'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"',
+        ):
+            self.assertIn(required, profile)
+
+        for forbidden in (
+            "DEMO_WIFI_PASSWORD",
+            "DEMO_WIFI_SSID",
+            "DEMO_SERVER_BASE_URL",
+            "DEMO_DEVICE_ID",
+            "DEMO_OTA_BOOT_SWITCH_ENABLED 1",
+            "DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1",
+        ):
+            self.assertNotIn(forbidden, profile)
+
+        self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_BOOT_SWITCH_ENABLED"))
+        self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_ROLLBACK_VALIDATION_ENABLED"))
+        self.assertIn("ota_0,app,ota_0,0x20000,3M", partitions)
+        self.assertIn("ota_1,app,ota_1,,3M", partitions)
+        self.assertIn("storage,data,spiffs,,4M", partitions)
+
     def test_intro_audio_asset_is_small_pcm_resource(self) -> None:
         intro = ESP_DIR / "spiffs" / "intro_1.pcm"
 
