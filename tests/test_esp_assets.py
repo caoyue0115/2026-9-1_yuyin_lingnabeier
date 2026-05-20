@@ -92,6 +92,47 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("ota_1,app,ota_1,,3M", partitions)
         self.assertIn("storage,data,spiffs,,4M", partitions)
 
+    def test_realtime_lowcost_observability_markers_are_present_without_release_boundary_changes(self) -> None:
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        partitions = (ESP_DIR / "partitions.csv").read_text(encoding="utf-8").replace(" ", "")
+        audio_source = (ESP_DIR / "main" / "audio_out.c").read_text(encoding="utf-8")
+        cloud_header = (ESP_DIR / "main" / "cloud_client.h").read_text(encoding="utf-8")
+        cloud_source = (ESP_DIR / "main" / "cloud_client.c").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        combined = "\n".join((audio_source, cloud_header, cloud_source, main_source))
+
+        for marker in (
+            "realtime_heap stage=",
+            "free_spiram",
+            "largest_spiram",
+            "cloud_decode_stack",
+            "cloud_playback_stack",
+            "audio_stream_stack",
+            "receive_queue_pending_bytes_peak",
+            "pcm_queue_pending_bytes_peak",
+        ):
+            self.assertIn(marker, combined)
+
+        self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_BOOT_SWITCH_ENABLED"))
+        self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_ROLLBACK_VALIDATION_ENABLED"))
+        self.assertIn("ota_0,app,ota_0,0x20000,3M", partitions)
+        self.assertIn("ota_1,app,ota_1,,3M", partitions)
+        self.assertIn("storage,data,spiffs,,4M", partitions)
+
+        release_logic_sources = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                ROOT / "scripts" / "build_esp_p3c_canary_artifact.sh",
+                ROOT / "scripts" / "build_esp_p3d_canary_artifact.sh",
+                ROOT / "scripts" / "ota_release_create.py",
+                ROOT / "scripts" / "ota_release_closeout.py",
+                ROOT / "scripts" / "package_esp_compile_only.py",
+                ROOT / "src" / "api" / "ota.py",
+                ROOT / "src" / "storage" / "db.py",
+            )
+        )
+        self.assertNotIn("miaoban-v1p2-003", release_logic_sources)
+
     def test_intro_audio_asset_is_small_pcm_resource(self) -> None:
         intro = ESP_DIR / "spiffs" / "intro_1.pcm"
 

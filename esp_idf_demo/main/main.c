@@ -1040,7 +1040,7 @@ submit_complete:
         audio_out_jitter_metrics_t jitter_metrics = {0};
         esp_err_t close_ret = audio_out_close_pcm_stream_with_metrics(&jitter_metrics);
         ESP_LOGI(TAG,
-                 "realtime_audio_summary session_id=%s total_bytes=%u chunk_count=%u max_gap_ms=%.1f avg_gap_ms=%.1f prebuffer_wait_ms=%.1f playback_actual_start_ms=%.1f underrun_count=%u underrun_ms=%.1f min_level=%u max_level=%u total_in=%u total_out=%u",
+                 "realtime_audio_summary session_id=%s total_bytes=%u chunk_count=%u max_gap_ms=%.1f avg_gap_ms=%.1f prebuffer_wait_ms=%.1f playback_actual_start_ms=%.1f underrun_count=%u underrun_ms=%.1f min_level=%u max_level=%u total_in=%u total_out=%u receive_queue_pending_bytes_peak=%u pcm_queue_pending_bytes_peak=%u",
                  realtime_session.session_id,
                  (unsigned)realtime_metrics.total_audio_bytes,
                  (unsigned)realtime_metrics.chunk_count,
@@ -1056,7 +1056,9 @@ submit_complete:
                  (unsigned)jitter_metrics.min_level,
                  (unsigned)jitter_metrics.max_level,
                  (unsigned)jitter_metrics.total_in,
-                 (unsigned)jitter_metrics.total_out);
+                 (unsigned)jitter_metrics.total_out,
+                 (unsigned)realtime_metrics.receive_queue_pending_bytes_peak,
+                 (unsigned)realtime_metrics.pcm_queue_pending_bytes_peak);
         if (ret == ESP_OK && close_ret != ESP_OK) {
             ret = close_ret;
         }

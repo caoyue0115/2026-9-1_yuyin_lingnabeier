@@ -161,8 +161,12 @@ typedef struct {
     uint32_t seq_gap_count;
     size_t receive_queue_peak;
     uint32_t receive_queue_full_count;
+    size_t receive_queue_pending_bytes;
+    size_t receive_queue_pending_bytes_peak;
     size_t decode_queue_peak;
     uint32_t decode_queue_full_count;
+    size_t pcm_queue_pending_bytes;
+    size_t pcm_queue_pending_bytes_peak;
     uint32_t decode_packet_count;
     uint32_t decode_fail_count;
     int64_t decode_total_us;

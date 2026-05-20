@@ -13,6 +13,7 @@
 #include "esp_audio_dec.h"
 #include "esp_audio_enc.h"
 #include "esp_http_client.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_opus_dec.h"
 #include "esp_opus_enc.h"
@@ -865,6 +866,51 @@ static void cloud_metrics_update_queue_peak(size_t *peak, QueueHandle_t queue)
     }
 }
 
+static void cloud_metrics_add_pending_bytes(size_t *pending, size_t *peak, size_t bytes)
+{
+    if (pending == NULL || peak == NULL || bytes == 0) {
+        return;
+    }
+    *pending += bytes;
+    if (*pending > *peak) {
+        *peak = *pending;
+    }
+}
+
+static void cloud_metrics_sub_pending_bytes(size_t *pending, size_t bytes)
+{
+    if (pending == NULL || bytes == 0) {
+        return;
+    }
+    if (*pending >= bytes) {
+        *pending -= bytes;
+    } else {
+        *pending = 0;
+    }
+}
+
+static void cloud_log_heap_snapshot(const char *stage)
+{
+    ESP_LOGI(TAG,
+             "realtime_heap stage=%s free_8bit=%u largest_8bit=%u free_spiram=%u largest_spiram=%u",
+             stage != NULL ? stage : "unknown",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+}
+
+static void cloud_log_stack_watermark(const char *stack_log_name, uint32_t configured_stack_bytes)
+{
+    UBaseType_t high_water_words = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(TAG,
+             "%s high_water_words=%u high_water_bytes=%u configured_stack_bytes=%u",
+             stack_log_name,
+             (unsigned)high_water_words,
+             (unsigned)(high_water_words * sizeof(StackType_t)),
+             (unsigned)configured_stack_bytes);
+}
+
 static esp_err_t cloud_queue_send_ptr(QueueHandle_t queue,
                                       void *item_ptr,
                                       int timeout_ms)
@@ -997,6 +1043,9 @@ static esp_err_t cloud_consume_framed_audio_packets(cloud_frame_stream_state_t *
         }
         if (metrics != NULL) {
             cloud_metrics_update_queue_peak(&metrics->receive_queue_peak, encoded_queue);
+            cloud_metrics_add_pending_bytes(&metrics->receive_queue_pending_bytes,
+                                            &metrics->receive_queue_pending_bytes_peak,
+                                            packet->payload_len);
         }
         offset += frame_len;
     }
@@ -1189,6 +1238,9 @@ static esp_err_t cloud_enqueue_pcm_callback(const uint8_t *chunk,
     }
     if (runtime->metrics != NULL) {
         cloud_metrics_update_queue_peak(&runtime->metrics->decode_queue_peak, runtime->pcm_queue);
+        cloud_metrics_add_pending_bytes(&runtime->metrics->pcm_queue_pending_bytes,
+                                        &runtime->metrics->pcm_queue_pending_bytes_peak,
+                                        packet->payload_len);
     }
     return ESP_OK;
 }
@@ -1211,8 +1263,11 @@ static esp_err_t cloud_forward_terminal_packet(QueueHandle_t queue,
 
 static void cloud_decode_task(void *arg)
 {
+    cloud_log_heap_snapshot("cloud_decode_task_start");
     cloud_stream_runtime_t *runtime = (cloud_stream_runtime_t *)arg;
     if (runtime == NULL || runtime->encoded_queue == NULL || runtime->pcm_queue == NULL) {
+        cloud_log_stack_watermark("cloud_decode_stack", DEMO_REALTIME_AUDIO_DECODE_TASK_STACK_SIZE);
+        cloud_log_heap_snapshot("cloud_decode_task_exit");
         vTaskDelete(NULL);
         return;
     }
@@ -1224,6 +1279,10 @@ static void cloud_decode_task(void *arg)
         }
         if (packet == NULL) {
             continue;
+        }
+        if (runtime->metrics != NULL) {
+            cloud_metrics_sub_pending_bytes(&runtime->metrics->receive_queue_pending_bytes,
+                                            packet->payload_len);
         }
 
         if (packet->type == CLOUD_STREAM_EOF) {
@@ -1278,6 +1337,9 @@ static void cloud_decode_task(void *arg)
                     cloud_pcm_packet_free(pcm_packet);
                 } else if (runtime->metrics != NULL) {
                     cloud_metrics_update_queue_peak(&runtime->metrics->decode_queue_peak, runtime->pcm_queue);
+                    cloud_metrics_add_pending_bytes(&runtime->metrics->pcm_queue_pending_bytes,
+                                                    &runtime->metrics->pcm_queue_pending_bytes_peak,
+                                                    pcm_packet->payload_len);
                 }
             }
         }
@@ -1303,13 +1365,18 @@ static void cloud_decode_task(void *arg)
 
     runtime->decode_done = true;
     runtime->decode_task = NULL;
+    cloud_log_stack_watermark("cloud_decode_stack", DEMO_REALTIME_AUDIO_DECODE_TASK_STACK_SIZE);
+    cloud_log_heap_snapshot("cloud_decode_task_exit");
     vTaskDelete(NULL);
 }
 
 static void cloud_playback_task(void *arg)
 {
+    cloud_log_heap_snapshot("cloud_playback_task_start");
     cloud_stream_runtime_t *runtime = (cloud_stream_runtime_t *)arg;
     if (runtime == NULL || runtime->pcm_queue == NULL || runtime->callback == NULL) {
+        cloud_log_stack_watermark("cloud_playback_stack", DEMO_REALTIME_AUDIO_PLAYBACK_TASK_STACK_SIZE);
+        cloud_log_heap_snapshot("cloud_playback_task_exit");
         vTaskDelete(NULL);
         return;
     }
@@ -1321,6 +1388,10 @@ static void cloud_playback_task(void *arg)
         }
         if (packet == NULL) {
             continue;
+        }
+        if (runtime->metrics != NULL) {
+            cloud_metrics_sub_pending_bytes(&runtime->metrics->pcm_queue_pending_bytes,
+                                            packet->payload_len);
         }
 
         if (packet->type == CLOUD_STREAM_EOF) {
@@ -1348,6 +1419,8 @@ static void cloud_playback_task(void *arg)
 
     runtime->playback_done = true;
     runtime->playback_task = NULL;
+    cloud_log_stack_watermark("cloud_playback_stack", DEMO_REALTIME_AUDIO_PLAYBACK_TASK_STACK_SIZE);
+    cloud_log_heap_snapshot("cloud_playback_task_exit");
     vTaskDelete(NULL);
 }
 
@@ -2634,6 +2707,7 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
              "Opening realtime audio stream url=%s accept_audio_format=%s",
              audio_stream_url,
              DEMO_REALTIME_AUDIO_ACCEPT_FORMATS);
+    cloud_log_heap_snapshot("stream_open_before");
 
     const int64_t connect_start_us = esp_timer_get_time();
     esp_err_t ret = esp_http_client_open(client, 0);
@@ -2730,6 +2804,7 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
                  "%s",
                  framed_packetization ? "framed-v1" : "legacy");
     }
+    cloud_log_heap_snapshot("headers_validated");
 
     if (xTaskCreate(cloud_decode_task,
                     "cloud_decode",
@@ -2832,6 +2907,9 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
                                                DEMO_REALTIME_AUDIO_QUEUE_SEND_TIMEOUT_MS);
                     if (ret == ESP_OK && metrics != NULL) {
                         cloud_metrics_update_queue_peak(&metrics->receive_queue_peak, runtime.encoded_queue);
+                        cloud_metrics_add_pending_bytes(&metrics->receive_queue_pending_bytes,
+                                                        &metrics->receive_queue_pending_bytes_peak,
+                                                        packet->payload_len);
                     }
                     if (ret != ESP_OK) {
                         if (metrics != NULL) {
@@ -2892,11 +2970,16 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
         }
     }
 
+    cloud_log_heap_snapshot("stream_cleanup_before");
     cloud_frame_stream_cleanup(frame_state);
     cloud_opus_decoder_cleanup(&runtime.opus_decoder);
     if (runtime.encoded_queue != NULL) {
         cloud_encoded_packet_t *pending_packet = NULL;
         while (xQueueReceive(runtime.encoded_queue, &pending_packet, 0) == pdTRUE) {
+            if (metrics != NULL && pending_packet != NULL) {
+                cloud_metrics_sub_pending_bytes(&metrics->receive_queue_pending_bytes,
+                                                pending_packet->payload_len);
+            }
             cloud_encoded_packet_free(pending_packet);
         }
         vQueueDelete(runtime.encoded_queue);
@@ -2904,6 +2987,10 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
     if (runtime.pcm_queue != NULL) {
         cloud_pcm_packet_t *pending_packet = NULL;
         while (xQueueReceive(runtime.pcm_queue, &pending_packet, 0) == pdTRUE) {
+            if (metrics != NULL && pending_packet != NULL) {
+                cloud_metrics_sub_pending_bytes(&metrics->pcm_queue_pending_bytes,
+                                                pending_packet->payload_len);
+            }
             cloud_pcm_packet_free(pending_packet);
         }
         vQueueDelete(runtime.pcm_queue);
@@ -2916,6 +3003,7 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
     free(chunk);
     free(frame_state);
     free(audio_headers);
+    cloud_log_heap_snapshot("stream_cleanup_after");
 
     if (!saw_first_chunk) {
         return DEMO_CLOUD_ERR_AUDIO_STREAM_EARLY_EOF;

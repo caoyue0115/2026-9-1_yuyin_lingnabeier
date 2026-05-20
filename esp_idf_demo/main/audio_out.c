@@ -11,6 +11,7 @@
 #include "bsp/esp_vocat.h"
 #include "esp_codec_dev.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -110,6 +111,28 @@ static void audio_out_unlock(void)
     if (s_audio_out_mutex != NULL) {
         xSemaphoreGiveRecursive(s_audio_out_mutex);
     }
+}
+
+static void audio_out_log_heap_snapshot(const char *stage)
+{
+    ESP_LOGI(TAG,
+             "realtime_heap stage=%s free_8bit=%u largest_8bit=%u free_spiram=%u largest_spiram=%u",
+             stage != NULL ? stage : "unknown",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+}
+
+static void audio_out_log_stack_watermark(const char *stack_log_name, uint32_t configured_stack_bytes)
+{
+    UBaseType_t high_water_words = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(TAG,
+             "%s high_water_words=%u high_water_bytes=%u configured_stack_bytes=%u",
+             stack_log_name,
+             (unsigned)high_water_words,
+             (unsigned)(high_water_words * sizeof(StackType_t)),
+             (unsigned)configured_stack_bytes);
 }
 
 static esp_err_t audio_buffer_init(audio_buffer_t *buffer, size_t initial_cap)
@@ -572,6 +595,8 @@ static void audio_stream_task(void *arg)
 {
     (void)arg;
 
+    audio_out_log_heap_snapshot("audio_stream_task_start");
+
     uint8_t scratch[DEMO_REALTIME_AUDIO_JITTER_READ_BYTES];
     size_t scratch_len = 0;
     bool prebuffer_done = false;
@@ -718,6 +743,8 @@ done:
              (double)underrun_us / 1000.0,
              (double)prebuffer_wait_us / 1000.0,
              esp_err_to_name(task_result));
+    audio_out_log_stack_watermark("audio_stream_stack", 4096);
+    audio_out_log_heap_snapshot("audio_stream_task_exit");
     vTaskDelete(NULL);
 }
 
@@ -832,12 +859,14 @@ esp_err_t audio_out_write_pcm_chunk_buffered(const uint8_t *pcm_bytes,
     }
 
     if (s_audio_out_state.jitter_ringbuf == NULL) {
+        audio_out_log_heap_snapshot("jitter_ringbuffer_create_before");
         s_audio_out_state.jitter_ringbuf =
             xRingbufferCreate(DEMO_REALTIME_AUDIO_JITTER_BUFFER_BYTES, RINGBUF_TYPE_BYTEBUF);
         if (s_audio_out_state.jitter_ringbuf == NULL) {
             audio_out_unlock();
             return ESP_ERR_NO_MEM;
         }
+        audio_out_log_heap_snapshot("jitter_ringbuffer_create_after");
     }
 
     if (!s_audio_out_state.stream_task_started) {
@@ -1025,6 +1054,7 @@ esp_err_t audio_out_close_pcm_stream_with_metrics(audio_out_jitter_metrics_t *me
     }
 
     ret = audio_out_close_locked();
+    audio_out_log_heap_snapshot("audio_close_cleanup_done");
     audio_out_unlock();
     return ret;
 }
