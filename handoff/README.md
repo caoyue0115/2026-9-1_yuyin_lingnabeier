@@ -7,8 +7,9 @@
 1. [`稳定交接包说明.md`](稳定交接包说明.md)
 2. [`快速启动手册.md`](快速启动手册.md)
 3. [`联调排障手册.md`](联调排障手册.md)
-4. [`系统架构图.md`](系统架构图.md)
-5. [`已知问题清单.md`](已知问题清单.md)
+4. [`硬件compile-only打包手册.md`](硬件compile-only打包手册.md)
+5. [`系统架构图.md`](系统架构图.md)
+6. [`已知问题清单.md`](已知问题清单.md)
 
 当前交接对象主要有两类：
 
@@ -22,6 +23,8 @@
 - 命名：`esp_compile_only_YYYY-MM-DD_vNN.tar.gz`
 - 内容：只包含 `esp_idf_demo/` 工程源码、`CMakeLists.txt`、`sdkconfig`、`partitions.csv`、`spiffs/` 和 ESP-IDF 组件依赖声明
 - 用途：同事解压后在本机 ESP-IDF 环境执行 `idf.py build` / `idf.py flash monitor`
+
+具体打包结构、排除项、校验和 scp 模板见 [`硬件compile-only打包手册.md`](硬件compile-only打包手册.md)。P3d 002 canary 包以 `tmp/esp_compile_only_v36_p3d_002_20260520.tar.gz` 的结构为固定参考：包内根目录直接是 `esp_idf_demo/`，不能是 bin-only，也不能多包一层版本目录。
 
 不要把 flash-only 包作为默认交付物。flash-only 只用于已经明确“不需要编译、只要快速烧录采日志”的临时场景。
 
