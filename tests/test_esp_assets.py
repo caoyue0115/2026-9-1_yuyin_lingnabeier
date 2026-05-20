@@ -3,6 +3,9 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 import re
+import subprocess
+import tarfile
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +78,70 @@ class EspAssetTests(unittest.TestCase):
             self.assertTrue(prompt.exists())
             self.assertGreater(prompt.stat().st_size, 0)
             self.assertLessEqual(prompt.stat().st_size, 64 * 1024)
+
+    def test_compile_only_packager_injects_hardware_entrypoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_root = tmp_path / "source"
+            esp_source = source_root / "esp_idf_demo"
+            (esp_source / "main").mkdir(parents=True)
+            (esp_source / "spiffs").mkdir()
+            (esp_source / "build").mkdir()
+            (esp_source / "managed_components").mkdir()
+            (esp_source / "main" / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            (esp_source / "CMakeLists.txt").write_text("project(esp_idf_demo)\n", encoding="utf-8")
+            (esp_source / "build" / "stale.txt").write_text("no\n", encoding="utf-8")
+            (esp_source / "managed_components" / "stale.txt").write_text("no\n", encoding="utf-8")
+            (esp_source / ".env").write_text("SECRET=1\n", encoding="utf-8")
+
+            output = tmp_path / "esp_compile_only_v37_p3d_002_20260520.tar.gz"
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(ROOT / "scripts" / "package_esp_compile_only.py"),
+                    "--source",
+                    str(source_root),
+                    "--output",
+                    str(output),
+                    "--project-version",
+                    "v37-p3d-canary",
+                    "--device-id",
+                    "miaoban-v1p2-002",
+                    "--default-port",
+                    "COM3",
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertIn("sha256=", result.stdout)
+            with tarfile.open(output, "r:gz") as archive:
+                names = set(archive.getnames())
+                ps1 = archive.extractfile("esp_idf_demo/build_flash_p3d_002.ps1")
+                cmd = archive.extractfile("esp_idf_demo/build_flash_p3d_002.cmd")
+                build_info = archive.extractfile("esp_idf_demo/BUILD_INFO.txt")
+                assert ps1 is not None
+                assert cmd is not None
+                assert build_info is not None
+                ps1_text = ps1.read().decode("utf-8")
+                cmd_text = cmd.read().decode("utf-8")
+                build_info_text = build_info.read().decode("utf-8")
+
+            self.assertIn("esp_idf_demo/main/main.c", names)
+            self.assertIn("esp_idf_demo/build_flash_p3d_002.sh", names)
+            self.assertIn("esp_idf_demo/build_flash_p3d_002.ps1", names)
+            self.assertIn("esp_idf_demo/build_flash_p3d_002.cmd", names)
+            self.assertIn("esp_idf_demo/BUILD_INFO.txt", names)
+            self.assertNotIn("esp_idf_demo/build/stale.txt", names)
+            self.assertNotIn("esp_idf_demo/managed_components/stale.txt", names)
+            self.assertNotIn("esp_idf_demo/.env", names)
+            self.assertIn('$ProjectVer = "v37-p3d-canary"', ps1_text)
+            self.assertIn('idf.py -D "PROJECT_VER=$ProjectVer" build', ps1_text)
+            self.assertIn("Wrong project_version", ps1_text)
+            self.assertIn("build_flash_p3d_002.ps1", cmd_text)
+            self.assertIn("App version:      v37-p3d-canary", build_info_text)
+            self.assertIn("app_version=v37-p3d-canary", build_info_text)
 
     def test_realtime_intro_config_is_explicit(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
