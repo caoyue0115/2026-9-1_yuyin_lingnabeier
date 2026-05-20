@@ -44,6 +44,7 @@ static int64_t s_next_ota_manifest_check_us = 0;
 #define APP_OTA_P3C_KEY_LABEL     "label"
 #define APP_OTA_P3C_KEY_ADDRESS   "addr"
 #define APP_OTA_P3C_KEY_SHA256    "sha"
+#define APP_OTA_P3C_KEY_LAST_STAGE "last"
 
 typedef enum {
     APP_STATE_IDLE = 0,
@@ -1238,6 +1239,7 @@ typedef struct {
     char version[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
     char partition_label[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
     char sha256[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char last_stage[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
     uint32_t partition_address;
 } app_ota_p3c_pending_t;
 
@@ -1328,6 +1330,9 @@ static esp_err_t app_ota_p3c_store_pending(const cloud_ota_update_t *update,
         ret = nvs_set_str(handle, APP_OTA_P3C_KEY_SHA256, verify->sha256);
     }
     if (ret == ESP_OK) {
+        ret = nvs_set_str(handle, APP_OTA_P3C_KEY_LAST_STAGE, "boot_switch_pending");
+    }
+    if (ret == ESP_OK) {
         ret = nvs_commit(handle);
     }
     nvs_close(handle);
@@ -1371,12 +1376,45 @@ static esp_err_t app_ota_p3c_load_pending(app_ota_p3c_pending_t *pending)
         len = sizeof(pending->sha256);
         ret = nvs_get_str(handle, APP_OTA_P3C_KEY_SHA256, pending->sha256, &len);
     }
+    if (ret == ESP_OK) {
+        len = sizeof(pending->last_stage);
+        esp_err_t stage_ret = nvs_get_str(handle, APP_OTA_P3C_KEY_LAST_STAGE, pending->last_stage, &len);
+        if (stage_ret == ESP_ERR_NVS_NOT_FOUND) {
+            pending->last_stage[0] = '\0';
+        } else {
+            ret = stage_ret;
+        }
+    }
     nvs_close(handle);
     if (ret != ESP_OK) {
         return ret;
     }
     pending->pending = true;
     return ESP_OK;
+}
+
+static esp_err_t app_ota_p3c_store_last_stage(const char *last_stage)
+{
+    if (last_stage == NULL || last_stage[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle = 0;
+    esp_err_t ret = nvs_open(APP_OTA_P3C_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    uint8_t pending_flag = 0;
+    ret = nvs_get_u8(handle, APP_OTA_P3C_KEY_PENDING, &pending_flag);
+    if (ret == ESP_OK && pending_flag != 0) {
+        ret = nvs_set_str(handle, APP_OTA_P3C_KEY_LAST_STAGE, last_stage);
+        if (ret == ESP_OK) {
+            ret = nvs_commit(handle);
+        }
+    }
+    nvs_close(handle);
+    return ret;
 }
 
 static esp_err_t app_ota_find_partition_from_verify(const cloud_ota_artifact_verify_t *verify,
@@ -1579,6 +1617,7 @@ static esp_err_t app_submit_ota_boot_report(const char *stage,
                                             const char *boot_partition_after_set,
                                             const char *running_partition_after_reboot,
                                             const char *reboot_reason,
+                                            const char *last_stage,
                                             int *http_status)
 {
     cloud_ota_report_t report = {
@@ -1596,6 +1635,35 @@ static esp_err_t app_submit_ota_boot_report(const char *stage,
         .boot_partition_after_set = boot_partition_after_set,
         .running_partition_after_reboot = running_partition_after_reboot,
         .reboot_reason = reboot_reason,
+        .last_stage = last_stage,
+        .verify = NULL,
+    };
+    return cloud_client_submit_ota_report(&report, http_status);
+}
+
+static esp_err_t app_submit_ota_rollback_recovered_report(const app_ota_p3c_pending_t *pending,
+                                                          const char *app_version,
+                                                          const char *running_partition,
+                                                          const char *reboot_reason,
+                                                          int *http_status)
+{
+    if (pending == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cloud_ota_report_t report = {
+        .stage = "ota_rollback",
+        .ok = true,
+        .target = "esp32s3",
+        .from_version = app_version,
+        .to_version = pending->version,
+        .release_id = pending->release_id,
+        .free_heap = (int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+        .rssi = 0,
+        .running_partition_after_reboot = running_partition,
+        .reboot_reason = reboot_reason,
+        .previous_partition = pending->partition_label,
+        .last_stage = pending->last_stage,
         .verify = NULL,
     };
     return cloud_client_submit_ota_report(&report, http_status);
@@ -1624,6 +1692,7 @@ static esp_err_t app_submit_ota_app_validated_report(const app_ota_p3c_pending_t
                                       NULL,
                                       NULL,
                                       app_reset_reason_to_string(esp_reset_reason()),
+                                      NULL,
                                       http_status);
 }
 #endif
@@ -1701,6 +1770,7 @@ static void app_ota_schedule_boot_switch(const cloud_ota_update_t *update,
                                                       app_partition_label_or_empty(boot_after),
                                                       NULL,
                                                       NULL,
+                                                      NULL,
                                                       &report_http_status);
     if (report_ret == ESP_OK) {
         ESP_LOGI(TAG,
@@ -1718,6 +1788,7 @@ static void app_ota_schedule_boot_switch(const cloud_ota_update_t *update,
              "stage=ota_reboot event=scheduled release_id=%s update_partition=%s reboot_scheduled=1",
              update->release_id,
              update_partition->label);
+    (void)app_ota_p3c_store_last_stage("boot_switch_reboot_scheduled");
     esp_restart();
     return;
 
@@ -1741,6 +1812,7 @@ fail:
                                    error_code != NULL ? error_code : esp_err_to_name(ret),
                                    error_message != NULL ? error_message : "ota boot switch failed",
                                    app_partition_label_or_empty(boot_before),
+                                   NULL,
                                    NULL,
                                    NULL,
                                    NULL,
@@ -1777,6 +1849,7 @@ static void app_ota_post_reboot_confirm_if_pending(const char *app_version)
     const bool ok = running != NULL &&
                     running->address == pending.partition_address &&
                     strcmp(running->label, pending.partition_label) == 0;
+    (void)app_ota_p3c_store_last_stage(ok ? "post_reboot_confirm_start" : "rollback_recovered");
     ESP_LOGI(TAG,
              "stage=ota_post_reboot_confirm event=start release_id=%s expected_partition=%s expected_address=0x%lx running_partition_after_reboot=%s reboot_reason=%s",
              pending.release_id,
@@ -1813,6 +1886,7 @@ static void app_ota_post_reboot_confirm_if_pending(const char *app_version)
                                    NULL,
                                    running_label,
                                    reboot_reason,
+                                   ok ? "post_reboot_confirm_start" : "rollback_recovered",
                                    &report_http_status);
     if (report_ret == ESP_OK) {
         ESP_LOGI(TAG,
@@ -1822,6 +1896,7 @@ static void app_ota_post_reboot_confirm_if_pending(const char *app_version)
                  pending.release_id);
 #if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
         if (ok) {
+            (void)app_ota_p3c_store_last_stage("post_reboot_confirm_reported");
             s_ota_rollback_pending = pending;
             s_ota_rollback_validation_pending = true;
             s_ota_rollback_business_ready = false;
@@ -1836,8 +1911,32 @@ static void app_ota_post_reboot_confirm_if_pending(const char *app_version)
                 ESP_LOGW(TAG,
                          "stage=ota_app_validation_timeout event=task_start_failed release_id=%s",
                          pending.release_id);
+            } else {
+                (void)app_ota_p3c_store_last_stage("app_validation_waiting");
             }
         } else {
+            int recovered_http_status = 0;
+            esp_err_t recovered_ret =
+                app_submit_ota_rollback_recovered_report(&pending,
+                                                         app_version,
+                                                         running_label,
+                                                         reboot_reason,
+                                                         &recovered_http_status);
+            if (recovered_ret == ESP_OK) {
+                ESP_LOGI(TAG,
+                         "stage=ota_rollback event=recovered previous_release_id=%s previous_partition=%s running_partition_after_reboot=%s last_stage=%s http_status=%d",
+                         pending.release_id,
+                         pending.partition_label,
+                         running_label[0] != '\0' ? running_label : "(empty)",
+                         pending.last_stage[0] != '\0' ? pending.last_stage : "(empty)",
+                         recovered_http_status);
+            } else {
+                ESP_LOGW(TAG,
+                         "stage=ota_rollback event=report_failed previous_release_id=%s err=%s http_status=%d",
+                         pending.release_id,
+                         esp_err_to_name(recovered_ret),
+                         recovered_http_status);
+            }
             (void)app_ota_p3c_clear_pending();
         }
 #else
@@ -1869,6 +1968,7 @@ static void app_ota_rollback_note_business_ready(const char *app_version)
         return;
     }
     s_ota_rollback_business_ready = true;
+    (void)app_ota_p3c_store_last_stage("app_validation_start");
     ESP_LOGI(TAG,
              "stage=ota_app_validation event=start release_id=%s running_partition=%s",
              s_ota_rollback_pending.release_id,
@@ -1907,6 +2007,7 @@ static void app_ota_rollback_note_business_ready(const char *app_version)
                  s_ota_rollback_pending.release_id);
     }
     if (ret == ESP_OK && report_ret == ESP_OK) {
+        (void)app_ota_p3c_store_last_stage("app_validation_done");
         (void)app_ota_p3c_clear_pending();
         s_ota_rollback_validation_pending = false;
     }
@@ -1921,6 +2022,7 @@ static void app_ota_rollback_validation_timeout_task(void *arg)
                  "stage=ota_app_validation event=timeout release_id=%s timeout_ms=%d",
                  s_ota_rollback_pending.release_id,
                  DEMO_OTA_ROLLBACK_VALIDATION_TIMEOUT_MS);
+        (void)app_ota_p3c_store_last_stage("app_validation_timeout");
         esp_restart();
     }
     s_ota_rollback_timeout_task_handle = NULL;
@@ -2231,6 +2333,9 @@ void app_main(void)
         ESP_LOGE(TAG, "Wi-Fi initialization failed; stopping demo");
         return;
     }
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
+    (void)app_ota_p3c_store_last_stage("wifi_connected");
+#endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
 
 #if DEMO_OTA_BOOT_SWITCH_ENABLED
     BaseType_t ota_confirm_task_ok = xTaskCreate(app_ota_post_reboot_confirm_task,
@@ -2244,11 +2349,17 @@ void app_main(void)
     }
 #endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
 
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
+    (void)app_ota_p3c_store_last_stage("trigger_init_start");
+#endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
     if (trigger_input_init(&trigger) != ESP_OK) {
         app_set_state(&s_app_state, APP_STATE_ERROR);
         ESP_LOGE(TAG, "Trigger initialization failed; stopping demo");
         return;
     }
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
+    (void)app_ota_p3c_store_last_stage("trigger_init_done");
+#endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
     app_set_state(&s_app_state, APP_STATE_IDLE);
 #if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
     const esp_app_desc_t *rollback_app_desc = esp_app_get_description();

@@ -229,6 +229,8 @@ class OtaApiTests(unittest.TestCase):
                 boot_partition_after_set="ota_1",
                 running_partition_after_reboot="ota_1",
                 reboot_reason="software_reset",
+                previous_partition="ota_1",
+                last_stage="app_validation_timeout",
             )
         )
 
@@ -247,6 +249,8 @@ class OtaApiTests(unittest.TestCase):
         self.assertIn('"boot_partition_after_set": "ota_1"', report["payload_json"])
         self.assertIn('"running_partition_after_reboot": "ota_1"', report["payload_json"])
         self.assertIn('"reboot_reason": "software_reset"', report["payload_json"])
+        self.assertIn('"previous_partition": "ota_1"', report["payload_json"])
+        self.assertIn('"last_stage": "app_validation_timeout"', report["payload_json"])
 
 
 if __name__ == "__main__":

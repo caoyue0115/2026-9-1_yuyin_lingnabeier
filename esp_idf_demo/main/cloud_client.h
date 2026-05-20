@@ -114,6 +114,8 @@ typedef struct {
     const char *boot_partition_after_set;
     const char *running_partition_after_reboot;
     const char *reboot_reason;
+    const char *previous_partition;
+    const char *last_stage;
     const cloud_ota_artifact_verify_t *verify;
 } cloud_ota_report_t;
 

@@ -2204,6 +2204,12 @@ esp_err_t cloud_client_submit_ota_report(const cloud_ota_report_t *report,
     if (cloud_json_safe_string(report->reboot_reason) != NULL) {
         cJSON_AddStringToObject(root, "reboot_reason", report->reboot_reason);
     }
+    if (cloud_json_safe_string(report->previous_partition) != NULL) {
+        cJSON_AddStringToObject(root, "previous_partition", report->previous_partition);
+    }
+    if (cloud_json_safe_string(report->last_stage) != NULL) {
+        cJSON_AddStringToObject(root, "last_stage", report->last_stage);
+    }
     if (report->verify != NULL) {
         cJSON_AddNumberToObject(root, "http_status", report->verify->http_status);
         cJSON_AddNumberToObject(root, "bytes_read", report->verify->bytes_read);

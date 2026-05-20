@@ -2,13 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC_DIR="${SRC_DIR:-/tmp/v36_p3d_artifact_src}"
-BUILD_DIR="${BUILD_DIR:-/tmp/v36_p3d_artifact_build}"
-OUT_BIN="${OUT_BIN:-${ROOT_DIR}/tmp/esp_idf_demo_v36_p3d_002_20260519.bin}"
+SRC_DIR="${SRC_DIR:-/tmp/v37_p3d_artifact_src}"
+BUILD_DIR="${BUILD_DIR:-/tmp/v37_p3d_artifact_build}"
+OUT_BIN="${OUT_BIN:-${ROOT_DIR}/tmp/esp_idf_demo_v37_p3d_002_20260520.bin}"
 
 IDF_PATH="${IDF_PATH:-/data/esp/esp-idf-v5.5.4-full}"
 IDF_TOOLS_PATH="${IDF_TOOLS_PATH:-/data/esp/tools}"
-PROJECT_VER=${PROJECT_VER:-v36-p3d-canary}
+PROJECT_VER=${PROJECT_VER:-v37-p3d-canary}
 
 CANARY_WIFI_SSID="${CANARY_WIFI_SSID:-GMT-G60}"
 CANARY_SERVER_BASE_URL="${CANARY_SERVER_BASE_URL:-http://106.54.240.51}"

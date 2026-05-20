@@ -46,6 +46,8 @@ class OtaReportRequest(BaseModel):
     boot_partition_after_set: str | None = None
     running_partition_after_reboot: str | None = None
     reboot_reason: str | None = None
+    previous_partition: str | None = None
+    last_stage: str | None = None
 
 
 def _version_key(version: str | None) -> tuple[int, ...]:

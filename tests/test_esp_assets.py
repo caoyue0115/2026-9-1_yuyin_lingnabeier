@@ -295,16 +295,33 @@ class EspAssetTests(unittest.TestCase):
 
         self.assertIn("app_ota_rollback_validation_timeout_task", main_source)
         self.assertIn("stage=ota_app_validation event=timeout", main_source)
+        self.assertIn("app_validation_timeout", main_source)
         self.assertIn("DEMO_OTA_ROLLBACK_VALIDATION_TIMEOUT_MS", main_source)
         self.assertIn("esp_restart()", main_source)
         timeout_pos = main_source.index("stage=ota_app_validation event=timeout")
         mark_valid_pos = main_source.index("esp_ota_mark_app_valid_cancel_rollback")
         self.assertLess(mark_valid_pos, timeout_pos)
 
+    def test_ota_p3d_persists_breadcrumb_and_reports_rollback_recovered(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        cloud_header = (ESP_DIR / "main" / "cloud_client.h").read_text(encoding="utf-8")
+        cloud_source = (ESP_DIR / "main" / "cloud_client.c").read_text(encoding="utf-8")
+
+        self.assertIn("APP_OTA_P3C_KEY_LAST_STAGE", main_source)
+        self.assertIn("app_ota_p3c_store_last_stage", main_source)
+        self.assertIn("boot_switch_reboot_scheduled", main_source)
+        self.assertIn("post_reboot_confirm_reported", main_source)
+        self.assertIn("app_validation_waiting", main_source)
+        self.assertIn("stage=ota_rollback event=recovered", main_source)
+        self.assertIn("previous_partition", cloud_header)
+        self.assertIn("last_stage", cloud_header)
+        self.assertIn('"previous_partition"', cloud_source)
+        self.assertIn('"last_stage"', cloud_source)
+
     def test_p3d_canary_build_script_enables_rollback_without_password(self) -> None:
         script = (ROOT / "scripts" / "build_esp_p3d_canary_artifact.sh").read_text(encoding="utf-8")
 
-        self.assertIn("PROJECT_VER=${PROJECT_VER:-v36-p3d-canary}", script)
+        self.assertIn("PROJECT_VER=${PROJECT_VER:-v37-p3d-canary}", script)
         self.assertIn("DEMO_OTA_BOOT_SWITCH_ENABLED 1", script)
         self.assertIn("DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1", script)
         self.assertIn("CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y", script)
