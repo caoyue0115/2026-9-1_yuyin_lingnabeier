@@ -133,6 +133,14 @@ static void app_log_runtime_config(void)
 {
     ESP_LOGI(TAG, "Runtime config:");
     ESP_LOGI(TAG, "  board=%s %s", DEMO_BOARD_NAME, DEMO_BOARD_REVISION);
+    ESP_LOGI(TAG,
+             "  board_rev=%s target_profile=%s audio_pcb_rev=%s audio_i2s_din_gpio=%d audio_pa_gpio=%d audio_gpio48_enable=%d",
+             DEMO_BOARD_REVISION,
+             DEMO_TARGET_PROFILE,
+             DEMO_BOARD_AUDIO_PCB_REVISION,
+             (int)DEMO_AUDIO_I2S_DIN_GPIO,
+             (int)DEMO_AUDIO_PA_GPIO,
+             DEMO_AUDIO_GPIO48_ENABLE);
     ESP_LOGI(TAG, "  trigger_source=%s", trigger_input_source_name(trigger_input_configured_source()));
     ESP_LOGI(TAG, "  wifi_ssid=%s", DEMO_WIFI_SSID);
     ESP_LOGI(TAG, "  server_base_url=%s", DEMO_SERVER_BASE_URL);

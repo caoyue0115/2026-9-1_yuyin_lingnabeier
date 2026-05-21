@@ -1,5 +1,6 @@
 #include "audio_out.h"
 
+#include "board_audio.h"
 #include "config.h"
 
 #include <stdbool.h>
@@ -8,7 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "bsp/esp_vocat.h"
 #include "esp_codec_dev.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
@@ -369,14 +369,14 @@ static esp_err_t audio_install_output_locked(uint32_t sample_rate)
         return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t ret = bsp_audio_init(NULL);
+    esp_err_t ret = board_audio_init(NULL);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize ESP-VoCat audio bus: %s", esp_err_to_name(ret));
         return ret;
     }
 
     if (!s_audio_out_state.initialized) {
-        s_audio_out_state.speaker_handle = bsp_audio_codec_speaker_init();
+        s_audio_out_state.speaker_handle = board_audio_codec_speaker_init();
         if (s_audio_out_state.speaker_handle == NULL) {
             ESP_LOGE(TAG, "Failed to initialize ESP-VoCat speaker codec");
             return ESP_FAIL;

@@ -1,10 +1,15 @@
-# ESP-VoCat v1.2 compatible low-cost profile: 16MB Flash + 8MB Octal PSRAM.
+# ESP-VoCat v1.0 audio PCB low-cost profile: 16MB Flash + 8MB Octal PSRAM.
 # Use explicitly via:
 #   SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.vocat_lowcost_16m8m"
 #
 # This file must not change OTA release gates or embed runtime secrets.
 
 CONFIG_IDF_TARGET="esp32s3"
+
+# v6 N16R8 low-cost boards use the ESP-VoCat V1.0 audio PCB routing:
+# I2S DIN/DSIN=GPIO15, PA=GPIO4, and no GPIO48 speaker/mic enable.
+CONFIG_DEMO_TARGET_PROFILE_VOCAT_LOWCOST_16M8M=y
+CONFIG_DEMO_AUDIO_PCB_ESP_VOCAT_V1_0=y
 
 # Keep the v5/v6 default 16MB flash geometry for the first low-cost stage.
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

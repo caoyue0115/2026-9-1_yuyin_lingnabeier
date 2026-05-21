@@ -1,12 +1,12 @@
 #include "audio_in.h"
 
+#include "board_audio.h"
 #include "config.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "bsp/esp_vocat.h"
 #include "esp_codec_dev.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
@@ -73,13 +73,13 @@ static esp_err_t audio_in_init_locked(void)
         return ESP_OK;
     }
 
-    esp_err_t ret = bsp_audio_init(NULL);
+    esp_err_t ret = board_audio_init(NULL);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize ESP-VoCat audio bus: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    s_audio_in_state.mic_handle = bsp_audio_codec_microphone_init();
+    s_audio_in_state.mic_handle = board_audio_codec_microphone_init();
     if (s_audio_in_state.mic_handle == NULL) {
         ESP_LOGE(TAG, "Failed to initialize ESP-VoCat microphone codec");
         return ESP_FAIL;

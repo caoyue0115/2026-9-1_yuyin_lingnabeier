@@ -1,0 +1,17 @@
+menu "ESP-IDF demo hardware profile"
+
+    config DEMO_TARGET_PROFILE_VOCAT_LOWCOST_16M8M
+        bool "Use the v6 N16R8 low-cost profile"
+        default n
+        help
+            Selects the v6 low-cost target profile for ESP32-S3 N16R8
+            boards with 16MB Flash and 8MB PSRAM.
+
+    config DEMO_AUDIO_PCB_ESP_VOCAT_V1_0
+        bool "Use ESP-VoCat V1.0 audio PCB pin binding"
+        default DEMO_TARGET_PROFILE_VOCAT_LOWCOST_16M8M
+        help
+            Uses I2S DIN on GPIO15, PA on GPIO4, and skips the legacy
+            GPIO48 speaker/mic enable line used by ESP-VoCat V1.2.
+
+endmenu

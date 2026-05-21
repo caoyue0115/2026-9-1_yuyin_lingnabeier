@@ -92,6 +92,57 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("ota_1,app,ota_1,,3M", partitions)
         self.assertIn("storage,data,spiffs,,4M", partitions)
 
+    def test_vocat_lowcost_16m8m_defaults_to_v1_0_audio_binding(self) -> None:
+        profile = (ESP_DIR / "sdkconfig.defaults.vocat_lowcost_16m8m").read_text(encoding="utf-8")
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        main_cmake = (ESP_DIR / "main" / "CMakeLists.txt").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        audio_in_source = (ESP_DIR / "main" / "audio_in.c").read_text(encoding="utf-8")
+        audio_out_source = (ESP_DIR / "main" / "audio_out.c").read_text(encoding="utf-8")
+        board_audio_header = (ESP_DIR / "main" / "board_audio.h").read_text(encoding="utf-8")
+        board_audio_source = (ESP_DIR / "main" / "board_audio.c").read_text(encoding="utf-8")
+
+        self.assertIn("CONFIG_DEMO_TARGET_PROFILE_VOCAT_LOWCOST_16M8M=y", profile)
+        self.assertIn("CONFIG_DEMO_AUDIO_PCB_ESP_VOCAT_V1_0=y", profile)
+        self.assertNotIn("CONFIG_DEMO_AUDIO_PCB_ESP_VOCAT_V1_2=y", profile)
+
+        self.assertIn("DEMO_BOARD_PROFILE_ESP_VOCAT_V1_0_AUDIO", config)
+        self.assertIn("DEMO_TARGET_PROFILE \"vocat_lowcost_16m8m\"", config)
+        self.assertIn("DEMO_BOARD_REVISION \"v1.0\"", config)
+        self.assertIn("DEMO_BOARD_AUDIO_PCB_REVISION \"v1.0\"", config)
+        self.assertIn("#define DEMO_AUDIO_I2S_DIN_GPIO GPIO_NUM_15", config)
+        self.assertIn("#define DEMO_AUDIO_PA_GPIO GPIO_NUM_4", config)
+        self.assertIn("#define DEMO_AUDIO_GPIO48_ENABLE 0", config)
+
+        self.assertIn('"board_audio.c"', main_cmake)
+        self.assertIn("board_audio_init", board_audio_header)
+        self.assertIn("board_audio_codec_speaker_init", board_audio_header)
+        self.assertIn("board_audio_codec_microphone_init", board_audio_header)
+        self.assertIn(".din = DEMO_AUDIO_I2S_DIN_GPIO", board_audio_source)
+        self.assertIn(".pa_pin = DEMO_AUDIO_PA_GPIO", board_audio_source)
+        self.assertIn("#if DEMO_AUDIO_GPIO48_ENABLE", board_audio_source)
+        self.assertIn("audio_gpio48_enable=0", board_audio_source)
+
+        self.assertIn("board_audio_init(NULL)", audio_in_source)
+        self.assertIn("board_audio_codec_microphone_init", audio_in_source)
+        self.assertNotIn("bsp_audio_codec_microphone_init", audio_in_source)
+        self.assertIn("board_audio_init(NULL)", audio_out_source)
+        self.assertIn("board_audio_codec_speaker_init", audio_out_source)
+        self.assertNotIn("bsp_audio_codec_speaker_init", audio_out_source)
+
+        for marker in (
+            "board_rev=",
+            "target_profile=",
+            "audio_pcb_rev=",
+            "audio_i2s_din_gpio=",
+            "audio_pa_gpio=",
+            "audio_gpio48_enable=",
+        ):
+            self.assertIn(marker, main_source)
+
+        self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_BOOT_SWITCH_ENABLED"))
+        self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_ROLLBACK_VALIDATION_ENABLED"))
+
     def test_realtime_lowcost_observability_markers_are_present_without_release_boundary_changes(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
         partitions = (ESP_DIR / "partitions.csv").read_text(encoding="utf-8").replace(" ", "")
