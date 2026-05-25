@@ -10,12 +10,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ESP_SYSTEM_EVENT_TASK_STACK_CONFIG = "CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096"
+SYSTEM_EVENT_TASK_STACK_CONFIG = "CONFIG_SYSTEM_EVENT_TASK_STACK_SIZE=4096"
 
 
-EXCLUDED_DIRS = {
+BASE_EXCLUDED_DIRS = {
     ".git",
     "build",
-    "managed_components",
     "__pycache__",
     "tmp",
     "data",
@@ -23,15 +24,18 @@ EXCLUDED_DIRS = {
 }
 
 
-def _copy_source_tree(source_root: Path, staging_root: Path) -> Path:
+def _copy_source_tree(source_root: Path, staging_root: Path, *, include_managed_components: bool) -> Path:
     esp_source = source_root / "esp_idf_demo"
     if not esp_source.is_dir():
         raise SystemExit(f"missing esp_idf_demo directory under {source_root}")
 
     esp_dest = staging_root / "esp_idf_demo"
+    excluded_dirs = set(BASE_EXCLUDED_DIRS)
+    if not include_managed_components:
+        excluded_dirs.add("managed_components")
 
     def ignore(_: str, names: list[str]) -> set[str]:
-        ignored = {name for name in names if name in EXCLUDED_DIRS}
+        ignored = {name for name in names if name in excluded_dirs}
         ignored.update(name for name in names if name.endswith(".pyc"))
         ignored.update(name for name in names if name.endswith(".bin"))
         ignored.update(name for name in names if name.startswith(".env"))
@@ -51,12 +55,24 @@ def _replace_required(text: str, old: str, new: str, *, path: Path) -> str:
     return text.replace(old, new, 1)
 
 
+def _set_sdkconfig_value(text: str, key: str, value: str) -> str:
+    line = f"{key}={value}"
+    lines = text.splitlines()
+    for index, existing in enumerate(lines):
+        if existing.startswith(f"{key}="):
+            lines[index] = line
+            return "\n".join(lines).rstrip() + "\n"
+    return text.rstrip() + f"\n{line}\n"
+
+
 def _inject_p3d_canary_config(
     esp_dest: Path,
     *,
     wifi_ssid: str,
     server_base_url: str,
     device_id: str,
+    trigger_source: str,
+    button_gpio: int,
 ) -> None:
     config_path = esp_dest / "main" / "config.h"
     if not config_path.exists():
@@ -93,7 +109,37 @@ def _inject_p3d_canary_config(
         "#define DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1",
         path=config_path,
     )
+    config = _replace_required(
+        config,
+        "#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON",
+        f"#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_{trigger_source.upper()}",
+        path=config_path,
+    )
+    config = _replace_required(
+        config,
+        "#define DEMO_BUTTON_GPIO         GPIO_NUM_7",
+        f"#define DEMO_BUTTON_GPIO         GPIO_NUM_{button_gpio}",
+        path=config_path,
+    )
     config_path.write_text(config, encoding="utf-8", newline="\n")
+
+    sdkconfig = esp_dest / "sdkconfig"
+    if sdkconfig.exists():
+        config_text = sdkconfig.read_text(encoding="utf-8")
+        key, value = ESP_SYSTEM_EVENT_TASK_STACK_CONFIG.split("=", 1)
+        config_text = _set_sdkconfig_value(config_text, key, value)
+        key, value = SYSTEM_EVENT_TASK_STACK_CONFIG.split("=", 1)
+        config_text = _set_sdkconfig_value(config_text, key, value)
+        if "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" not in config_text:
+            if "# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set" in config_text:
+                config_text = config_text.replace(
+                    "# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set",
+                    "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y",
+                    1,
+                )
+            else:
+                config_text = config_text.rstrip() + "\nCONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n"
+            sdkconfig.write_text(config_text, encoding="utf-8", newline="\n")
 
     sdkconfig_defaults = esp_dest / "sdkconfig.defaults"
     if not sdkconfig_defaults.exists():
@@ -102,7 +148,9 @@ def _inject_p3d_canary_config(
     defaults = sdkconfig_defaults.read_text(encoding="utf-8")
     if "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" not in defaults:
         defaults = defaults.rstrip() + "\nCONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n"
-        sdkconfig_defaults.write_text(defaults, encoding="utf-8", newline="\n")
+    key, value = ESP_SYSTEM_EVENT_TASK_STACK_CONFIG.split("=", 1)
+    defaults = _set_sdkconfig_value(defaults, key, value)
+    sdkconfig_defaults.write_text(defaults, encoding="utf-8", newline="\n")
 
 
 def _inject_hardware_entrypoints(
@@ -244,7 +292,14 @@ def main() -> int:
     parser.add_argument("--device-id", default="miaoban-v1p2-002")
     parser.add_argument("--wifi-ssid", default="GMT-G60")
     parser.add_argument("--server-base-url", default="http://106.54.240.51")
+    parser.add_argument("--trigger-source", choices=("button", "touch", "wake_word"), default="button")
+    parser.add_argument("--button-gpio", type=int, default=7)
     parser.add_argument("--default-port", default="COM3")
+    parser.add_argument(
+        "--include-managed-components",
+        action="store_true",
+        help="Include resolved ESP-IDF managed components for hardware handoff packages that must build without registry access.",
+    )
     args = parser.parse_args()
 
     source_root = args.source.resolve()
@@ -252,12 +307,18 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="esp_compile_only_") as tmp:
         staging_root = Path(tmp)
-        esp_dest = _copy_source_tree(source_root, staging_root)
+        esp_dest = _copy_source_tree(
+            source_root,
+            staging_root,
+            include_managed_components=args.include_managed_components,
+        )
         _inject_p3d_canary_config(
             esp_dest,
             wifi_ssid=args.wifi_ssid,
             server_base_url=args.server_base_url,
             device_id=args.device_id,
+            trigger_source=args.trigger_source,
+            button_gpio=args.button_gpio,
         )
         _inject_hardware_entrypoints(
             esp_dest,

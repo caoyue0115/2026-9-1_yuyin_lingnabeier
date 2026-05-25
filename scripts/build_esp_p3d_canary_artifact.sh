@@ -13,6 +13,24 @@ PROJECT_VER=${PROJECT_VER:-v37-p3d-canary}
 CANARY_WIFI_SSID="${CANARY_WIFI_SSID:-GMT-G60}"
 CANARY_SERVER_BASE_URL="${CANARY_SERVER_BASE_URL:-http://106.54.240.51}"
 CANARY_DEVICE_ID=${CANARY_DEVICE_ID:-miaoban-v1p2-002}
+CANARY_TRIGGER_SOURCE="${CANARY_TRIGGER_SOURCE:-button}"
+CANARY_BUTTON_GPIO="${CANARY_BUTTON_GPIO:-7}"
+CANARY_TRIGGER_SOURCE_UPPER="$(printf '%s' "${CANARY_TRIGGER_SOURCE}" | tr '[:lower:]' '[:upper:]')"
+
+case "${CANARY_TRIGGER_SOURCE_UPPER}" in
+  BUTTON|TOUCH|WAKE_WORD) ;;
+  *)
+    echo "unsupported CANARY_TRIGGER_SOURCE=${CANARY_TRIGGER_SOURCE}; expected button, touch, or wake_word" >&2
+    exit 1
+    ;;
+esac
+
+case "${CANARY_BUTTON_GPIO}" in
+  ''|*[!0-9]*)
+    echo "unsupported CANARY_BUTTON_GPIO=${CANARY_BUTTON_GPIO}; expected a GPIO number" >&2
+    exit 1
+    ;;
+esac
 
 rm -rf "${SRC_DIR}" "${BUILD_DIR}"
 mkdir -p "${SRC_DIR}" "$(dirname "${OUT_BIN}")"
@@ -33,6 +51,8 @@ perl -0pi -e 's/#define DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 0/#define DEMO_OTA_
 perl -0pi -e "s/#define DEMO_WIFI_SSID\s+\"\"/#define DEMO_WIFI_SSID           \"${CANARY_WIFI_SSID}\"/" "${CONFIG_H}"
 perl -0pi -e "s|#define DEMO_SERVER_BASE_URL\s+\"\"|#define DEMO_SERVER_BASE_URL     \"${CANARY_SERVER_BASE_URL}\"|" "${CONFIG_H}"
 perl -0pi -e "s/#define DEMO_DEVICE_ID\s+\"\"/#define DEMO_DEVICE_ID           \"${CANARY_DEVICE_ID}\"/" "${CONFIG_H}"
+perl -0pi -e "s/#define DEMO_TRIGGER_SOURCE\s+DEMO_TRIGGER_SOURCE_[A-Z_]+/#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_${CANARY_TRIGGER_SOURCE_UPPER}/" "${CONFIG_H}"
+perl -0pi -e "s/#define DEMO_BUTTON_GPIO\s+GPIO_NUM_[0-9]+/#define DEMO_BUTTON_GPIO         GPIO_NUM_${CANARY_BUTTON_GPIO}/" "${CONFIG_H}"
 perl -0pi -e 's/# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set/CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y/' "${SDKCONFIG}"
 cat >> "${SRC_DIR}/esp_idf_demo/sdkconfig.defaults" <<'EOF'
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

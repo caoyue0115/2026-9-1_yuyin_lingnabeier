@@ -356,11 +356,7 @@
 #define DEMO_TRIGGER_SOURCE_WAKE_WORD 3
 
 #ifndef DEMO_TRIGGER_SOURCE
-#if DEMO_BOARD_PROFILE == DEMO_BOARD_PROFILE_LEGACY_REFERENCE
 #define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON
-#else
-#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_TOUCH
-#endif
 #endif
 
 #if DEMO_BOARD_PROFILE == DEMO_BOARD_PROFILE_ESP_VOCAT_V1_0_AUDIO
@@ -388,7 +384,9 @@
 
 // Default wake input is a dedicated GPIO line. For the current hardware,
 // the line is active-low and held high with the internal pull-up.
-#define DEMO_BUTTON_GPIO         GPIO_NUM_6
+#ifndef DEMO_BUTTON_GPIO
+#define DEMO_BUTTON_GPIO         GPIO_NUM_7
+#endif
 #ifndef DEMO_BUTTON_ACTIVE_LEVEL
 #define DEMO_BUTTON_ACTIVE_LEVEL  0
 #endif

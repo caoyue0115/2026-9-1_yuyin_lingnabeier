@@ -143,6 +143,16 @@ class EspAssetTests(unittest.TestCase):
         self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_BOOT_SWITCH_ENABLED"))
         self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_ROLLBACK_VALIDATION_ENABLED"))
 
+    def test_lowcost_default_trigger_is_gpio7_button_with_touch_override_available(self) -> None:
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+
+        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON", config)
+        self.assertIn("#ifndef DEMO_BUTTON_GPIO", config)
+        self.assertIn("#define DEMO_BUTTON_GPIO         GPIO_NUM_7", config)
+        self.assertIn("#ifndef DEMO_TRIGGER_SOURCE", config)
+        self.assertIn("DEMO_TRIGGER_SOURCE_TOUCH", config)
+        self.assertNotIn("#define DEMO_BUTTON_GPIO         GPIO_NUM_6", config)
+
     def test_realtime_lowcost_observability_markers_are_present_without_release_boundary_changes(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
         partitions = (ESP_DIR / "partitions.csv").read_text(encoding="utf-8").replace(" ", "")
@@ -303,6 +313,81 @@ class EspAssetTests(unittest.TestCase):
 
         self.assertIn("DEMO_REALTIME_INTRO_ENABLED || DEMO_RECORD_PROMPT_ENABLED", main_source)
         self.assertNotIn("if (DEMO_REALTIME_INTRO_ENABLED) {\n        (void)app_mount_spiffs();", main_source)
+
+    def test_wifi_board_lite_uses_esp_wifi_connect_hotspot_provisioning(self) -> None:
+        manifest = (ESP_DIR / "main" / "idf_component.yml").read_text(encoding="utf-8")
+        cmake = (ESP_DIR / "main" / "CMakeLists.txt").read_text(encoding="utf-8")
+        network_header = (ESP_DIR / "main" / "app_network.h").read_text(encoding="utf-8")
+        network_source = (ESP_DIR / "main" / "app_network.cc").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+
+        self.assertIn("78/esp-wifi-connect", manifest)
+        self.assertIn("3.1.4", manifest)
+        self.assertIn('"app_network.cc"', cmake)
+        self.assertTrue((ESP_DIR / "main" / "app_network.h").exists())
+
+        for symbol in (
+            "app_network_start",
+            "app_network_is_connected",
+            "app_network_enter_config_mode",
+            "app_network_get_ssid",
+        ):
+            self.assertIn(symbol, network_header)
+            self.assertIn(symbol, network_source)
+
+        self.assertIn('extern "C"', network_header)
+        self.assertIn("WifiManager::GetInstance()", network_source)
+        self.assertIn("SsidManager::GetInstance()", network_source)
+        self.assertIn("StartStation()", network_source)
+        self.assertIn("StartConfigAp()", network_source)
+        self.assertIn('ssid_prefix = "Miaoban"', network_source)
+        self.assertIn("wifi_saved_credentials_found", network_source)
+        self.assertIn("wifi_no_saved_credentials", network_source)
+        self.assertIn("wifi_config_mode_enter", network_source)
+        self.assertIn("wifi_config_ap_ssid", network_source)
+        self.assertIn("wifi_config_url=http://192.168.4.1", network_source)
+        self.assertIn("wifi_config_mode_exit", network_source)
+
+        self.assertIn("app_network_start()", main_source)
+        self.assertIn("app_network_is_connected()", main_source)
+        self.assertNotIn("DEMO_WIFI_SSID is empty", main_source)
+        self.assertNotIn("Wi-Fi initialization failed; stopping demo", main_source)
+
+    def test_wifi_board_lite_raises_event_task_stack_for_esp_wifi_connect_callbacks(self) -> None:
+        sdkconfig_defaults = (ESP_DIR / "sdkconfig.defaults.vocat_lowcost_16m8m").read_text(encoding="utf-8")
+        package_script = (ROOT / "scripts" / "package_esp_compile_only.py").read_text(encoding="utf-8")
+
+        self.assertIn("CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096", sdkconfig_defaults)
+        self.assertIn("CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096", package_script)
+
+    def test_wifi_board_lite_keeps_short_press_trigger_and_passwords_out_of_source(self) -> None:
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        trigger_source = (ESP_DIR / "main" / "trigger_input.c").read_text(encoding="utf-8")
+        network_source = (ESP_DIR / "main" / "app_network.cc").read_text(encoding="utf-8")
+        project_sources = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                ESP_DIR / "main" / "config.h",
+                ESP_DIR / "main" / "main.c",
+                ESP_DIR / "main" / "app_network.h",
+                ESP_DIR / "main" / "app_network.cc",
+            )
+        )
+
+        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON", config)
+        self.assertIn("#define DEMO_BUTTON_GPIO         GPIO_NUM_7", config)
+        self.assertIn("Button trigger event", trigger_source)
+        self.assertNotIn("button_long_press_enter_wifi_config", trigger_source)
+        self.assertIn("DEMO_WIFI_PASSWORD[0] != '\\0'", network_source)
+
+        for forbidden in (
+            "wifi_password=",
+            "password=%s",
+            "DEMO_WIFI_PASSWORD \"",
+            "DEMO_WIFI_PASSWORD       \"1",
+            "DEMO_WIFI_PASSWORD       \"p",
+        ):
+            self.assertNotIn(forbidden, project_sources)
 
     def test_realtime_audio_defaults_leave_headroom_for_parallel_intro(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
@@ -559,6 +644,10 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("SDKCONFIG=", script)
         self.assertIn("rollback config was not enabled", script)
         self.assertIn("CANARY_DEVICE_ID=${CANARY_DEVICE_ID:-miaoban-v1p2-002}", script)
+        self.assertIn("CANARY_TRIGGER_SOURCE=\"${CANARY_TRIGGER_SOURCE:-button}\"", script)
+        self.assertIn("CANARY_BUTTON_GPIO=\"${CANARY_BUTTON_GPIO:-7}\"", script)
+        self.assertIn("DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_${CANARY_TRIGGER_SOURCE_UPPER}", script)
+        self.assertIn("DEMO_BUTTON_GPIO         GPIO_NUM_${CANARY_BUTTON_GPIO}", script)
         self.assertNotIn("DEMO_WIFI_PASSWORD", script)
 
     def test_compile_only_package_injects_p3d_canary_config_without_password(self) -> None:
@@ -572,14 +661,18 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_OTA_BOOT_SWITCH_ENABLED 1", script)
         self.assertIn("DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1", script)
         self.assertIn("CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y", script)
+        self.assertIn("--include-managed-components", script)
         self.assertNotIn("DEMO_WIFI_PASSWORD", script)
 
-    def test_wifi_password_empty_preserves_stored_station_config(self) -> None:
+    def test_empty_wifi_config_enters_hotspot_provisioning_instead_of_stopping(self) -> None:
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        network_source = (ESP_DIR / "main" / "app_network.cc").read_text(encoding="utf-8")
 
-        self.assertIn("DEMO_WIFI_PASSWORD[0] != '\\0'", main_source)
-        self.assertIn("using stored Wi-Fi station credentials from NVS", main_source)
-        self.assertIn("esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg)", main_source)
+        self.assertNotIn("DEMO_WIFI_SSID is empty", main_source)
+        self.assertNotIn("Wi-Fi initialization failed; stopping demo", main_source)
+        self.assertIn("wifi_no_saved_credentials", network_source)
+        self.assertIn("app_network_enter_config_mode", network_source)
+        self.assertIn("StartConfigAp()", network_source)
 
 
 if __name__ == "__main__":

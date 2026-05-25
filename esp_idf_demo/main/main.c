@@ -1,41 +1,32 @@
 #include "config.h"
+#include "app_network.h"
 #include "trigger_input.h"
 #include "audio_in.h"
 #include "audio_out.h"
 #include "cloud_client.h"
 
 #include "esp_err.h"
-#include "esp_event.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_spiffs.h"
 #include "esp_system.h"
 #include "esp_timer.h"
-#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "nvs.h"
-#include "nvs_flash.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "esp_idf_demo";
-static EventGroupHandle_t s_wifi_event_group;
-static int s_wifi_retry_count = 0;
 static TaskHandle_t s_pipeline_task_handle = NULL;
 static TaskHandle_t s_ota_manifest_task_handle = NULL;
 static int64_t s_last_pipeline_finish_us = 0;
 static int64_t s_next_ota_manifest_check_us = 0;
-
-#define APP_WIFI_CONNECTED_BIT BIT0
-#define APP_WIFI_FAILED_BIT    BIT1
 
 #define APP_OTA_P3C_NVS_NAMESPACE "ota_p3c"
 #define APP_OTA_P3C_KEY_PENDING   "pending"
@@ -460,11 +451,6 @@ static void app_play_retry_prompt(const char *reason, const char *path)
 
 static esp_err_t app_validate_runtime_config(void)
 {
-    if (DEMO_WIFI_SSID[0] == '\0') {
-        ESP_LOGE(TAG, "DEMO_WIFI_SSID is empty");
-        return ESP_ERR_INVALID_STATE;
-    }
-
     if (DEMO_SERVER_BASE_URL[0] == '\0') {
         ESP_LOGE(TAG, "DEMO_SERVER_BASE_URL is empty");
         return ESP_ERR_INVALID_STATE;
@@ -476,163 +462,6 @@ static esp_err_t app_validate_runtime_config(void)
     }
 
     return ESP_OK;
-}
-
-static void app_wifi_event_handler(void *arg,
-                                   esp_event_base_t event_base,
-                                   int32_t event_id,
-                                   void *event_data)
-{
-    (void)arg;
-
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-        return;
-    }
-
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupClearBits(s_wifi_event_group, APP_WIFI_CONNECTED_BIT);
-        if (s_wifi_retry_count < DEMO_WIFI_MAXIMUM_RETRY) {
-            s_wifi_retry_count++;
-            ESP_LOGW(TAG, "Wi-Fi disconnected, retrying (%d/%d)",
-                     s_wifi_retry_count,
-                     DEMO_WIFI_MAXIMUM_RETRY);
-            esp_wifi_connect();
-        } else {
-            xEventGroupSetBits(s_wifi_event_group, APP_WIFI_FAILED_BIT);
-        }
-        return;
-    }
-
-    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)event_data;
-        s_wifi_retry_count = 0;
-        ESP_LOGI(TAG, "Wi-Fi connected, IP=" IPSTR, IP2STR(&event->ip_info.ip));
-        xEventGroupSetBits(s_wifi_event_group, APP_WIFI_CONNECTED_BIT);
-    }
-}
-
-static esp_err_t app_wifi_connect(void)
-{
-    esp_err_t ret = app_validate_runtime_config();
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init NVS: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = esp_netif_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init esp_netif: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = esp_event_loop_create_default();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "Failed to create default event loop: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
-    if (sta_netif == NULL) {
-        ESP_LOGE(TAG, "Failed to create default Wi-Fi station");
-        return ESP_FAIL;
-    }
-
-    wifi_init_config_t wifi_init_cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ret = esp_wifi_init(&wifi_init_cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init Wi-Fi: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    if (s_wifi_event_group == NULL) {
-        s_wifi_event_group = xEventGroupCreate();
-    }
-    if (s_wifi_event_group == NULL) {
-        ESP_LOGE(TAG, "Failed to create Wi-Fi event group");
-        return ESP_ERR_NO_MEM;
-    }
-    xEventGroupClearBits(s_wifi_event_group, APP_WIFI_CONNECTED_BIT | APP_WIFI_FAILED_BIT);
-
-    ret = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &app_wifi_event_handler, NULL);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register Wi-Fi event handler: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &app_wifi_event_handler, NULL);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register IP event handler: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (ret == ESP_OK && DEMO_WIFI_PASSWORD[0] != '\0') {
-        wifi_config_t wifi_cfg = {0};
-        snprintf((char *)wifi_cfg.sta.ssid, sizeof(wifi_cfg.sta.ssid), "%s", DEMO_WIFI_SSID);
-        snprintf((char *)wifi_cfg.sta.password, sizeof(wifi_cfg.sta.password), "%s", DEMO_WIFI_PASSWORD);
-        wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-        wifi_cfg.sta.pmf_cfg.capable = true;
-        wifi_cfg.sta.pmf_cfg.required = false;
-        ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
-    } else if (ret == ESP_OK) {
-        ESP_LOGW(TAG,
-                 "DEMO_WIFI_PASSWORD is empty; using stored Wi-Fi station credentials from NVS for SSID %s",
-                 DEMO_WIFI_SSID);
-    }
-    if (ret == ESP_OK) {
-        ret = esp_wifi_start();
-    }
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start Wi-Fi station: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-#if DEMO_WIFI_POWER_SAVE_NONE
-    ret = esp_wifi_set_ps(WIFI_PS_NONE);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to disable Wi-Fi power save: %s", esp_err_to_name(ret));
-    } else {
-        ESP_LOGI(TAG, "Wi-Fi power save disabled for realtime audio");
-    }
-#endif
-
-    ESP_LOGI(TAG, "Connecting to Wi-Fi SSID %s", DEMO_WIFI_SSID);
-
-    const EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                                 APP_WIFI_CONNECTED_BIT | APP_WIFI_FAILED_BIT,
-                                                 pdFALSE,
-                                                 pdFALSE,
-                                                 pdMS_TO_TICKS(DEMO_WIFI_CONNECT_TIMEOUT_MS));
-    if ((bits & APP_WIFI_CONNECTED_BIT) != 0) {
-        return ESP_OK;
-    }
-
-    if ((bits & APP_WIFI_FAILED_BIT) != 0) {
-        ESP_LOGE(TAG, "Failed to connect to Wi-Fi after %d retries", DEMO_WIFI_MAXIMUM_RETRY);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGE(TAG, "Timed out waiting for Wi-Fi connection");
-    return ESP_ERR_TIMEOUT;
-}
-
-static bool app_wifi_is_connected(void)
-{
-    if (s_wifi_event_group == NULL) {
-        return false;
-    }
-
-    return (xEventGroupGetBits(s_wifi_event_group) & APP_WIFI_CONNECTED_BIT) != 0;
 }
 
 static esp_err_t run_trigger_pipeline(app_state_t *state)
@@ -668,7 +497,7 @@ static esp_err_t run_trigger_pipeline(app_state_t *state)
     bool realtime_session_ready = false;
     bool v5_uplink_attempted = false;
 
-    if (!app_wifi_is_connected()) {
+    if (!app_network_is_connected()) {
         ESP_LOGE(TAG, "Wi-Fi is not connected; refusing to start pipeline");
         return ESP_ERR_INVALID_STATE;
     }
@@ -1231,7 +1060,7 @@ static bool app_ota_manifest_idle_ready(int64_t now_us)
         s_ota_manifest_task_handle != NULL) {
         return false;
     }
-    if (!app_wifi_is_connected()) {
+    if (!app_network_is_connected()) {
         return false;
     }
     if (s_last_pipeline_finish_us > 0 &&
@@ -2384,12 +2213,20 @@ static void app_runtime_task(void *arg)
         (void)app_mount_spiffs();
     }
 
-    if (app_wifi_connect() != ESP_OK) {
+    if (app_validate_runtime_config() != ESP_OK) {
         app_set_state(&s_app_state, APP_STATE_ERROR);
-        ESP_LOGE(TAG, "Wi-Fi initialization failed; stopping demo");
+        ESP_LOGE(TAG, "Runtime configuration invalid; stopping demo");
         vTaskDelete(NULL);
         return;
     }
+
+    if (app_network_start() != ESP_OK) {
+        app_set_state(&s_app_state, APP_STATE_ERROR);
+        ESP_LOGE(TAG, "Network initialization failed; stopping demo");
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "network_ready ssid=%s", app_network_get_ssid());
 #if DEMO_OTA_BOOT_SWITCH_ENABLED
     (void)app_ota_p3c_store_last_stage("wifi_connected");
 #endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
