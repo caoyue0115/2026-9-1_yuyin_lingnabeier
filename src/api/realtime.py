@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from typing import Any
@@ -64,6 +65,42 @@ def _make_board_done_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: payload[key] for key in allowed_keys if key in payload}
 ASR_FALLBACK_NONE = "none"
 ASR_FALLBACK_CHOICES = ASR_PROVIDER_CHOICES | {ASR_FALLBACK_NONE, ""}
+
+
+async def _run_asr_blocking_call(func, /, *args):
+    done = threading.Event()
+    result_box: dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            result_box["result"] = func(*args)
+        except BaseException as exc:
+            result_box["exception"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_target, name="realtime-asr-provider-call", daemon=True)
+    thread.start()
+    while not done.is_set():
+        await asyncio.sleep(0.005)
+    if "exception" in result_box:
+        raise result_box["exception"]
+    return result_box.get("result")
+
+
+def _csv_contains(value: str | None, needle: str) -> bool:
+    if not value or not needle:
+        return False
+    return needle in {part.strip() for part in value.split(",") if part.strip()}
+
+
+def _asr_provider_override_for_device(device_id: str) -> str | None:
+    provider = str(settings.asr_provider_override_provider or "").strip().lower()
+    if provider not in ASR_PROVIDER_CHOICES:
+        return None
+    if not _csv_contains(settings.asr_provider_override_device_ids, device_id):
+        return None
+    return provider
 
 
 def _frame_audio_packets(chunks):
@@ -386,7 +423,7 @@ async def stream_opus_realtime_session(
             provider=provider,
         )
         provider_start_abs_ms = _server_elapsed_ms()
-        await asyncio.to_thread(cached_asr.start)
+        await _run_asr_blocking_call(cached_asr.start)
         provider_ready_abs_ms = _server_elapsed_ms()
         provider_start_duration_ms = provider_ready_abs_ms - provider_start_abs_ms
         for pcm_chunk in _pcm_chunks_for_provider(pcm_bytes):
@@ -394,11 +431,11 @@ async def stream_opus_realtime_session(
                 first_pcm_to_asr_ms = _server_elapsed_ms()
             if first_pcm_sent_to_provider_abs_ms is None:
                 first_pcm_sent_to_provider_abs_ms = _server_elapsed_ms()
-            events = await asyncio.to_thread(cached_asr.send_pcm_chunk, pcm_chunk)
+            events = await _run_asr_blocking_call(cached_asr.send_pcm_chunk, pcm_chunk)
             if events and first_provider_result_abs_ms is None:
                 first_provider_result_abs_ms = _server_elapsed_ms()
             await _send_asr_events(websocket, events)
-        result = await asyncio.to_thread(cached_asr.finish)
+        result = await _run_asr_blocking_call(cached_asr.finish)
         _capture_provider_debug(result)
         await _send_asr_events(websocket, cached_asr.drain_events())
         if first_provider_result_abs_ms is None and result.first_asr_partial_ms is not None:
@@ -452,7 +489,8 @@ async def stream_opus_realtime_session(
         await websocket.close(code=1011)
 
     async def _wait_for_asr_provider_ready(*, timeout_seconds: float) -> None:
-        nonlocal provider_ready_abs_ms, provider_start_duration_ms, provider_error_code, provider_error_message
+        nonlocal asr_start_task, provider_ready_abs_ms, provider_start_duration_ms
+        nonlocal provider_error_code, provider_error_message
 
         if realtime_asr is None or asr_start_task is None:
             return
@@ -475,12 +513,52 @@ async def stream_opus_realtime_session(
             provider_error_code = "asr_start_failed"
             provider_error_message = str(exc) or "ASR provider start failed"
             raise RealtimeAsrError(provider_error_code, provider_error_message) from exc
+        asr_start_task = None
         provider_ready_abs_ms = _server_elapsed_ms()
         provider_start_duration_ms = (
             provider_ready_abs_ms - provider_start_abs_ms
             if provider_start_abs_ms is not None
             else None
         )
+
+    async def _drain_asr_start_task(*, timeout_seconds: float = 0.25) -> None:
+        nonlocal asr_start_task, provider_ready_abs_ms, provider_start_duration_ms
+        nonlocal provider_error_code, provider_error_message
+
+        task = asr_start_task
+        if task is None:
+            return
+        completed = False
+        try:
+            if task.done():
+                await task
+            else:
+                await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+            completed = True
+        except asyncio.TimeoutError:
+            task.cancel()
+        except asyncio.CancelledError:
+            if task.cancelled():
+                return
+            raise
+        except RealtimeAsrError as exc:
+            if provider_error_code is None:
+                provider_error_code = exc.code
+                provider_error_message = exc.message
+        except Exception as exc:
+            if provider_error_code is None:
+                provider_error_code = "asr_start_failed"
+                provider_error_message = str(exc) or "ASR provider start failed"
+        finally:
+            if completed and provider_ready_abs_ms is None:
+                provider_ready_abs_ms = _server_elapsed_ms()
+                provider_start_duration_ms = (
+                    provider_ready_abs_ms - provider_start_abs_ms
+                    if provider_start_abs_ms is not None
+                    else None
+                )
+            if task.done() or task.cancelled():
+                asr_start_task = None
 
     async def _flush_pending_asr_pcm(*, block_until_ready: bool) -> None:
         nonlocal pending_asr_pcm_bytes, first_pcm_to_asr_ms, first_pcm_sent_to_provider_abs_ms
@@ -501,7 +579,7 @@ async def stream_opus_realtime_session(
                 first_pcm_to_asr_ms = _server_elapsed_ms()
             if first_pcm_sent_to_provider_abs_ms is None:
                 first_pcm_sent_to_provider_abs_ms = _server_elapsed_ms()
-            events = await asyncio.to_thread(realtime_asr.send_pcm_chunk, pcm_chunk)
+            events = await _run_asr_blocking_call(realtime_asr.send_pcm_chunk, pcm_chunk)
             if events and first_provider_result_abs_ms is None:
                 first_provider_result_abs_ms = _server_elapsed_ms()
             await _send_asr_events(websocket, events)
@@ -525,6 +603,7 @@ async def stream_opus_realtime_session(
             while True:
                 message = await websocket.receive()
                 if message.get("type") == "websocket.disconnect":
+                    await _drain_asr_start_task()
                     await _send_stream_error(websocket, "stream_disconnected", close_code=1000)
                     return
 
@@ -568,10 +647,12 @@ async def stream_opus_realtime_session(
                 try:
                     control = json.loads(message_text)
                 except json.JSONDecodeError:
+                    await _drain_asr_start_task()
                     await _send_stream_error(websocket, "invalid_control_json", close_code=1003)
                     return
                 if control.get("type") == "start":
                     if expected_sequence != 0 or decoded:
+                        await _drain_asr_start_task()
                         await _send_stream_error(websocket, "invalid_start_order", close_code=1003)
                         return
                     run_asr = bool(control.get("run_asr", False))
@@ -580,6 +661,7 @@ async def stream_opus_realtime_session(
                         control.get("asr_provider"),
                         default=str(settings.asr_provider or ASR_PROVIDER_DASHSCOPE).strip().lower(),
                     )
+                    requested_provider = _asr_provider_override_for_device(x_device_id) or requested_provider
                     if requested_provider not in ASR_PROVIDER_CHOICES:
                         await _send_stream_error(websocket, "invalid_asr_provider", close_code=1008)
                         return
@@ -605,7 +687,7 @@ async def stream_opus_realtime_session(
                                 provider=asr_provider,
                             )
                             provider_start_abs_ms = _server_elapsed_ms()
-                            asr_start_task = asyncio.create_task(asyncio.to_thread(realtime_asr.start))
+                            asr_start_task = asyncio.create_task(_run_asr_blocking_call(realtime_asr.start))
                         except RealtimeAsrError as exc:
                             provider_error_code = exc.code
                             provider_error_message = exc.message
@@ -618,6 +700,7 @@ async def stream_opus_realtime_session(
                             asr_start_task = None
                     continue
                 if control.get("type") != "end":
+                    await _drain_asr_start_task()
                     await _send_stream_error(websocket, "invalid_control_type", close_code=1003)
                     return
                 raw_client_duration = control.get("client_stream_duration_ms")
@@ -629,17 +712,21 @@ async def stream_opus_realtime_session(
                 end_received_at = time.perf_counter()
                 break
     except OpusError as exc:
+        await _drain_asr_start_task()
         await _send_stream_error(websocket, _opus_error_detail(exc))
         return
     except RealtimeAsrError as exc:
+        await _drain_asr_start_task()
         await _send_stream_error(websocket, exc.code, close_code=1011)
         return
 
     if not decoded:
+        await _drain_asr_start_task()
         await _send_stream_error(websocket, "empty_decoded_audio")
         return
     if x_original_pcm_bytes is not None:
         if x_original_pcm_bytes <= 0 or x_original_pcm_bytes > len(decoded):
+            await _drain_asr_start_task()
             await _send_stream_error(websocket, "invalid_original_pcm_bytes")
             return
         decoded = decoded[:x_original_pcm_bytes]
@@ -647,7 +734,11 @@ async def stream_opus_realtime_session(
     byte_rate = x_opus_sample_rate * x_opus_channels * 2
     reconstructed_audio_ms = int(round((len(decoded) / byte_rate) * 1000)) if byte_rate else 0
     compression_ratio = round(len(decoded) / opus_bytes, 3) if opus_bytes else None
-    wav_path = save_pcm_as_wav(bytes(decoded), x_opus_sample_rate, 16, x_opus_channels)
+    try:
+        wav_path = save_pcm_as_wav(bytes(decoded), x_opus_sample_rate, 16, x_opus_channels)
+    except Exception:
+        await _drain_asr_start_task()
+        raise
     reconstruct_done_at = time.perf_counter()
 
     if run_asr and realtime_asr is None and asr_primary_error_code is None:
@@ -657,7 +748,7 @@ async def stream_opus_realtime_session(
     if realtime_asr is not None:
         try:
             await _flush_pending_asr_pcm(block_until_ready=True)
-            asr_result = await asyncio.to_thread(realtime_asr.finish)
+            asr_result = await _run_asr_blocking_call(realtime_asr.finish)
         except RealtimeAsrError as exc:
             asr_result = RealtimeAsrResult(
                 text=None,
@@ -716,10 +807,12 @@ async def stream_opus_realtime_session(
             provider_error_message = asr_result.error_message
             _log_asr_fallback()
             if asr_result.error_code or not asr_result.text:
+                await _drain_asr_start_task()
                 await _send_asr_terminal_error(asr_result)
                 return
             asr_provider_used = asr_fallback_provider
         else:
+            await _drain_asr_start_task()
             await _send_asr_terminal_error(asr_result)
             return
 
@@ -919,6 +1012,7 @@ async def stream_opus_realtime_session(
             }
         )
 
+    await _drain_asr_start_task()
     await websocket.send_json(_make_board_done_payload(done_payload))
     await websocket.close(code=1000)
 

@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 256
     asr_provider: str = "dashscope"
     asr_fallback_provider: str = ""
+    asr_provider_override_device_ids: str = ""
+    asr_provider_override_provider: str = ""
     asr_model: str = "paraformer-realtime-v2"
     asr_timeout_seconds: float = 30.0
     asr_language_hints: str = "zh"

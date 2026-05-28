@@ -516,6 +516,8 @@ class VolcengineRealtimeAsrSession:
                     self._record_close_exception(exc)
                     if self._is_expected_close_after_result(exc):
                         break
+                    if self._packets_received > 0 and not self._latest_text:
+                        break
                     raise
                 self._packets_received += 1
                 message_type = response.get("message_type")

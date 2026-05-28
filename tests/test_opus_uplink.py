@@ -339,6 +339,88 @@ class OpusUplinkProviderTests(unittest.TestCase):
         self.assertEqual(result.packets_received, 1)
         self.assertTrue(fake_ws.closed)
 
+    def test_volcengine_asr_finish_treats_server_close_without_text_as_empty_text(self) -> None:
+        from src.providers import realtime_asr
+
+        class WebSocketConnectionClosedException(Exception):
+            status_code = 1000
+            reason = "normal close"
+
+        def _server_empty_result_frame(sequence: int) -> bytes:
+            payload = {
+                "result": {
+                    "utterances": [],
+                    "additions": {"log_id": f"volc-log-{sequence}"},
+                }
+            }
+            encoded = realtime_asr.gzip.compress(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            frame = realtime_asr._generate_volcengine_asr_header(
+                0b1001,
+                realtime_asr.POS_SEQUENCE,
+                realtime_asr.JSON_SERIALIZATION,
+                realtime_asr.GZIP_COMPRESSION,
+            )
+            frame.extend(sequence.to_bytes(4, "big", signed=True))
+            frame.extend(len(encoded).to_bytes(4, "big"))
+            frame.extend(encoded)
+            return bytes(frame)
+
+        class _FakeVolcengineWebSocket:
+            def __init__(self) -> None:
+                self.recv_calls = 0
+                self.closed = False
+
+            def settimeout(self, _timeout: float) -> None:
+                return None
+
+            def send_binary(self, _payload: bytes) -> None:
+                return None
+
+            def recv(self) -> bytes:
+                self.recv_calls += 1
+                if self.recv_calls <= 3:
+                    return _server_empty_result_frame(self.recv_calls)
+                raise WebSocketConnectionClosedException("Connection to remote host was lost.")
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake_ws = _FakeVolcengineWebSocket()
+        fake_websocket_module = types.SimpleNamespace(
+            create_connection=lambda *_args, **_kwargs: fake_ws,
+            WebSocketConnectionClosedException=WebSocketConnectionClosedException,
+        )
+
+        def _fake_env_value(key: str, default: str = "") -> str:
+            values = {
+                "VOLCENGINE_SPEECH_APP_ID": "app-id",
+                "VOLCENGINE_SPEECH_ACCESS_TOKEN": "access-token",
+                "VOLCENGINE_ASR_RESOURCE_ID": "resource-id",
+                "VOLCENGINE_ASR_MODEL_NAME": "bigmodel",
+                "VOLCENGINE_ASR_ENDPOINT": "wss://example.invalid/asr",
+                "VOLCENGINE_ASR_TIMEOUT": "1",
+                "VOLCENGINE_ASR_FINAL_DRAIN_TIMEOUT": "0.1",
+            }
+            return values.get(key, default)
+
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket_module}), mock.patch.object(
+            realtime_asr, "_env_value", side_effect=_fake_env_value
+        ):
+            session = realtime_asr.VolcengineRealtimeAsrSession(sample_rate=16000)
+            session.start()
+            session.send_pcm_chunk(b"\x00\x00" * 320)
+            result = session.finish()
+
+        self.assertEqual(result.error_code, "volcengine_asr_empty_text")
+        self.assertEqual(result.error_message, "Volcengine ASR returned empty text")
+        self.assertIsNone(result.text)
+        self.assertEqual(result.close_code, 1000)
+        self.assertIn("Connection to remote host was lost", result.close_reason)
+        self.assertEqual(result.last_log_id, "volc-log-3")
+        self.assertIsNone(result.last_result_text)
+        self.assertEqual(result.packets_received, 3)
+        self.assertTrue(fake_ws.closed)
+
     def test_dashscope_realtime_adapter_ignores_global_default_provider(self) -> None:
         from src.providers import realtime_asr
 
@@ -871,6 +953,82 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertEqual(factory.call_args.kwargs["provider"], "dashscope")
         self.assertEqual(websocket.sent_json[-1]["asr_provider"], "dashscope")
 
+    def test_stream_opus_realtime_session_drains_asr_start_when_save_fails(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 960
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [
+                {"type": "websocket.receive", "text": json.dumps({"type": "start", "run_asr": True})},
+                {"type": "websocket.receive", "bytes": _outer_frame(0, inner_packets[0])},
+                {"type": "websocket.receive", "text": json.dumps({"type": "end"})},
+            ]
+        )
+        fake_asr = _FakeStreamingAsrAdapter()
+
+        with mock.patch.object(
+            realtime_api, "create_realtime_asr_session", return_value=fake_asr
+        ), mock.patch.object(realtime_api, "save_pcm_as_wav", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                asyncio.run(
+                    realtime_api.stream_opus_realtime_session(
+                        websocket,
+                        x_device_id="pc-stream",
+                        x_audio_packetization="framed-v1",
+                        x_audio_format="opus",
+                        x_opus_sample_rate=16000,
+                        x_opus_channels=1,
+                        x_opus_frame_duration_ms=60,
+                        x_original_pcm_bytes=len(pcm),
+                    )
+                )
+
+        self.assertTrue(fake_asr.started)
+
+    def test_stream_opus_realtime_session_drains_slow_asr_start_on_disconnect(self) -> None:
+        from src.api import realtime as realtime_api
+
+        websocket = _FakeWebSocket(
+            [
+                {"type": "websocket.receive", "text": json.dumps({"type": "start", "run_asr": True})},
+                {"type": "websocket.disconnect"},
+            ]
+        )
+        fake_asr = _FakeStreamingAsrAdapter(start_delay_seconds=1.0)
+
+        started_at = time.perf_counter()
+        with mock.patch.object(realtime_api, "create_realtime_asr_session", return_value=fake_asr):
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                )
+            )
+        elapsed = time.perf_counter() - started_at
+
+        self.assertLess(elapsed, 0.75)
+        self.assertEqual(websocket.sent_json[-1]["type"], "error")
+        self.assertEqual(websocket.sent_json[-1]["error_code"], "stream_disconnected")
+        self.assertEqual(websocket.close_code, 1000)
+
     def test_stream_opus_realtime_session_uses_env_provider_when_start_omits_provider(self) -> None:
         from src.api import realtime as realtime_api
         from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
@@ -956,6 +1114,69 @@ class OpusUplinkEndpointTests(unittest.TestCase):
                 realtime_api.stream_opus_realtime_session(
                     websocket,
                     x_device_id="pc-stream",
+                    x_audio_packetization="framed-v1",
+                    x_audio_format="opus",
+                    x_opus_sample_rate=16000,
+                    x_opus_channels=1,
+                    x_opus_frame_duration_ms=60,
+                    x_original_pcm_bytes=len(pcm),
+                )
+            )
+
+        factory.assert_called_once()
+        self.assertEqual(factory.call_args.kwargs["provider"], "dashscope")
+        self.assertEqual(websocket.sent_json[-1]["asr_provider"], "dashscope")
+
+    def test_stream_opus_realtime_session_device_canary_overrides_start_provider(self) -> None:
+        from src.api import realtime as realtime_api
+        from src.providers.opus import encode_pcm_stream_to_framed_opus, opus_available
+
+        if not opus_available():
+            self.skipTest("libopus unavailable")
+
+        pcm = b"\x00\x00" * 960
+        inner_packets = list(
+            encode_pcm_stream_to_framed_opus(
+                [pcm],
+                sample_rate=16000,
+                channels=1,
+                frame_duration_ms=60,
+                bitrate=24000,
+            )
+        )
+        websocket = _FakeWebSocket(
+            [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {"type": "start", "run_asr": True, "asr_provider": "volcengine"}
+                    ),
+                },
+                {"type": "websocket.receive", "bytes": _outer_frame(0, inner_packets[0])},
+                {"type": "websocket.receive", "text": json.dumps({"type": "end"})},
+            ]
+        )
+        fake_asr = _FakeStreamingAsrAdapter(request_id="dash-device-canary")
+
+        with mock.patch.object(
+            realtime_api.settings,
+            "asr_provider_override_device_ids",
+            "miaoban-v1p2-002",
+            create=True,
+        ), mock.patch.object(
+            realtime_api.settings,
+            "asr_provider_override_provider",
+            "dashscope",
+            create=True,
+        ), mock.patch.object(
+            realtime_api,
+            "create_realtime_asr_session",
+            return_value=fake_asr,
+        ) as factory:
+            asyncio.run(
+                realtime_api.stream_opus_realtime_session(
+                    websocket,
+                    x_device_id="miaoban-v1p2-002",
                     x_audio_packetization="framed-v1",
                     x_audio_format="opus",
                     x_opus_sample_rate=16000,
