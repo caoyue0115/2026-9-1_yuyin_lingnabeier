@@ -64,6 +64,22 @@ docker compose -p religion_demo_greenunion -f docker-compose.greenunion.yml up -
 docker compose -p religion_demo_greenunion -f docker-compose.greenunion.yml ps
 ```
 
+## 2026-06-01 LLM Model Incident
+
+During ESP-VoCat v6 N16R8 provisioning and realtime validation, the device-side Wi-Fi provisioning, WakeNet, ASR, and audio upload path passed, but `/api/v3/realtime/sessions/{id}/audio` returned HTTP 500. Session status showed `error_code=llm_request_failed`; DashScope compatible-mode returned `403 access_denied` for the running `LLM_MODEL=qwen-max-latest`.
+
+Resolution:
+
+- Backed up `.env` to `/app/religion_demo_v5_realtime_opus/.env.bak_20260601_141330`.
+- Changed only `LLM_MODEL=qwen3.5-flash-2026-02-23`.
+- Recreated `religion_demo_v5_realtime_opus-api-1` and `religion_demo_v5_realtime_opus-worker-1`; Redis was left running.
+- Verified API and worker both expose `LLM_MODEL=qwen3.5-flash-2026-02-23`.
+- Verified `/healthz` reports `api/redis/sqlite/asr/llm/tts` as `ok`.
+- Verified an LLM probe for `qwen3.5-flash-2026-02-23` returns HTTP 200.
+- Hardware end-to-end answer audio recovered.
+
+Do not switch `greenunion-sh` back to `qwen-max-latest` unless the active DashScope key has that model permission. `/healthz` `llm=ok` proves the configured LLM path is healthy, not that every DashScope model is accessible to the key.
+
 ## Verify
 
 ```bash

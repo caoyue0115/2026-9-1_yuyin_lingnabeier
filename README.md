@@ -4,6 +4,22 @@
 
 > 2026-05-06 更新：旧公网生产入口 `OLD_PUBLIC_ENTRY_DISABLED` 已完全停用，所有联调和部署默认按公司上海云服务器 `greenunion-sh` 处理。不要再使用旧公网地址做健康检查、板端配置或部署判断。
 
+## 本地工作盘约定
+
+后续本项目的本地开发、构建、临时文件和交付包默认使用 100GB 大云盘 `/mnt/data100`，避免再占用 20GB 根盘。
+
+当前实际项目目录：
+
+- `/mnt/data100/GMT/20260521_16flash_8psram`
+
+常用大盘路径：
+
+- ESP-IDF build 根目录：`/mnt/data100/GMT/builds`
+- ESP-IDF 临时目录：`TMPDIR=/mnt/data100/GMT/builds/tmp`
+- 硬件交付包目录：`/mnt/data100/GMT/handoff_packages`
+
+不要把 ESP-IDF build、交付包、`managed_components` 复制或生成到根盘 `/home` 或 `/tmp`。根盘空间不足曾导致 Codex transcript、CMake/kconfgen 和 build 流程失败。
+
 ## 当前设备端基线
 
 仓库内已经提供独立设备端工程：
