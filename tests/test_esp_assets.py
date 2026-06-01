@@ -53,6 +53,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("ota_0,app,ota_0,0x20000,3M", normalized)
         self.assertIn("ota_1,app,ota_1,,3M", normalized)
         self.assertIn("storage,data,spiffs,,4M", normalized)
+        self.assertIn("model,data,,,1M", normalized)
         self.assertNotIn("factory,app,factory", normalized)
 
     def test_vocat_lowcost_16m8m_profile_is_explicit_and_keeps_safety_defaults(self) -> None:
@@ -91,6 +92,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("ota_0,app,ota_0,0x20000,3M", partitions)
         self.assertIn("ota_1,app,ota_1,,3M", partitions)
         self.assertIn("storage,data,spiffs,,4M", partitions)
+        self.assertIn("model,data,,,1M", partitions)
 
     def test_vocat_lowcost_16m8m_defaults_to_v1_0_audio_binding(self) -> None:
         profile = (ESP_DIR / "sdkconfig.defaults.vocat_lowcost_16m8m").read_text(encoding="utf-8")
@@ -146,11 +148,12 @@ class EspAssetTests(unittest.TestCase):
     def test_lowcost_default_trigger_is_gpio7_button_with_touch_override_available(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
 
-        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON", config)
+        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON_AND_WAKE_WORD", config)
         self.assertIn("#ifndef DEMO_BUTTON_GPIO", config)
         self.assertIn("#define DEMO_BUTTON_GPIO         GPIO_NUM_7", config)
         self.assertIn("#ifndef DEMO_TRIGGER_SOURCE", config)
         self.assertIn("DEMO_TRIGGER_SOURCE_TOUCH", config)
+        self.assertIn("DEMO_TRIGGER_SOURCE_BUTTON", config)
         self.assertNotIn("#define DEMO_BUTTON_GPIO         GPIO_NUM_6", config)
 
     def test_realtime_lowcost_observability_markers_are_present_without_release_boundary_changes(self) -> None:
@@ -179,6 +182,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("ota_0,app,ota_0,0x20000,3M", partitions)
         self.assertIn("ota_1,app,ota_1,,3M", partitions)
         self.assertIn("storage,data,spiffs,,4M", partitions)
+        self.assertIn("model,data,,,1M", partitions)
 
         release_logic_sources = "\n".join(
             path.read_text(encoding="utf-8")
@@ -330,6 +334,7 @@ class EspAssetTests(unittest.TestCase):
             "app_network_start",
             "app_network_is_connected",
             "app_network_enter_config_mode",
+            "app_network_reconfigure_blocking",
             "app_network_get_ssid",
         ):
             self.assertIn(symbol, network_header)
@@ -363,7 +368,10 @@ class EspAssetTests(unittest.TestCase):
     def test_wifi_board_lite_keeps_short_press_trigger_and_passwords_out_of_source(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
         trigger_source = (ESP_DIR / "main" / "trigger_input.c").read_text(encoding="utf-8")
+        trigger_header = (ESP_DIR / "main" / "trigger_input.h").read_text(encoding="utf-8")
         network_source = (ESP_DIR / "main" / "app_network.cc").read_text(encoding="utf-8")
+        network_header = (ESP_DIR / "main" / "app_network.h").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
         project_sources = "\n".join(
             path.read_text(encoding="utf-8")
             for path in (
@@ -374,10 +382,21 @@ class EspAssetTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON", config)
+        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON_AND_WAKE_WORD", config)
         self.assertIn("#define DEMO_BUTTON_GPIO         GPIO_NUM_7", config)
+        self.assertIn("#define DEMO_WIFI_RECONFIG_LONG_PRESS_MS 5000", config)
+        self.assertIn("TRIGGER_EVENT_WIFI_RECONFIG", trigger_header)
+        self.assertIn("button_press_in_progress", trigger_header)
+        self.assertIn("button_long_press_reported", trigger_header)
         self.assertIn("Button trigger event", trigger_source)
-        self.assertNotIn("button_long_press_enter_wifi_config", trigger_source)
+        self.assertIn("Button long press Wi-Fi reconfig event", trigger_source)
+        self.assertIn("pdMS_TO_TICKS(DEMO_WIFI_RECONFIG_LONG_PRESS_MS)", trigger_source)
+        self.assertIn("button_long_press_reported = true", trigger_source)
+        self.assertIn("app_network_reconfigure_blocking", network_header)
+        self.assertIn("app_network_reconfigure_blocking", network_source)
+        self.assertIn("APP_NETWORK_CONFIG_EXIT_BIT", network_source)
+        self.assertIn("wifi_reconfig_requested", main_source)
+        self.assertIn("app_network_reconfigure_blocking()", main_source)
         self.assertIn("DEMO_WIFI_PASSWORD[0] != '\\0'", network_source)
 
         for forbidden in (
@@ -386,8 +405,67 @@ class EspAssetTests(unittest.TestCase):
             "DEMO_WIFI_PASSWORD \"",
             "DEMO_WIFI_PASSWORD       \"1",
             "DEMO_WIFI_PASSWORD       \"p",
-        ):
+            ):
             self.assertNotIn(forbidden, project_sources)
+
+    def test_wakenet_spike_combines_xiaoming_wake_word_with_gpio7_button(self) -> None:
+        manifest = (ESP_DIR / "main" / "idf_component.yml").read_text(encoding="utf-8")
+        cmake = (ESP_DIR / "main" / "CMakeLists.txt").read_text(encoding="utf-8")
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        trigger_header = (ESP_DIR / "main" / "trigger_input.h").read_text(encoding="utf-8")
+        trigger_source = (ESP_DIR / "main" / "trigger_input.c").read_text(encoding="utf-8")
+        wake_header = (ESP_DIR / "main" / "wake_word_service.h").read_text(encoding="utf-8")
+        wake_source = (ESP_DIR / "main" / "wake_word_service.c").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        lowcost_profile = (ESP_DIR / "sdkconfig.defaults.vocat_lowcost_16m8m").read_text(encoding="utf-8")
+        partitions = (ESP_DIR / "partitions.csv").read_text(encoding="utf-8").replace(" ", "")
+
+        self.assertIn("espressif/esp-sr", manifest)
+        self.assertIn('"wake_word_service.c"', cmake)
+        self.assertIn("espressif__esp-sr", cmake)
+
+        self.assertIn("DEMO_TRIGGER_SOURCE_BUTTON_AND_WAKE_WORD", config)
+        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON_AND_WAKE_WORD", config)
+        self.assertIn("#define DEMO_BUTTON_GPIO         GPIO_NUM_7", config)
+        self.assertIn("#define DEMO_WAKE_WORD_ENABLED 1", config)
+        self.assertIn('#define DEMO_WAKE_WORD_MODEL_NAME "wn9_xiaomingtongxue_tts2"', config)
+        self.assertIn("CONFIG_SR_WN_WN9_XIAOMINGTONGXUE_TTS2=y", lowcost_profile)
+
+        self.assertIn("Button trigger event", trigger_source)
+        self.assertIn("wake_word_service_start", trigger_source)
+        self.assertIn("wake_word_service_poll", trigger_source)
+        self.assertIn("button fallback", trigger_source)
+        self.assertIn("TRIGGER_EVENT_WAKE_WORD", trigger_header)
+        self.assertIn("trigger_input_set_accepting", trigger_header)
+        self.assertIn("wake_word_service_set_accepting", wake_header)
+
+        for marker in (
+            "wake_word_enabled",
+            "wake_word_model",
+            "wake_word_button_fallback",
+        ):
+            self.assertIn(marker, main_source)
+        self.assertIn("wn9_xiaomingtongxue_tts2", wake_header)
+        self.assertIn("wn9_xiaomingtongxue_tts2", wake_source)
+        self.assertIn("esp_srmodel_init(\"model\")", wake_source)
+        self.assertIn("wake_word_service_stop", wake_source)
+        self.assertIn("wake_word_detected", wake_source)
+
+        self.assertIn("ota_0,app,ota_0,0x20000,3M", partitions)
+        self.assertIn("ota_1,app,ota_1,,3M", partitions)
+        self.assertIn("storage,data,spiffs,,4M", partitions)
+        self.assertIn("model,data,,,1M", partitions)
+        self.assertIn("CONFIG_MODEL_IN_FLASH=y", lowcost_profile)
+
+        untouched_release_and_server_paths = (
+            ROOT / "src" / "api" / "realtime.py",
+            ROOT / "src" / "providers" / "realtime_asr.py",
+            ROOT / "src" / "settings.py",
+            ROOT / "scripts" / "ota_release_create.py",
+            ROOT / "scripts" / "build_esp_p3d_canary_artifact.sh",
+        )
+        for path in untouched_release_and_server_paths:
+            self.assertNotIn("wn9_xiaomingtongxue_tts2", path.read_text(encoding="utf-8"))
 
     def test_realtime_audio_defaults_leave_headroom_for_parallel_intro(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
@@ -646,6 +724,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("CANARY_DEVICE_ID=${CANARY_DEVICE_ID:-miaoban-v1p2-002}", script)
         self.assertIn("CANARY_TRIGGER_SOURCE=\"${CANARY_TRIGGER_SOURCE:-button}\"", script)
         self.assertIn("CANARY_BUTTON_GPIO=\"${CANARY_BUTTON_GPIO:-7}\"", script)
+        self.assertIn("BUTTON_AND_WAKE_WORD", script)
         self.assertIn("DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_${CANARY_TRIGGER_SOURCE_UPPER}", script)
         self.assertIn("DEMO_BUTTON_GPIO         GPIO_NUM_${CANARY_BUTTON_GPIO}", script)
         self.assertNotIn("DEMO_WIFI_PASSWORD", script)
@@ -661,6 +740,8 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_OTA_BOOT_SWITCH_ENABLED 1", script)
         self.assertIn("DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1", script)
         self.assertIn("CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y", script)
+        self.assertIn('"button_and_wake_word": "BUTTON_AND_WAKE_WORD"', script)
+        self.assertIn("--trigger-source", script)
         self.assertIn("--include-managed-components", script)
         self.assertNotIn("DEMO_WIFI_PASSWORD", script)
 

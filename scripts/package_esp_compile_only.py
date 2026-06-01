@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import shutil
 import tarfile
 import tempfile
@@ -12,6 +13,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ESP_SYSTEM_EVENT_TASK_STACK_CONFIG = "CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096"
 SYSTEM_EVENT_TASK_STACK_CONFIG = "CONFIG_SYSTEM_EVENT_TASK_STACK_SIZE=4096"
+TRIGGER_SOURCE_MACROS = {
+    "button": "BUTTON",
+    "touch": "TOUCH",
+    "wake_word": "WAKE_WORD",
+    "button_and_wake_word": "BUTTON_AND_WAKE_WORD",
+}
 
 
 BASE_EXCLUDED_DIRS = {
@@ -65,6 +72,19 @@ def _set_sdkconfig_value(text: str, key: str, value: str) -> str:
     return text.rstrip() + f"\n{line}\n"
 
 
+def _set_trigger_source(text: str, trigger_source: str, *, path: Path) -> str:
+    macro_suffix = TRIGGER_SOURCE_MACROS[trigger_source]
+    pattern = re.compile(
+        r"^#define\s+DEMO_TRIGGER_SOURCE\s+DEMO_TRIGGER_SOURCE_[A-Z_]+$",
+        re.MULTILINE,
+    )
+    replacement = f"#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_{macro_suffix}"
+    updated, count = pattern.subn(replacement, text, count=1)
+    if count != 1:
+        raise SystemExit(f"missing expected DEMO_TRIGGER_SOURCE define in {path}")
+    return updated
+
+
 def _inject_p3d_canary_config(
     esp_dest: Path,
     *,
@@ -109,12 +129,7 @@ def _inject_p3d_canary_config(
         "#define DEMO_OTA_ROLLBACK_VALIDATION_ENABLED 1",
         path=config_path,
     )
-    config = _replace_required(
-        config,
-        "#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON",
-        f"#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_{trigger_source.upper()}",
-        path=config_path,
-    )
+    config = _set_trigger_source(config, trigger_source, path=config_path)
     config = _replace_required(
         config,
         "#define DEMO_BUTTON_GPIO         GPIO_NUM_7",
@@ -292,7 +307,7 @@ def main() -> int:
     parser.add_argument("--device-id", default="miaoban-v1p2-002")
     parser.add_argument("--wifi-ssid", default="GMT-G60")
     parser.add_argument("--server-base-url", default="http://106.54.240.51")
-    parser.add_argument("--trigger-source", choices=("button", "touch", "wake_word"), default="button")
+    parser.add_argument("--trigger-source", choices=tuple(TRIGGER_SOURCE_MACROS), default="button")
     parser.add_argument("--button-gpio", type=int, default=7)
     parser.add_argument("--default-port", default="COM3")
     parser.add_argument(

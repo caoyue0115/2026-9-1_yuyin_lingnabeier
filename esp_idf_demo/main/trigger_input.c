@@ -1,6 +1,7 @@
 #include "trigger_input.h"
 
 #include "config.h"
+#include "wake_word_service.h"
 
 #include "bsp/touch.h"
 #include "driver/gpio.h"
@@ -20,6 +21,10 @@ const char *trigger_input_source_name(trigger_event_type_t type)
         return "touch";
     case TRIGGER_EVENT_WAKE_WORD:
         return "wake_word";
+    case TRIGGER_EVENT_BUTTON_AND_WAKE_WORD:
+        return "button+wake_word";
+    case TRIGGER_EVENT_WIFI_RECONFIG:
+        return "wifi_reconfig";
     case TRIGGER_EVENT_NONE:
     default:
         return "none";
@@ -35,6 +40,8 @@ trigger_event_type_t trigger_input_configured_source(void)
         return TRIGGER_EVENT_TOUCH;
     case DEMO_TRIGGER_SOURCE_WAKE_WORD:
         return TRIGGER_EVENT_WAKE_WORD;
+    case DEMO_TRIGGER_SOURCE_BUTTON_AND_WAKE_WORD:
+        return TRIGGER_EVENT_BUTTON_AND_WAKE_WORD;
     default:
         return TRIGGER_EVENT_NONE;
     }
@@ -64,6 +71,9 @@ static esp_err_t trigger_input_init_button(trigger_input_t *trigger)
     trigger->last_sample_level = initial_level;
     trigger->last_change_tick = xTaskGetTickCount();
     trigger->debounce_ticks = pdMS_TO_TICKS(DEMO_BUTTON_DEBOUNCE_MS);
+    trigger->button_active_since_tick = 0;
+    trigger->button_press_in_progress = false;
+    trigger->button_long_press_reported = false;
 
     ESP_LOGI(TAG,
              "Initialized GPIO trigger on GPIO %d (active level %d initial_level=%d)",
@@ -88,6 +98,38 @@ static esp_err_t trigger_input_init_touch(trigger_input_t *trigger)
     return ESP_OK;
 }
 
+static bool trigger_input_is_button_enabled(const trigger_input_t *trigger)
+{
+    return trigger->configured_source == TRIGGER_EVENT_BUTTON ||
+           trigger->configured_source == TRIGGER_EVENT_BUTTON_AND_WAKE_WORD;
+}
+
+static bool trigger_input_is_wake_word_enabled(const trigger_input_t *trigger)
+{
+    return trigger->configured_source == TRIGGER_EVENT_WAKE_WORD ||
+           trigger->configured_source == TRIGGER_EVENT_BUTTON_AND_WAKE_WORD;
+}
+
+static esp_err_t trigger_input_start_wake_word(trigger_input_t *trigger)
+{
+#if DEMO_WAKE_WORD_ENABLED
+    esp_err_t ret = wake_word_service_start();
+    if (ret != ESP_OK && !trigger->wake_word_fallback_logged) {
+        ESP_LOGW(TAG,
+                 "wake_word_start_failed err=%s; keeping GPIO7 button fallback active",
+                 esp_err_to_name(ret));
+        trigger->wake_word_fallback_logged = true;
+    }
+    return ret;
+#else
+    if (!trigger->wake_word_fallback_logged) {
+        ESP_LOGI(TAG, "wake_word_disabled; keeping GPIO7 button fallback active");
+        trigger->wake_word_fallback_logged = true;
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
 esp_err_t trigger_input_init(trigger_input_t *trigger)
 {
     if (trigger == NULL) {
@@ -95,21 +137,113 @@ esp_err_t trigger_input_init(trigger_input_t *trigger)
     }
 
     trigger->configured_source = trigger_input_configured_source();
+    trigger->accepting_events = true;
     switch (trigger->configured_source) {
     case TRIGGER_EVENT_BUTTON:
         return trigger_input_init_button(trigger);
     case TRIGGER_EVENT_TOUCH:
         return trigger_input_init_touch(trigger);
     case TRIGGER_EVENT_WAKE_WORD:
-        ESP_LOGW(TAG,
-                 "Wake-word trigger selected for %s %s, but wake-word integration is not implemented yet",
-                 DEMO_BOARD_NAME,
-                 DEMO_BOARD_REVISION);
-        return ESP_ERR_NOT_SUPPORTED;
+        return trigger_input_start_wake_word(trigger);
+    case TRIGGER_EVENT_BUTTON_AND_WAKE_WORD: {
+        esp_err_t button_ret = trigger_input_init_button(trigger);
+        if (button_ret != ESP_OK) {
+            return button_ret;
+        }
+        (void)trigger_input_start_wake_word(trigger);
+        ESP_LOGI(TAG, "Initialized combined GPIO7 button + WakeNet wake_word trigger with button fallback");
+        return ESP_OK;
+    }
     case TRIGGER_EVENT_NONE:
     default:
         return ESP_ERR_INVALID_STATE;
     }
+}
+
+void trigger_input_set_accepting(trigger_input_t *trigger, bool accepting)
+{
+    if (trigger == NULL) {
+        return;
+    }
+
+    if (trigger->accepting_events == accepting) {
+        return;
+    }
+
+    trigger->accepting_events = accepting;
+    if (!trigger_input_is_wake_word_enabled(trigger)) {
+        return;
+    }
+
+    if (accepting) {
+        (void)trigger_input_start_wake_word(trigger);
+    } else {
+        wake_word_service_stop();
+        ESP_LOGI(TAG, "wake_word_paused_for_pipeline; button fallback remains active");
+    }
+}
+
+static bool trigger_input_poll_button(trigger_input_t *trigger, trigger_event_t *out_event)
+{
+    const TickType_t now = xTaskGetTickCount();
+    const int current_level = gpio_get_level(DEMO_BUTTON_GPIO);
+
+    if (current_level != trigger->last_sample_level) {
+        ESP_LOGI(TAG, "GPIO trigger raw level change: gpio=%d level=%d", DEMO_BUTTON_GPIO, current_level);
+        trigger->last_sample_level = current_level;
+        trigger->last_change_tick = now;
+        return false;
+    }
+
+    if ((now - trigger->last_change_tick) < trigger->debounce_ticks) {
+        return false;
+    }
+
+    if (trigger->debounced_level == current_level) {
+        if (current_level == trigger->active_level &&
+            trigger->button_press_in_progress &&
+            !trigger->button_long_press_reported &&
+            (now - trigger->button_active_since_tick) >= pdMS_TO_TICKS(DEMO_WIFI_RECONFIG_LONG_PRESS_MS)) {
+            trigger->button_long_press_reported = true;
+            out_event->type = TRIGGER_EVENT_WIFI_RECONFIG;
+            ESP_LOGI(TAG,
+                     "Button long press Wi-Fi reconfig event: gpio=%d hold_ms=%d",
+                     DEMO_BUTTON_GPIO,
+                     DEMO_WIFI_RECONFIG_LONG_PRESS_MS);
+            return true;
+        }
+        return false;
+    }
+
+    trigger->debounced_level = current_level;
+    ESP_LOGI(TAG, "GPIO trigger debounced level: gpio=%d level=%d", DEMO_BUTTON_GPIO, current_level);
+    if (current_level == trigger->active_level) {
+        trigger->button_press_in_progress = true;
+        trigger->button_active_since_tick = now;
+        trigger->button_long_press_reported = false;
+        ESP_LOGI(TAG, "Button press started: gpio=%d level=%d", DEMO_BUTTON_GPIO, current_level);
+        return false;
+    }
+
+    if (trigger->button_press_in_progress) {
+        const TickType_t held_ticks = now - trigger->button_active_since_tick;
+        const bool long_press_reported = trigger->button_long_press_reported;
+        trigger->button_press_in_progress = false;
+        trigger->button_active_since_tick = 0;
+        trigger->button_long_press_reported = false;
+
+        if (!long_press_reported) {
+            out_event->type = TRIGGER_EVENT_BUTTON;
+            ESP_LOGI(TAG,
+                     "Button trigger event: gpio=%d level=%d held_ms=%u",
+                     DEMO_BUTTON_GPIO,
+                     current_level,
+                     (unsigned)(held_ticks * portTICK_PERIOD_MS));
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool trigger_input_poll(trigger_input_t *trigger, trigger_event_t *out_event)
@@ -125,6 +259,18 @@ bool trigger_input_poll(trigger_input_t *trigger, trigger_event_t *out_event)
     if (!trigger->initialized) {
         if (trigger_input_init(trigger) != ESP_OK) {
             return false;
+        }
+    }
+
+    if (trigger_input_is_wake_word_enabled(trigger) && trigger->accepting_events) {
+        wake_word_detection_t detection = {0};
+        if (wake_word_service_poll(&detection)) {
+            out_event->type = TRIGGER_EVENT_WAKE_WORD;
+            ESP_LOGI(TAG,
+                     "Wake word trigger event: word=%s model=%s; GPIO7 button fallback remains active",
+                     detection.word,
+                     detection.model);
+            return true;
         }
     }
 
@@ -155,7 +301,7 @@ bool trigger_input_poll(trigger_input_t *trigger, trigger_event_t *out_event)
         return false;
     }
 
-    if (trigger->configured_source != TRIGGER_EVENT_BUTTON) {
+    if (!trigger_input_is_button_enabled(trigger)) {
         if (!trigger->warned_unsupported) {
             ESP_LOGW(TAG,
                      "Trigger source %s is configured but not active in this build",
@@ -165,31 +311,5 @@ bool trigger_input_poll(trigger_input_t *trigger, trigger_event_t *out_event)
         return false;
     }
 
-    const TickType_t now = xTaskGetTickCount();
-    const int current_level = gpio_get_level(DEMO_BUTTON_GPIO);
-
-    if (current_level != trigger->last_sample_level) {
-        ESP_LOGI(TAG, "GPIO trigger raw level change: gpio=%d level=%d", DEMO_BUTTON_GPIO, current_level);
-        trigger->last_sample_level = current_level;
-        trigger->last_change_tick = now;
-        return false;
-    }
-
-    if ((now - trigger->last_change_tick) < trigger->debounce_ticks) {
-        return false;
-    }
-
-    if (trigger->debounced_level == current_level) {
-        return false;
-    }
-
-    trigger->debounced_level = current_level;
-    ESP_LOGI(TAG, "GPIO trigger debounced level: gpio=%d level=%d", DEMO_BUTTON_GPIO, current_level);
-    if (current_level == trigger->active_level) {
-        out_event->type = TRIGGER_EVENT_BUTTON;
-        ESP_LOGI(TAG, "Button trigger event: gpio=%d level=%d", DEMO_BUTTON_GPIO, current_level);
-        return true;
-    }
-
-    return false;
+    return trigger_input_poll_button(trigger, out_event);
 }

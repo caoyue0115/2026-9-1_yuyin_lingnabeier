@@ -8,3 +8,5 @@ dependencies:
     version: "*"
   78/esp-wifi-connect:
     version: "3.1.4"
+  espressif/esp-sr:
+    version: "2.4.6"

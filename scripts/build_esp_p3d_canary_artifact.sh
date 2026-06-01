@@ -18,9 +18,9 @@ CANARY_BUTTON_GPIO="${CANARY_BUTTON_GPIO:-7}"
 CANARY_TRIGGER_SOURCE_UPPER="$(printf '%s' "${CANARY_TRIGGER_SOURCE}" | tr '[:lower:]' '[:upper:]')"
 
 case "${CANARY_TRIGGER_SOURCE_UPPER}" in
-  BUTTON|TOUCH|WAKE_WORD) ;;
+  BUTTON|TOUCH|WAKE_WORD|BUTTON_AND_WAKE_WORD) ;;
   *)
-    echo "unsupported CANARY_TRIGGER_SOURCE=${CANARY_TRIGGER_SOURCE}; expected button, touch, or wake_word" >&2
+    echo "unsupported CANARY_TRIGGER_SOURCE=${CANARY_TRIGGER_SOURCE}; expected button, touch, wake_word, or button_and_wake_word" >&2
     exit 1
     ;;
 esac

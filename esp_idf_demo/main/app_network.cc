@@ -169,6 +169,38 @@ esp_err_t app_network_enter_config_mode(void)
     return ESP_OK;
 }
 
+esp_err_t app_network_reconfigure_blocking(void)
+{
+    ESP_LOGI(TAG, "wifi_reconfig_start");
+
+    esp_err_t ret = app_network_enter_config_mode();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "wifi_reconfig_enter_config_failed err=%s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    xEventGroupWaitBits(s_network_event_group,
+                        APP_NETWORK_CONFIG_EXIT_BIT,
+                        pdTRUE,
+                        pdFALSE,
+                        portMAX_DELAY);
+    ESP_LOGI(TAG, "wifi_reconfig_config_done");
+
+    if (!app_network_has_saved_credentials()) {
+        ESP_LOGW(TAG, "wifi_reconfig_no_saved_credentials_after_config");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ret = app_network_try_station_connect();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_reconfig_station_connect_failed err=%s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "wifi_reconfig_done ssid=%s", app_network_get_ssid());
+    return ESP_OK;
+}
+
 esp_err_t app_network_start(void)
 {
     ESP_LOGI(TAG, "network_start");

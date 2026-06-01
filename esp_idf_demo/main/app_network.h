@@ -11,6 +11,7 @@ extern "C" {
 esp_err_t app_network_start(void);
 bool app_network_is_connected(void);
 esp_err_t app_network_enter_config_mode(void);
+esp_err_t app_network_reconfigure_blocking(void);
 const char *app_network_get_ssid(void);
 
 #ifdef __cplusplus

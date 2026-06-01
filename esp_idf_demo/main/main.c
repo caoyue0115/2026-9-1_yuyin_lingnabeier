@@ -133,6 +133,11 @@ static void app_log_runtime_config(void)
              (int)DEMO_AUDIO_PA_GPIO,
              DEMO_AUDIO_GPIO48_ENABLE);
     ESP_LOGI(TAG, "  trigger_source=%s", trigger_input_source_name(trigger_input_configured_source()));
+    ESP_LOGI(TAG,
+             "  wake_word_enabled=%d wake_word_model=%s wake_word_text=%s wake_word_button_fallback=1",
+             DEMO_WAKE_WORD_ENABLED,
+             DEMO_WAKE_WORD_MODEL_NAME,
+             DEMO_WAKE_WORD_TEXT);
     ESP_LOGI(TAG, "  wifi_ssid=%s", DEMO_WIFI_SSID);
     ESP_LOGI(TAG, "  server_base_url=%s", DEMO_SERVER_BASE_URL);
     ESP_LOGI(TAG, "  device_id=%s", DEMO_DEVICE_ID);
@@ -2267,8 +2272,32 @@ static void app_runtime_task(void *arg)
 #endif
         app_poll_ota_manifest_dry_run_if_due();
 
+        trigger_input_set_accepting(&trigger, s_app_state == APP_STATE_IDLE && s_pipeline_task_handle == NULL);
+
         trigger_event_t event = {0};
         if (trigger_input_poll(&trigger, &event)) {
+            if (event.type == TRIGGER_EVENT_WIFI_RECONFIG) {
+                if (s_app_state == APP_STATE_IDLE && s_pipeline_task_handle == NULL) {
+                    ESP_LOGI(TAG,
+                             "wifi_reconfig_requested source=%s hold_ms=%d",
+                             trigger_input_source_name(event.type),
+                             DEMO_WIFI_RECONFIG_LONG_PRESS_MS);
+                    trigger_input_set_accepting(&trigger, false);
+                    esp_err_t ret = app_network_reconfigure_blocking();
+                    if (ret != ESP_OK) {
+                        ESP_LOGE(TAG, "wifi_reconfig_failed err=%s", esp_err_to_name(ret));
+                    }
+                    trigger_input_set_accepting(&trigger, true);
+                } else {
+                    ESP_LOGW(TAG,
+                             "Wi-Fi reconfig ignored: state=%s pipeline_task=%s",
+                             app_state_to_string(s_app_state),
+                             s_pipeline_task_handle == NULL ? "none" : "busy");
+                }
+                vTaskDelay(pdMS_TO_TICKS(DEMO_TRIGGER_POLL_INTERVAL_MS));
+                continue;
+            }
+
             if (s_app_state == APP_STATE_IDLE && s_pipeline_task_handle == NULL) {
                 ESP_LOGI(TAG, "trigger source=%s x=%u y=%u -> starting pipeline",
                          trigger_input_source_name(event.type),
