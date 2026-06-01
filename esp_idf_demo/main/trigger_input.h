@@ -28,7 +28,14 @@ typedef struct {
     TickType_t debounce_ticks;
     TickType_t button_active_since_tick;
     bool button_press_in_progress;
-    bool button_long_press_reported;
+    bool wifi_reconfig_initialized;
+    int wifi_reconfig_active_level;
+    int wifi_reconfig_debounced_level;
+    int wifi_reconfig_last_sample_level;
+    TickType_t wifi_reconfig_last_change_tick;
+    TickType_t wifi_reconfig_active_since_tick;
+    bool wifi_reconfig_press_in_progress;
+    bool wifi_reconfig_long_press_reported;
     trigger_event_type_t configured_source;
     esp_lcd_touch_handle_t touch_handle;
     bool touch_pressed;

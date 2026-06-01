@@ -420,6 +420,23 @@
 #define DEMO_BUTTON_PULL_DOWN_ENABLE 0
 #endif
 
+// GPIO0 is sampled only after normal firmware boot. Holding it during reset
+// still follows the ESP32-S3 strapping/download behavior.
+#ifndef DEMO_WIFI_RECONFIG_GPIO
+#define DEMO_WIFI_RECONFIG_GPIO  GPIO_NUM_0
+#endif
+#ifndef DEMO_WIFI_RECONFIG_ACTIVE_LEVEL
+#define DEMO_WIFI_RECONFIG_ACTIVE_LEVEL 0
+#endif
+
+#ifndef DEMO_WIFI_RECONFIG_PULL_UP_ENABLE
+#define DEMO_WIFI_RECONFIG_PULL_UP_ENABLE 1
+#endif
+
+#ifndef DEMO_WIFI_RECONFIG_PULL_DOWN_ENABLE
+#define DEMO_WIFI_RECONFIG_PULL_DOWN_ENABLE 0
+#endif
+
 #ifndef DEMO_BUTTON_DEBOUNCE_MS
 #define DEMO_BUTTON_DEBOUNCE_MS   20
 #endif
