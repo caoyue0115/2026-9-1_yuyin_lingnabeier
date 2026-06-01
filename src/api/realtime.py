@@ -112,6 +112,21 @@ def _frame_audio_packets(chunks):
         sequence += 1
 
 
+def _log_first_audio_body_chunk(chunks, *, session_id: str, selected_format: str, started_at: float):
+    first_chunk_logged = False
+    for chunk in chunks:
+        if not first_chunk_logged:
+            first_chunk_logged = True
+            logger.info(
+                "realtime_audio_body_first_yield session_id=%s audio_format=%s audio_body_first_yield_ms=%.1f chunk_bytes=%d",
+                session_id,
+                selected_format,
+                (time.perf_counter() - started_at) * 1000.0,
+                len(chunk),
+            )
+        yield chunk
+
+
 def _opus_error_detail(exc: OpusError) -> str:
     return str(exc).split(":", 1)[0] or "opus_decode_failed"
 
@@ -1030,6 +1045,7 @@ def get_realtime_audio(
     session_id: str,
     x_accept_audio_format: str | None = Header(default=None),
 ):
+    audio_request_started_at = time.perf_counter()
     session = store.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="session_not_found")
@@ -1108,6 +1124,12 @@ def get_realtime_audio(
             }
         )
     body_iterator = _frame_audio_packets(body_iterator)
+    body_iterator = _log_first_audio_body_chunk(
+        body_iterator,
+        session_id=session_id,
+        selected_format=selected_format,
+        started_at=audio_request_started_at,
+    )
 
     return StreamingResponse(
         body_iterator,
