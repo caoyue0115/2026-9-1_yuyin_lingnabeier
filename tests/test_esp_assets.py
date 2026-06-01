@@ -289,6 +289,56 @@ class EspAssetTests(unittest.TestCase):
             self.assertIn("App version:      v37-p3d-canary", build_info_text)
             self.assertIn("app_version=v37-p3d-canary", build_info_text)
 
+    def test_compile_only_packager_preserves_managed_component_checksum_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_root = tmp_path / "source"
+            esp_source = source_root / "esp_idf_demo"
+            cjson_dir = esp_source / "managed_components" / "espressif__cjson" / "cJSON"
+            lvgl_dir = (
+                esp_source
+                / "managed_components"
+                / "lvgl__lvgl"
+                / "tests"
+                / "test_images"
+                / "stride_align64"
+                / "LZ4"
+            )
+            cjson_dir.mkdir(parents=True)
+            lvgl_dir.mkdir(parents=True)
+            (esp_source / "main").mkdir(parents=True)
+            (esp_source / "main" / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            (esp_source / "CMakeLists.txt").write_text("project(esp_idf_demo)\n", encoding="utf-8")
+            (cjson_dir / ".git").write_text("gitdir: ../.git/modules/cJSON\n", encoding="utf-8")
+            (lvgl_dir / "test_A1.bin").write_bytes(b"checksum fixture")
+
+            output = tmp_path / "esp_compile_only_with_managed.tar.gz"
+            subprocess.run(
+                [
+                    "python3",
+                    str(ROOT / "scripts" / "package_esp_compile_only.py"),
+                    "--source",
+                    str(source_root),
+                    "--output",
+                    str(output),
+                    "--project-version",
+                    "v37-p3d-canary",
+                    "--include-managed-components",
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+            with tarfile.open(output, "r:gz") as archive:
+                names = set(archive.getnames())
+
+            self.assertIn("esp_idf_demo/managed_components/espressif__cjson/cJSON/.git", names)
+            self.assertIn(
+                "esp_idf_demo/managed_components/lvgl__lvgl/tests/test_images/stride_align64/LZ4/test_A1.bin",
+                names,
+            )
+
     def test_realtime_intro_config_is_explicit(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
 

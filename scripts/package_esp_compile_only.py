@@ -41,7 +41,19 @@ def _copy_source_tree(source_root: Path, staging_root: Path, *, include_managed_
     if not include_managed_components:
         excluded_dirs.add("managed_components")
 
-    def ignore(_: str, names: list[str]) -> set[str]:
+    managed_root = esp_source / "managed_components"
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        current = Path(directory).resolve()
+        preserve_managed_contents = (
+            include_managed_components
+            and managed_root.exists()
+            and (current == managed_root or managed_root in current.parents)
+        )
+
+        if preserve_managed_contents:
+            return {name for name in names if name.endswith(".pyc")}
+
         ignored = {name for name in names if name in excluded_dirs}
         ignored.update(name for name in names if name.endswith(".pyc"))
         ignored.update(name for name in names if name.endswith(".bin"))
