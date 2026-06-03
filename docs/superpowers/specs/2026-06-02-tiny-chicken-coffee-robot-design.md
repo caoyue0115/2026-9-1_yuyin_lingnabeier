@@ -10,7 +10,7 @@ The first implementation target is a 32MB Flash + 8MB PSRAM ESP32-S3-style board
 
 - New project directory: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot`.
 - New GitHub repository: `https://github.com/675401943/20260601_tiny_chicken_coffee_robot.git`.
-- Initial implementation style: fork/copy current v6, then isolate and slim into a tiny chicken variant.
+- Initial implementation style: create a clean copy from current v6, then isolate and slim into a tiny chicken variant.
 - Deployment target: Guangzhou server, not `greenunion-sh`.
 - Guangzhou server has no prepared directory yet; Codex will SSH later and create the deployment layout.
 - First deployment entry: IP + port for bring-up, domain/HTTPS later.
@@ -28,7 +28,7 @@ Uploaded material archive:
 
 - Original archive: `/mnt/data100/20260602_小鸡仔.rar`.
 - Extracted material root: `/mnt/data100/GMT/assets/20260602_tiny_chicken_materials`.
-- One file failed extraction and is currently unusable: `互动avi素材/1_base_sta_and_wakeup/device_unused.avi` is 0 bytes.
+- The original archive extraction produced a 0-byte `互动avi素材/1_base_sta_and_wakeup/device_unused.avi`; this has been replaced by a separately uploaded valid AVI at the extracted material path.
 
 Important material facts:
 
@@ -42,9 +42,23 @@ Important material facts:
 
 ## Architecture
 
+### Repository Safety
+
+The new repository must not be a GitHub fork that carries the full v6 git history.
+
+Required approach:
+
+- Create a clean working copy from the current v6 source tree.
+- Remove the old `.git` history before initializing the tiny repository.
+- Initialize a new git history for `20260601_tiny_chicken_coffee_robot`.
+- Set the new GitHub repository to private by default for phase 1 unless a separate public-release approval is given.
+- Before the first commit, verify `.gitignore` blocks `.env`, token files, Wi-Fi credentials, private keys, certificates, local deployment files, build outputs, and generated binary artifacts that should not be tracked.
+- Do not read, print, modify, or commit existing v6 secrets, tokens, Wi-Fi passwords, private keys, certificates, or production `.env` files during copy, cleanup, tests, or deployment preparation.
+- If secret-like material is detected by filename or scan, remove it from the clean copy without printing the value.
+
 ### Repository Split
 
-The new repository starts as a v6 copy so it inherits stable device/cloud building blocks:
+The new repository starts as a clean v6 source copy so it inherits stable device/cloud building blocks:
 
 - ESP-IDF board bring-up patterns.
 - Wi-Fi provisioning and reprovisioning patterns.
@@ -64,6 +78,15 @@ After the copy, rename and isolate:
 - Asset conversion and display module.
 
 Do not keep religion/v6 public naming in user-facing logs, README, deployment files, or product prompts, except in migration notes that explain the origin.
+
+Also explicitly remove or disable copied v6 religion-specific behavior:
+
+- Old religion system prompts.
+- Old religion few-shot examples.
+- Old religion/RAG knowledge data.
+- Old runtime defaults that route to v6 production cloud state.
+
+Phase 1 has no coffee RAG. It also must not accidentally preserve or query any old v6 RAG data.
 
 ### Cloud Deployment Isolation
 
@@ -100,6 +123,14 @@ Data must be separate from v6:
 
 Phase 1 deployment can use IP + port. Domain and TLS are deferred until device/cloud behavior is stable.
 
+Secrets and certificates:
+
+- Runtime secrets are supplied only on the Guangzhou server through a local `.env` or equivalent secret injection mechanism.
+- `.env`, private keys, API tokens, Wi-Fi credentials, and certificates must never be committed.
+- Health checks and probes must report presence/status only, never full values.
+- The implementation plan must identify who supplies `TINY_ARK_API_KEY`, Volcengine TTS credentials, and any ASR fallback credentials before deployment.
+- Key rotation and TLS certificate handling are deferred operational tasks, but the repo must not bake in placeholder real credentials.
+
 ## Device Design
 
 ### Hardware Baseline
@@ -112,6 +143,17 @@ Use the v6 ESP32-S3-style baseline but target:
 - Existing v6 audio chain, Wi-Fi, WakeNet, OTA structure as the starting point.
 
 The source material's BK7258/128MB Flash line is not the phase 1 implementation target.
+
+The implementation plan must include a 32MB Flash partition design before packaging assets. The partition budget must account for:
+
+- Bootloader and partition table.
+- NVS and OTA metadata.
+- Two OTA app slots if OTA rollback is retained.
+- WakeNet/model partition.
+- SPIFFS or asset storage for prompt audio and display assets.
+- Optional reserved space for future config/assets.
+
+Do not assume the current 16MB v6 partition table is valid for the 32MB display variant. Measure the converted MJPEG asset set and app binary before finalizing the table.
 
 ### Wake and Reprovisioning
 
@@ -183,6 +225,8 @@ frame offset + frame size entries
 ```
 
 The first firmware iteration may include only a curated subset of assets if partition size remains tight. With 32MB Flash, full current converted asset set is plausible but still must be measured after conversion.
+
+Early device validation must include a display throughput test for 240x240 MJPEG playback at the target frame rate. If 15fps is not stable with the chosen decoder and display bus, reduce FPS or asset complexity before broadening the asset set.
 
 ## Cloud Model Flow
 
@@ -311,24 +355,31 @@ Future alarm requirements from material:
 ## Deployment Plan Outline
 
 1. Create `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot` from current v6 baseline.
-2. Initialize/bind new GitHub repository.
-3. Rename product, compose project, env examples, README, and docs.
-4. Add tiny Doubao provider and config.
-5. Add fallback trace fields.
-6. Add display module scaffolding and asset conversion scripts.
-7. Add Guangzhou deployment runbook.
-8. SSH to Guangzhou server and create deployment directory only after the repo is ready and approved.
-9. Deploy to IP + port for bring-up.
-10. Move to domain/HTTPS only after device/cloud smoke tests pass.
+2. Remove old `.git`, clean secret-bearing files by path/pattern without printing values, and initialize a new private repository history.
+3. Confirm `.gitignore` and secret-scan rules before the first commit.
+4. Initialize/bind new GitHub repository.
+5. Rename product, compose project, env examples, README, and docs.
+6. Explicitly remove or disable copied v6 religion prompts, few-shot data, RAG data, and production cloud defaults.
+7. Design and validate the 32MB Flash partition table against app, model, prompt, and display asset sizes.
+8. Add tiny Doubao provider and config.
+9. Add fallback trace fields.
+10. Add display module scaffolding and asset conversion scripts.
+11. Add Guangzhou deployment runbook, including secret injection and owner checklist.
+12. SSH to Guangzhou server and create deployment directory only after the repo is ready and approved.
+13. Deploy to IP + port for bring-up.
+14. Move to domain/HTTPS only after device/cloud smoke tests pass.
 
 ## Open Risks
 
 - Official Doubao-Seed-2.0-mini audio input support is not yet confirmed from a locally readable API example. The provider must isolate this uncertainty.
 - Screen rotation and exact QSPI/SPI driver pins are not confirmed.
-- 32MB Flash is likely enough for converted selected assets, but full asset set must be measured after conversion.
+- 32MB Flash is likely enough for converted selected assets, but the partition table and full selected asset set must be measured after conversion.
+- New-repository creation can leak secrets if v6 history or secret-bearing files are copied incorrectly. Use a clean copy, new git history, default-private repository, `.gitignore`, and no-value secret cleanup before first commit.
+- Guangzhou server secret injection, certificate handling, and credential ownership must be defined before deployment.
+- Copied v6 religion prompts/RAG data must be explicitly removed or disabled so product behavior cannot leak old domain content.
 - Existing material says BLE provisioning, but phase 1 is not implementing app/mini-program or BLE provisioning.
 - Product material uses `小机仔` wake word, while phase 1 uses `小明同学`.
-- Uploaded `device_unused.avi` failed extraction and should be replaced if needed.
+- The extracted `device_unused.avi` was replaced by a valid separately uploaded AVI; still verify converted framing during asset conversion.
 
 ## Non-Goals For Phase 1
 
@@ -338,6 +389,7 @@ Future alarm requirements from material:
 - Custom `小机仔` wake word model.
 - Doubao audio output.
 - Alarm implementation.
+- OTA publishing or release actions.
 - Domain/HTTPS production hardening.
 - Cloud deployment on `greenunion-sh`.
 - Hardware migration to BK7258/128MB Flash.
