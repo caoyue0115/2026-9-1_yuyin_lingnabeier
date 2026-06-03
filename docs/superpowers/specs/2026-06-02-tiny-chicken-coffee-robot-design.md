@@ -4,7 +4,7 @@
 
 Create a new `v6_tiny` variant for the coffee-focused tiny chicken robot business line. It should reuse the proven v6 device/cloud foundations where they reduce risk, while separating repository, deployment, data, configuration, assets, and product behavior from the current v6 line.
 
-The first implementation target is a 32MB Flash + 8MB PSRAM ESP32-S3-style board with display. The uploaded chicken robot materials are product references for display, motion assets, interaction states, and future app/device behavior, but the first implementation remains on the 32MB/8MB hardware baseline rather than the BK7258/128MB Flash baseline shown in the material spreadsheet.
+The first implementation target is a 32MB Flash + 8MB PSRAM ESP32-S3-style board with display. The product name and future custom wake-word spelling are standardized as `小机仔`. The uploaded robot materials are product references for display, motion assets, interaction states, and future app/device behavior, but the first implementation remains on the 32MB/8MB hardware baseline rather than the BK7258/128MB Flash baseline shown in the material spreadsheet.
 
 ## Confirmed Decisions
 
@@ -26,7 +26,7 @@ The first implementation target is a 32MB Flash + 8MB PSRAM ESP32-S3-style board
 
 Uploaded material archive:
 
-- Original archive: `/mnt/data100/20260602_小鸡仔.rar`.
+- Original archive after normalized naming: `/mnt/data100/20260602_小机仔.rar`.
 - Extracted material root: `/mnt/data100/GMT/assets/20260602_tiny_chicken_materials`.
 - The original archive extraction produced a 0-byte `互动avi素材/1_base_sta_and_wakeup/device_unused.avi`; this has been replaced by a separately uploaded valid AVI at the extracted material path.
 
@@ -181,6 +181,8 @@ DISPLAY_SAFE_Y=<configurable>
 DISPLAY_ROTATION=0|90|180|270
 ```
 
+The 240x240 safe region exists to protect expressions and text from rounded-corner, circular, or other physical mask occlusion. The implementation plan must confirm the actual screen shape/mask and choose `DISPLAY_SAFE_X/Y` from hardware observation or customer material.
+
 Phase 1 display behavior:
 
 - Provide a display service/state machine that can show standby, wakeup, listening, thinking, speaking, happy, sad, angry, surprise, shutdown states.
@@ -223,6 +225,8 @@ fps=15
 frame_count
 frame offset + frame size entries
 ```
+
+The implementation plan must define `.idx` byte order, loop markers, animation names, and the asset manifest/registry format before firmware playback code depends on it.
 
 The first firmware iteration may include only a curated subset of assets if partition size remains tight. With 32MB Flash, full current converted asset set is plausible but still must be measured after conversion.
 
@@ -326,9 +330,11 @@ Future alarm requirements from material:
 - Confirm new repo history and remote.
 - Confirm copied v6 tests run before tiny-specific edits where practical.
 - Add tests that guard renamed env/project defaults and prevent greenunion/v6 state leakage.
+- Add regression tests or static checks that fail if copied v6 religion prompts, few-shot content, RAG data, or religion-specific runtime defaults remain enabled.
 
 ### Cloud Tests
 
+- Run a secret scanner such as `gitleaks` or `trufflehog` before first push, then keep it as a pre-push or CI gate for the new repository.
 - Unit-test Doubao provider request construction without printing secrets.
 - Mock success text output.
 - Mock audio-capability failure and verify fallback to ASR -> Doubao text.
@@ -363,7 +369,7 @@ Future alarm requirements from material:
 7. Design and validate the 32MB Flash partition table against app, model, prompt, and display asset sizes.
 8. Add tiny Doubao provider and config.
 9. Add fallback trace fields.
-10. Add display module scaffolding and asset conversion scripts.
+10. Add display module scaffolding and asset conversion scripts, including `.idx` byte order, loop markers, animation names, and manifest format.
 11. Add Guangzhou deployment runbook, including secret injection and owner checklist.
 12. SSH to Guangzhou server and create deployment directory only after the repo is ready and approved.
 13. Deploy to IP + port for bring-up.
@@ -378,7 +384,7 @@ Future alarm requirements from material:
 - Guangzhou server secret injection, certificate handling, and credential ownership must be defined before deployment.
 - Copied v6 religion prompts/RAG data must be explicitly removed or disabled so product behavior cannot leak old domain content.
 - Existing material says BLE provisioning, but phase 1 is not implementing app/mini-program or BLE provisioning.
-- Product material uses `小机仔` wake word, while phase 1 uses `小明同学`.
+- Product naming and future custom wake word are standardized as `小机仔`, while phase 1 uses `小明同学`.
 - The extracted `device_unused.avi` was replaced by a valid separately uploaded AVI; still verify converted framing during asset conversion.
 
 ## Non-Goals For Phase 1
