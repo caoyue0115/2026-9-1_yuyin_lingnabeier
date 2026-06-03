@@ -33,6 +33,34 @@
 - Before every implementation phase, run `git status --short --branch` in the relevant repo and preserve user-owned changes.
 - Before the first push and every later push, run a redacted secret scan and the tracked secret-name gate.
 
+
+## Shared Static Scan Terms
+
+Every cleanup task, tracked-file test, `git grep`, and secret/static scan that checks religion-domain residue must use this same term list over active git tracked files, excluding only `docs/migration/**`:
+
+```text
+佛
+佛说
+佛学
+佛教
+净土
+菩萨
+阿弥陀
+念佛
+东林
+往生
+极乐
+观音
+经文
+祷告
+圣经
+buddhism
+prayer
+sermon
+```
+
+The scan is intentionally broad. It is not limited to prompt, RAG, settings, or config paths. Residual ignored disk files are not accepted as test inputs; Task 2 deletes or migrates those files before `git init`.
+
 ## File And Directory Responsibilities
 
 - `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/.gitignore`: blocks local secrets, runtime state, build outputs, generated binaries, caches, and delivery archives.
@@ -140,6 +168,10 @@ Expected: command exits with status `0`. The source v6 repository remains untouc
 
 **Files:**
 - Delete from new copy before git init: listed v6-only paths
+- Modify before git init: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/src/services/realtime_session.py`
+- Modify before git init: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/src/workers/pipeline.py`
+- Modify before git init: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/src/providers/llm.py`
+- Modify before git init: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/src/settings.py`
 - Create: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/docs/migration/v6-bootstrap/`
 - Create later: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/docs/tiny/repository-bootstrap.md`
 
@@ -161,19 +193,65 @@ find docs/deploy -maxdepth 1 -type f \( -name 'greenunion-sh-*' -o -name 'v6-n16
 
 Expected: these paths are absent from the clean copy before the new repository exists. `src/rag/` is deleted by default; keeping it is allowed only in a later tiny-specific task that renames the module, removes old knowledge calls, and adds tests proving no copied religion-domain data is reachable.
 
-- [ ] **Step 2: Remove old deployment and handoff notes that would mix the product lines**
+- [ ] **Step 2: Replace hard-coded religion fallback answers and prompts before `git init`**
 
-Run path-only discovery:
+Run discovery on the four known leak paths:
+
+```bash
+rg -n '佛说不可曰|佛学问答助手|data_dir|buddhism|few-shot|few_shot' \
+  src/services/realtime_session.py \
+  src/workers/pipeline.py \
+  src/providers/llm.py \
+  src/settings.py
+```
+
+Apply these exact cleanup rules:
+
+- In `src/services/realtime_session.py`, replace every fallback assignment equivalent to `answer_text = "佛说不可曰"` with `answer_text = "我还没听清，可以再说一遍咖啡问题吗？"`.
+- In `src/workers/pipeline.py`, replace every fallback assignment equivalent to `answer_text = "佛说不可曰"` with `answer_text = "我还没听清，可以再说一遍咖啡问题吗？"`.
+- In `src/providers/llm.py`, replace the old system prompt and few-shot examples with the tiny coffee persona:
+
+```python
+TINY_COFFEE_SYSTEM_PROMPT = (
+    "你是小机仔，一只活泼懂咖啡的小机器人店员。"
+    "默认用中文回答，回答控制在1到3句话，具体、友好、适合咖啡新手。"
+    "可以回答咖啡豆、手冲、意式、奶咖、研磨度、萃取和风味问题。"
+)
+```
+
+- In `src/settings.py`, remove or replace every default that points to `buddhism`. If a data directory property is still needed, use a tiny-specific neutral path such as `data/tiny` or `data/coffee`. Phase 1 has no coffee RAG, so no runtime default may load an old knowledge directory.
+
+Run verification:
+
+```bash
+rg -n '佛说不可曰|佛学问答助手|data/buddhism|asr_hotwords[.]buddhism|buddhism' \
+  src/services/realtime_session.py \
+  src/workers/pipeline.py \
+  src/providers/llm.py \
+  src/settings.py || true
+```
+
+Expected: no output. This step closes the known leak paths that broad path-based tests can miss.
+
+- [ ] **Step 3: Remove old deployment, handoff, and root-level docs that would mix product lines**
+
+Run path-only discovery over root docs and shallow documentation trees:
 
 ```bash
 find . -maxdepth 3 -type f \
-  \( -iname '*handoff*' -o -iname '*deploy*' -o -iname '*release*' \) \
+  \( -name '*.md' -o -name '*.txt' -o -iname '*handoff*' -o -iname '*deploy*' -o -iname '*release*' \) \
   -print
 ```
 
-For every file that describes old v6 deployment, old production operations, old handoff packages, old release runbooks, or old server state, either delete it or move it under `docs/migration/v6-bootstrap/` if it is needed only as migration history. Do not open `.env`, key, token, certificate, or credential files while classifying paths.
+For every root-level `.md` or `.txt`, README, docs file, deployment note, handoff note, release note, or old server-state note that describes old v6 deployment, old production operations, old handoff packages, old release runbooks, old root manuals such as `快速启动手册.md` or `使用手册.md`, or old server state, do one of these before `git init`:
 
-- [ ] **Step 3: Decide `docs/superpowers` migration history**
+- delete it if it is not needed for the tiny repo;
+- move it under `docs/migration/v6-bootstrap/` if it is needed only as migration history;
+- rewrite it as active tiny documentation with no old production IP, no old server token, no religion-domain content, and no old release package instructions.
+
+Do not open `.env`, key, token, certificate, or credential files while classifying paths.
+
+- [ ] **Step 4: Decide `docs/superpowers` migration history**
 
 Use this policy:
 
@@ -193,27 +271,28 @@ rm -rf docs/superpowers
 
 Expected: retained migration context exists only under `docs/migration/v6-bootstrap/`; unrelated old v6 superpowers history is absent from active docs.
 
-- [ ] **Step 4: Remove active references to the old production target from scripts, tests, README, docs, and env examples**
+- [ ] **Step 5: Remove active references to the old production target from the whole active tree**
 
-Run path-only discovery:
+Run path-only discovery from the repository root:
 
 ```bash
-rg -l --glob '!.env*' --glob '!**/build*/**' --glob '!**/.git/**' \
+rg -l --glob '!.env*' --glob '!**/build*/**' --glob '!**/.git/**' --glob '!docs/migration/**' \
   '106\.54\.240\.51|greenunion-sh|greenunion_sh' \
-  README.md docs scripts tests esp_idf_demo src config *.example 2>/dev/null
+  .
 ```
 
-Expected after pruning: no active runtime/source/config/test/README/env-example files are listed. Hits under `docs/migration/` are allowed only as migration notes.
+Expected after pruning: no active runtime/source/config/test/README/root-doc/env-example files are listed.
 
 If an active path is listed, apply this fix policy:
 
 - `scripts/*`: remove concrete old IP/server defaults; require an explicit `--server-base-url` argument or tiny env value such as `TINY_SERVER_BASE_URL`.
 - `tests/*`: replace old IP fixtures with tiny-local values such as `http://tiny-server.test` or assert that no concrete production URL is embedded.
+- root-level `.md` or `.txt`: delete, migrate to `docs/migration/`, or rewrite as tiny-specific docs.
 - `README.md` and active docs: write "old v6 production line" or "non-shared production line" instead of old server tokens.
 - env examples: use empty values or fake local examples, never concrete production IPs.
 - device config: default server URL must be tiny-specific, empty, or local bring-up value; it must not point to the old v6 production target.
 
-- [ ] **Step 5: Verify pruned paths are gone before `git init`**
+- [ ] **Step 6: Verify pruned paths and known content leaks are gone before `git init`**
 
 Run:
 
@@ -225,9 +304,14 @@ test ! -e handoff
 test ! -e 部署计划大纲.md
 test ! -e 20260409_流式传输
 find docs/deploy -maxdepth 1 -type f \( -name 'greenunion-sh-*' -o -name 'v6-n16r8-release-handoff-*' \) -print
+rg -n '佛说不可曰|佛学问答助手|data/buddhism|asr_hotwords[.]buddhism|buddhism' \
+  src/services/realtime_session.py \
+  src/workers/pipeline.py \
+  src/providers/llm.py \
+  src/settings.py || true
 ```
 
-Expected: every `test ! -e` command exits `0`; the final `find` prints no files.
+Expected: every `test ! -e` command exits `0`; the `find` prints no files; the final `rg` prints no output.
 
 ### Task 3: Initialize New Repository, Ignore Rules, And Secret Gates
 
@@ -350,16 +434,43 @@ else
   exit 127
 fi
 
-known_v6_hits="$(git grep -Il -E 'DASHSCOPE_API_KEY|DASH_SCOPE_API_KEY|QWEN_API_KEY|DEMO_WIFI_PASSWORD|DEMO_WIFI_SSID|PUBLIC_BASE_URL=http://106[.]54[.]240[.]51|106[.]54[.]240[.]51|greenunion-sh|greenunion_sh|asr_hotwords[.]buddhism' -- ':!docs/migration/**' || true)"
-if [ -n "$known_v6_hits" ]; then
-  echo "blocked v6 production or credential-name residue in tracked files:" >&2
-  printf '%s\n' "$known_v6_hits" >&2
+dashscope='DASH''SCOPE_API_KEY'
+dash_scope='DASH''_SCOPE_API_KEY'
+qwen='QW''EN_API_KEY'
+wifi_password='DEMO_WIFI_PASS''WORD'
+wifi_ssid='DEMO_WIFI_SS''ID'
+old_host='green''union-sh'
+old_host_us='green''union_sh'
+b_word='bud''dhism'
+p_word='pr''ayer'
+s_word='ser''mon'
+src_rag='src/r''ag'
+cn_buddha=$(printf '\344\275\233')
+cn_buddha_said=$(printf '\344\275\233\350\257\264')
+cn_buddhist_study=$(printf '\344\275\233\345\255\246')
+cn_bdh=$(printf '\344\275\233\346\225\231')
+cn_pureland=$(printf '\345\207\200\345\234\237')
+cn_bodhisattva=$(printf '\350\217\251\350\220\250')
+cn_amitabha=$(printf '\351\230\277\345\274\245\351\231\200')
+cn_nianfo=$(printf '\345\277\265\344\275\233')
+cn_donglin=$(printf '\344\270\234\346\236\227')
+cn_rebirth=$(printf '\345\276\200\347\224\237')
+cn_sukhavati=$(printf '\346\236\201\344\271\220')
+cn_guanyin=$(printf '\350\247\202\351\237\263')
+cn_scripture=$(printf '\347\273\217\346\226\207')
+cn_pray=$(printf '\347\245\267\345\221\212')
+cn_bible=$(printf '\345\234\243\347\273\217')
+blocked_pattern="${dashscope}|${dash_scope}|${qwen}|${wifi_password}|${wifi_ssid}|PUBLIC_BASE_URL=http://106[.]54[.]240[.]51|106[.]54[.]240[.]51|${old_host}|${old_host_us}|asr_hotwords[.]${b_word}|data/${b_word}|${src_rag}|${cn_buddha}|${cn_buddha_said}|${cn_buddhist_study}|${cn_bdh}|${cn_pureland}|${cn_bodhisattva}|${cn_amitabha}|${cn_nianfo}|${cn_donglin}|${cn_rebirth}|${cn_sukhavati}|${cn_guanyin}|${cn_scripture}|${cn_pray}|${cn_bible}|${b_word}|${p_word}|${s_word}"
+blocked_hits="$(git grep -Il -E "$blocked_pattern" -- ':!docs/migration/**' || true)"
+if [ -n "$blocked_hits" ]; then
+  echo "blocked v6 production, credential-name, or religion-domain residue in tracked active files:" >&2
+  printf '%s\n' "$blocked_hits" >&2
   exit 1
 fi
 
 generic_hits="$(git grep -Il -E 'SSID|PASSWORD|API[_-]?KEY|TOKEN|SECRET|CREDENTIAL|PRIVATE[_-]?KEY|CERT' -- ':!docs/migration/**' ':!.github/workflows/secret-scan.yml' ':!scripts/security/secret_scan.sh' ':!scripts/git-hooks/pre-push' ':!.gitignore' || true)"
 if [ -n "$generic_hits" ]; then
-  echo "sensitive field names are present; path-only audit follows. Values are not printed." >&2
+  echo "sensitive field names are present; path-only audit follows. Values are not printed. This audit output does not block by itself; scanner exit code and blocked_pattern hits are the blocking gates." >&2
   printf '%s\n' "$generic_hits" >&2
 fi
 ```
@@ -371,6 +482,8 @@ chmod +x scripts/security/secret_scan.sh
 ```
 
 Expected: script is executable and prints only file paths for targeted name checks, never matching values.
+
+Use obviously test-only fake values that avoid high-entropy or real-token shapes. If gitleaks flags a fixed fake value in tests, add a narrow `.gitleaksignore` or gitleaks allowlist entry scoped to that exact test file and exact fake value. Do not weaken scanner rules globally.
 
 - [ ] **Step 4: Add tracked pre-push hook template**
 
@@ -446,7 +559,7 @@ Bootstrap rules:
 **Files:**
 - Create: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/tests/test_tiny_project_safety.py`
 
-- [ ] **Step 1: Add tests that scan only git-indexed files**
+- [ ] **Step 1: Add tests that scan only git-indexed active files**
 
 Create `tests/test_tiny_project_safety.py`:
 
@@ -457,6 +570,34 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 TEXT_SUFFIXES = {".md", ".py", ".c", ".h", ".cc", ".yml", ".yaml", ".json", ".csv", ".txt", ".sh", ".toml"}
+OLD_PRODUCTION_TERMS = ["106.54.240.51", "green" + "union-sh", "green" + "union_sh"]
+
+
+def cp(*values: int) -> str:
+    return "".join(chr(value) for value in values)
+
+
+def religion_domain_terms() -> list[str]:
+    return [
+        cp(0x4F5B),
+        cp(0x4F5B, 0x8BF4),
+        cp(0x4F5B, 0x5B66),
+        cp(0x4F5B, 0x6559),
+        cp(0x51C0, 0x571F),
+        cp(0x83E9, 0x8428),
+        cp(0x963F, 0x5F25, 0x9640),
+        cp(0x5FF5, 0x4F5B),
+        cp(0x4E1C, 0x6797),
+        cp(0x5F80, 0x751F),
+        cp(0x6781, 0x4E50),
+        cp(0x89C2, 0x97F3),
+        cp(0x7ECF, 0x6587),
+        cp(0x7977, 0x544A),
+        cp(0x5723, 0x7ECF),
+        "bud" + "dhism",
+        "pr" + "ayer",
+        "ser" + "mon",
+    ]
 
 
 def git_index_files() -> list[Path]:
@@ -466,11 +607,11 @@ def git_index_files() -> list[Path]:
     return paths
 
 
-def tracked_text_files(active_only: bool = True) -> list[Path]:
+def tracked_text_files() -> list[Path]:
     paths = []
     for path in git_index_files():
         rel = path.relative_to(ROOT).as_posix()
-        if active_only and rel.startswith("docs/migration/"):
+        if rel.startswith("docs/migration/"):
             continue
         if path.suffix in TEXT_SUFFIXES:
             paths.append(path)
@@ -514,39 +655,47 @@ def test_product_name_uses_canonical_spelling_in_active_files():
 
 
 def test_active_files_do_not_embed_old_production_target():
-    forbidden = ["106.54.240.51", "greenunion-sh", "greenunion_sh"]
-    allowed_prefixes = ("docs/migration/",)
-    for path in git_index_files():
-        rel = path.relative_to(ROOT).as_posix()
-        if rel.startswith(allowed_prefixes) or path.suffix not in TEXT_SUFFIXES:
-            continue
+    for path in tracked_text_files():
         text = read(path)
-        for token in forbidden:
+        rel = path.relative_to(ROOT).as_posix()
+        for token in OLD_PRODUCTION_TERMS:
             assert token not in text, f"{token} remains in active tracked file {rel}"
 
 
 def test_religion_domain_residue_is_not_tracked_or_active():
     tracked = [path.relative_to(ROOT).as_posix() for path in git_index_files()]
-    assert not any(path == "config/asr_hotwords.buddhism.json" for path in tracked)
-    assert not any(path.startswith("data/buddhism/") for path in tracked)
-    assert not any(path.startswith("src/rag/") for path in tracked)
+    Buddhism = "bud" + "dhism"
+    assert not any(path == f"config/asr_hotwords.{Buddhism}.json" for path in tracked)
+    assert not any(path.startswith(f"data/{Buddhism}/") for path in tracked)
+    assert not any(path.startswith("src/r" + "ag/") for path in tracked)
     assert not any(path.startswith("handoff/") for path in tracked)
     assert "部署计划大纲.md" not in tracked
     assert not any(path.startswith("20260409_流式传输/") for path in tracked)
 
-
-def test_active_prompts_and_runtime_defaults_are_not_religion_domain():
-    prompt_like = [
-        path
-        for path in tracked_text_files()
-        if any(part in path.relative_to(ROOT).as_posix().lower() for part in ("prompt", "few", "rag", "knowledge", "settings", "config"))
-    ]
-    forbidden_terms = ["佛", "佛教", "祷告", "圣经", "经文", "buddhism", "prayer", "sermon", "asr_hotwords.buddhism"]
-    for path in prompt_like:
+    for path in tracked_text_files():
         text = read(path)
         rel = path.relative_to(ROOT).as_posix()
-        for term in forbidden_terms:
-            assert term not in text, f"{term} remains in active prompt/config file {rel}"
+        for term in religion_domain_terms():
+            assert term not in text, f"{term} remains in active tracked file {rel}"
+
+
+def test_known_religion_fallback_and_settings_are_replaced():
+    checks = {
+        "src/services/realtime_session.py": "我还没听清，可以再说一遍咖啡问题吗？",
+        "src/workers/pipeline.py": "我还没听清，可以再说一遍咖啡问题吗？",
+        "src/providers/llm.py": "你是小机仔",
+        "src/settings.py": "tiny",
+    }
+    old_fallback = cp(0x4F5B, 0x8BF4, 0x4E0D, 0x53EF, 0x66F0)
+    old_assistant = cp(0x4F5B, 0x5B66, 0x95EE, 0x7B54, 0x52A9, 0x624B)
+    for rel, expected in checks.items():
+        path = ROOT / rel
+        assert path.exists(), f"{rel} must remain present unless the module is intentionally replaced with a tiny equivalent"
+        text = read(path)
+        assert expected in text
+        assert old_fallback not in text
+        assert old_assistant not in text
+        assert "bud" + "dhism" not in text
 
 
 def test_phase1_boundaries_are_documented_not_enabled():
@@ -562,7 +711,9 @@ def test_phase1_boundaries_are_documented_not_enabled():
         assert phrase in docs
 ```
 
-- [ ] **Step 2: Stage candidate files and run isolation tests before first commit**
+The test constructs religion terms with codepoints and string fragments so the guard file itself does not trip the active tracked-file residue scan. The shared term list in this plan remains the source of truth.
+
+- [ ] **Step 2: Stage candidate files and run the isolation test as a TDD red checkpoint**
 
 Run:
 
@@ -572,7 +723,7 @@ git add -A
 env PYTHONPATH=. python3 -m pytest tests/test_tiny_project_safety.py -q
 ```
 
-Expected: tests pass. These tests scan the git index via `git ls-files --cached`, not ignored residual disk files. If a failure points to `docs/migration/`, adjust the test exclusion; if it points to active code, config, scripts, README, tests, or env examples, fix the active file before first commit.
+Expected: `FAIL` at this checkpoint if Task 5 has not yet rewritten README, tiny boundary docs, settings, LLM persona, and fallback answers. This is intentional. Task 5 turns this test green, and Task 11 is the all-green gate before first commit.
 
 ### Task 5: Rewrite Active Product Identity And Runtime Defaults
 
@@ -665,26 +816,64 @@ Do not add real keys or concrete production URLs. If existing cloud code still r
 
 In `src/app.py`, keep status-only readiness fields. Healthz may report `ok`, `down`, `configured`, or provider readiness booleans. It must not return API keys, tokens, secrets, credentials, or full URLs containing query parameters.
 
+- [ ] **Step 5: Re-run the isolation test and verify it is green after product cleanup**
+
+Run:
+
+```bash
+git add -A
+env PYTHONPATH=. python3 -m pytest tests/test_tiny_project_safety.py -q
+```
+
+Expected: `PASS`. If it still fails, fix the active tracked file named in the failure before continuing.
+
 ### Task 6: Add Healthz No-Secret Tests
 
 **Files:**
+- Read first: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/src/app.py`
+- Read first: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/src/settings.py`
 - Create: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/tests/test_tiny_healthz.py`
-- Modify: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/src/app.py` if needed
+- Modify: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/src/app.py` if the copied health route exposes values
 
-- [ ] **Step 1: Add healthz response safety tests**
+- [ ] **Step 1: Inspect the copied health route before writing the test**
+
+Run:
+
+```bash
+rg -n 'FastAPI|healthz|health|settings|Redis|sqlite|asr|llm|tts' src/app.py src/settings.py tests/test_app_healthz.py 2>/dev/null || true
+```
+
+Expected: identify whether the copied project exposes a FastAPI `app`, a direct `healthz()` function, both, or a different route name. Write the test against the actual copied structure. Do not assume `app_module.healthz()` or `app_module.settings` exists unless the discovery command proves it.
+
+- [ ] **Step 2: Add a structure-adaptive healthz no-secret test**
 
 Create `tests/test_tiny_healthz.py`:
 
 ```python
 from __future__ import annotations
 
+import importlib
 import json
 from unittest import mock
 
-from src import app as app_module
+try:
+    from fastapi.testclient import TestClient
+except Exception:  # pragma: no cover - dependency stubs may be used in local tests
+    TestClient = None
+
+
+SAFE_FAKE_VALUES = [
+    "unit-test-redacted-ark-marker",
+    "unit-test-redacted-token-marker",
+    "unit-test-redacted-credential-marker",
+    "https://ark.example.invalid/unit-test-redacted-query-marker",
+]
+SENSITIVE_FIELD_NAMES = ["api_key", "token", "secret", "credential"]
 
 
 def response_body_text(response: object) -> str:
+    if hasattr(response, "text"):
+        return str(response.text)
     if hasattr(response, "model_dump"):
         return json.dumps(response.model_dump(), ensure_ascii=False, sort_keys=True)
     if hasattr(response, "dict"):
@@ -692,33 +881,51 @@ def response_body_text(response: object) -> str:
     return json.dumps(response, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def call_healthz(app_module: object) -> str:
+    if hasattr(app_module, "app") and TestClient is not None:
+        response = TestClient(app_module.app).get("/healthz")
+        assert response.status_code == 200
+        return response_body_text(response)
+    if hasattr(app_module, "healthz"):
+        return response_body_text(app_module.healthz())
+    raise AssertionError("src.app must expose either FastAPI app /healthz or a healthz function")
+
+
 def test_healthz_reports_status_without_secret_values(monkeypatch):
-    fake_secret_values = [
-        "fake-tiny-ark-key-should-not-leak",
-        "fake-token-should-not-leak",
-        "fake-secret-should-not-leak",
-        "https://ark.example.test/path?api_key=fake-query-secret",
-    ]
-    monkeypatch.setattr(app_module.settings, "tiny_ark_api_key", fake_secret_values[0], raising=False)
-    monkeypatch.setattr(app_module.settings, "tiny_doubao_endpoint", fake_secret_values[3], raising=False)
+    monkeypatch.setenv("TINY_ARK_API_KEY", SAFE_FAKE_VALUES[0])
+    monkeypatch.setenv("TINY_PROVIDER_TOKEN", SAFE_FAKE_VALUES[1])
+    monkeypatch.setenv("TINY_PROVIDER_CREDENTIAL", SAFE_FAKE_VALUES[2])
+    monkeypatch.setenv("TINY_DOUBAO_ENDPOINT", SAFE_FAKE_VALUES[3])
 
-    with mock.patch.object(app_module, "sqlite_ok", return_value=True), mock.patch.object(
-        app_module, "asr_health", return_value=True
-    ), mock.patch.object(app_module, "llm_health", return_value=True), mock.patch.object(
-        app_module, "tts_health", return_value=True
-    ), mock.patch("src.app.Redis.from_url") as redis_from_url:
-        redis_from_url.return_value.ping.return_value = True
-        response = app_module.healthz()
+    app_module = importlib.reload(importlib.import_module("src.app"))
 
-    body = response_body_text(response)
+    patches = []
+    for name in ("sqlite_ok", "asr_health", "llm_health", "tts_health"):
+        if hasattr(app_module, name):
+            patches.append(mock.patch.object(app_module, name, return_value=True))
+    if hasattr(app_module, "Redis"):
+        patches.append(mock.patch("src.app.Redis.from_url"))
+
+    started = [patch.start() for patch in patches]
+    try:
+        for started_patch in started:
+            if hasattr(started_patch, "return_value") and hasattr(started_patch.return_value, "ping"):
+                started_patch.return_value.ping.return_value = True
+        body = call_healthz(app_module)
+    finally:
+        for patch in reversed(patches):
+            patch.stop()
+
     assert "ok" in body or "configured" in body
-    for secret in fake_secret_values:
-        assert secret not in body
-    for field_name in ["api_key", "token", "secret", "credential"]:
+    for fake_value in SAFE_FAKE_VALUES:
+        assert fake_value not in body
+    for field_name in SENSITIVE_FIELD_NAMES:
         assert field_name not in body.lower()
 ```
 
-- [ ] **Step 2: Run healthz tests**
+The fake values are deliberately low-entropy test markers, not realistic tokens. If a scanner still flags one fixed fake value, add a narrow `.gitleaksignore` or allowlist entry scoped to `tests/test_tiny_healthz.py` and that exact marker. Do not weaken global scanner rules.
+
+- [ ] **Step 3: Run healthz tests**
 
 Run:
 
@@ -726,7 +933,7 @@ Run:
 env PYTHONPATH=. python3 -m pytest tests/test_tiny_healthz.py -q
 ```
 
-Expected: healthz tests pass. If they fail because healthz exposes settings values, remove value exposure and return status-only fields.
+Expected: healthz tests pass. If they fail because healthz exposes settings values, remove value exposure and return status-only fields. If they fail because the copied app has a different route shape, update `call_healthz()` using the discovery output from Step 1 while keeping the no-secret assertion unchanged.
 
 ### Task 7: Replace v6 16MB Release Gate With Tiny 32MB Gates
 
@@ -881,7 +1088,7 @@ Expected: tests pass after tiny partition and asset assertions are aligned.
 - Create: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/scripts/tiny_assets/write_mjpeg_idx.py`
 - Create: `/mnt/data100/GMT/20260601_tiny_chicken_coffee_robot/tests/test_tiny_display_assets.py`
 
-- [ ] **Step 1: Define display safe region and `.idx` format**
+- [ ] **Step 1: Define display safe region, manifest, and `.idx` format**
 
 Create `docs/tiny/display-asset-format.md` with these rules:
 
@@ -945,9 +1152,219 @@ Animation names:
 - angry
 - surprise
 - shutdown
+
+Manifest format:
+
+```json
+{
+  "version": 1,
+  "display": {
+    "width": 320,
+    "height": 240,
+    "safe_size": 240,
+    "safe_x": 40,
+    "safe_y": 0,
+    "rotation": 0
+  },
+  "animations": [
+    {
+      "name": "standby",
+      "mjpeg": "standby.mjpeg",
+      "idx": "standby.idx",
+      "fps": 15,
+      "width": 240,
+      "height": 240,
+      "loop": true
+    }
+  ]
+}
+```
 ```
 
-- [ ] **Step 2: Add MJPEG hardware validation gate**
+- [ ] **Step 2: Add conversion CLI**
+
+Create `scripts/tiny_assets/convert_mjpeg_assets.py`:
+
+```python
+from __future__ import annotations
+
+import argparse
+import subprocess
+from pathlib import Path
+
+
+FILTER = "fps=15,scale=240:240:force_original_aspect_ratio=decrease,pad=240:240:(ow-iw)/2:(oh-ih)/2:black"
+
+
+def convert(input_path: Path, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(input_path),
+        "-vf",
+        FILTER,
+        "-q:v",
+        "5",
+        "-an",
+        "-f",
+        "mjpeg",
+        str(output_path),
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Convert one AVI/MJPEG source to 240x240 15fps raw MJPEG.")
+    parser.add_argument("input", type=Path)
+    parser.add_argument("output", type=Path)
+    args = parser.parse_args()
+    convert(args.input, args.output)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 3: Add `.idx` writer implementation**
+
+Create `scripts/tiny_assets/write_mjpeg_idx.py`:
+
+```python
+from __future__ import annotations
+
+import argparse
+import json
+import struct
+from pathlib import Path
+
+
+MAGIC = b"TCMJIDX1"
+FLAG_LOOP = 1 << 0
+FLAG_WAKE = 1 << 1
+FLAG_SPEAKING = 1 << 2
+FLAG_ERROR = 1 << 3
+
+
+def find_jpeg_frames(data: bytes) -> list[tuple[int, int]]:
+    frames: list[tuple[int, int]] = []
+    pos = 0
+    while True:
+        start = data.find(b"\xff\xd8", pos)
+        if start < 0:
+            break
+        end = data.find(b"\xff\xd9", start + 2)
+        if end < 0:
+            raise ValueError("unterminated JPEG frame")
+        end += 2
+        frames.append((start, end - start))
+        pos = end
+    if not frames:
+        raise ValueError("no JPEG frames found")
+    return frames
+
+
+def flags_for(animation_name: str, loop: bool) -> int:
+    flags = FLAG_LOOP if loop else 0
+    if animation_name == "wakeup":
+        flags |= FLAG_WAKE
+    if animation_name == "speaking":
+        flags |= FLAG_SPEAKING
+    if animation_name in {"sad", "angry"}:
+        flags |= FLAG_ERROR
+    return flags
+
+
+def write_idx(mjpeg_path: Path, idx_path: Path, animation_name: str, loop: bool) -> None:
+    data = mjpeg_path.read_bytes()
+    frames = find_jpeg_frames(data)
+    name_bytes = animation_name.encode("utf-8")
+    header = MAGIC + struct.pack("<HHHHIII", 240, 240, 15, 1, len(frames), flags_for(animation_name, loop), len(name_bytes))
+    table = b"".join(struct.pack("<II", offset, size) for offset, size in frames)
+    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    idx_path.write_bytes(header + name_bytes + table)
+
+
+def write_manifest(manifest_path: Path, animations: list[dict[str, object]]) -> None:
+    manifest = {
+        "version": 1,
+        "display": {"width": 320, "height": 240, "safe_size": 240, "safe_x": 40, "safe_y": 0, "rotation": 0},
+        "animations": animations,
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Write a little-endian index for a raw MJPEG animation.")
+    parser.add_argument("mjpeg", type=Path)
+    parser.add_argument("idx", type=Path)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--no-loop", action="store_true")
+    args = parser.parse_args()
+    write_idx(args.mjpeg, args.idx, args.name, not args.no_loop)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 4: Add display asset tests**
+
+Create `tests/test_tiny_display_assets.py`:
+
+```python
+from __future__ import annotations
+
+import json
+import struct
+from pathlib import Path
+
+from scripts.tiny_assets.write_mjpeg_idx import FLAG_LOOP, FLAG_WAKE, MAGIC, find_jpeg_frames, flags_for, write_idx, write_manifest
+
+
+def test_idx_writer_uses_little_endian_header_and_loop_flag(tmp_path: Path):
+    mjpeg = tmp_path / "wakeup.mjpeg"
+    idx = tmp_path / "wakeup.idx"
+    mjpeg.write_bytes(b"\xff\xd8frame1\xff\xd9\xff\xd8frame2\xff\xd9")
+
+    write_idx(mjpeg, idx, "wakeup", True)
+
+    data = idx.read_bytes()
+    assert data[:8] == MAGIC
+    width, height, fps_num, fps_den, frame_count, flags, name_len = struct.unpack("<HHHHIII", data[8:32])
+    assert (width, height, fps_num, fps_den, frame_count, name_len) == (240, 240, 15, 1, 2, len("wakeup"))
+    assert flags & FLAG_LOOP
+    assert flags & FLAG_WAKE
+    assert data[32:32 + name_len] == b"wakeup"
+
+
+def test_find_jpeg_frames_returns_offsets_and_sizes():
+    data = b"pad\xff\xd8abc\xff\xd9gap\xff\xd8defg\xff\xd9"
+    assert find_jpeg_frames(data) == [(3, 7), (13, 8)]
+
+
+def test_manifest_schema_contains_display_safe_region_and_animation_registry(tmp_path: Path):
+    manifest = tmp_path / "manifest.json"
+    write_manifest(
+        manifest,
+        [
+            {"name": "standby", "mjpeg": "standby.mjpeg", "idx": "standby.idx", "fps": 15, "width": 240, "height": 240, "loop": True}
+        ],
+    )
+
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    assert data["display"] == {"width": 320, "height": 240, "safe_size": 240, "safe_x": 40, "safe_y": 0, "rotation": 0}
+    assert data["animations"][0]["name"] == "standby"
+    assert data["animations"][0]["loop"] is True
+
+
+def test_animation_flags_are_named_and_stable():
+    assert flags_for("standby", True) & FLAG_LOOP
+    assert flags_for("wakeup", True) & FLAG_WAKE
+```
+
+- [ ] **Step 5: Add MJPEG hardware validation gate**
 
 Create `docs/tiny/mjpeg-hardware-validation.md`:
 
@@ -983,15 +1400,15 @@ If the gate fails:
 - keep audio-only fallback independent from display readiness.
 ```
 
-- [ ] **Step 3: Add conversion and index writer scripts**
+- [ ] **Step 6: Run display asset tests**
 
-Use the conversion and `.idx` writer interfaces from the previous plan version, but run tests with the unified command:
+Run:
 
 ```bash
 env PYTHONPATH=. python3 -m pytest tests/test_tiny_display_assets.py -q
 ```
 
-Expected: `.idx` tests pass and encode little-endian metadata for 240x240, 15fps assets.
+Expected: tests pass and prove the current plan's conversion/index/manifest code is self-contained.
 
 ### Task 9: Add Doubao Provider Scaffold And Fallback Tests
 
@@ -1118,7 +1535,7 @@ Run path-only checks:
 
 ```bash
 git grep -Il -E '106[.]54[.]240[.]51|greenunion-sh|greenunion_sh' -- ':!docs/migration/**' || true
-git grep -Il -E 'data/buddhism|asr_hotwords[.]buddhism|src/rag|佛教|祷告|圣经|经文|buddhism|prayer|sermon' -- ':!docs/migration/**' || true
+git grep -Il -E 'data/buddhism|asr_hotwords[.]buddhism|src/rag|佛|佛说|佛学|佛教|净土|菩萨|阿弥陀|念佛|东林|往生|极乐|观音|经文|祷告|圣经|buddhism|prayer|sermon' -- ':!docs/migration/**' || true
 ```
 
 Expected: both commands print no active files. If a code/script/test/env-example path is printed, fix it as follows:
@@ -1305,6 +1722,12 @@ Hardware operation: not performed
 - C9 covered: all pytest commands use `env PYTHONPATH=. python3 -m pytest`.
 - C10 covered: Task 1 checks current branch/status and recent commits without pinning an obsolete HEAD.
 - C11 covered: Task 7 requires reading copied ESP files before writing GPIO/WakeNet/OTA assertions and provides patterns based on the current baseline.
+- C-A covered: Task 2 explicitly replaces `佛说不可曰`, old LLM system/few-shot prompts, and `settings.py` `buddhism` defaults before `git init`; Task 4 tests these known leak paths.
+- I-A covered: the shared religion-domain term list is used by Task 4 tests, Task 11 `git grep`, and `scripts/security/secret_scan.sh` over all active tracked text files, excluding only `docs/migration/`.
+- I-B covered: Task 4 Step 2 is now an intentional TDD red checkpoint, with Task 5 and Task 11 as the green gates.
+- M-A covered: Task 8 includes complete conversion CLI, `.idx` writer, manifest writer, tests, byte order, flags, animation names, and registry schema inline in this plan.
+- M-B covered: Task 2 scans and deletes/migrates root-level `.md` and `.txt` files such as copied manuals, not only `docs/`.
+- M-C covered: Task 6 adapts to the copied health route structure, uses scanner-safe fake values, and Task 3 documents generic sensitive-name audit output as non-blocking path-only noise.
 
 ## Self-Review
 
