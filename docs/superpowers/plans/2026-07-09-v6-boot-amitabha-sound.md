@@ -4,7 +4,7 @@
 
 **Goal:** Add a local, early-boot "Amitabha" sound to the ESP-VoCat V1.0 v6 N16R8 firmware and flash it to `COM4`.
 
-**Architecture:** Generate one board-ready raw PCM asset from the current server TTS voice and package it in SPIFFS. Reuse the existing `audio_out_play_pcm_file` path from `app_runtime_task`, with a default-on compile-time guard and warning-only failure behavior.
+**Architecture:** Generate one board-ready raw PCM asset from the current server TTS voice and package it in SPIFFS. Reuse the existing `audio_out_play_pcm_file` path from `app_runtime_task`, with a default-on compile-time guard and warning-only failure behavior. App-only OTA canary build scripts must disable this SPIFFS-backed sound in their temp source copies until that release path also updates SPIFFS.
 
 **Tech Stack:** ESP-IDF v5.5.4, ESP32-S3, SPIFFS, raw PCM 16kHz mono 16-bit, Python `unittest`, PowerShell, SSH/SCP.
 
@@ -16,6 +16,7 @@
 - Add `esp_idf_demo/spiffs/boot_amitabha_1.pcm`: board-ready boot sound PCM generated from the server's current TTS configuration.
 - Modify `esp_idf_demo/main/config.h`: add boot sound path/enabled/max-byte defaults.
 - Modify `esp_idf_demo/main/main.c`: mount SPIFFS when boot sound is enabled and play the boot sound before network initialization.
+- Modify `scripts/build_esp_p3c_canary_artifact.sh` and `scripts/build_esp_p3d_canary_artifact.sh`: disable the SPIFFS-backed boot sound in app-only OTA canary temp copies.
 - Use existing `esp_idf_demo/main/audio_out.c`: no new playback primitive is needed.
 
 ## Task 1: Red Tests For Boot Sound Contract
@@ -229,10 +230,15 @@ Expected: no output and exit code 0.
 Run:
 
 ```powershell
-gitleaks detect --source . --no-git --redact --verbose
+gitleaks dir esp_idf_demo/main/config.h --redact --no-banner --no-color
+gitleaks dir esp_idf_demo/main/main.c --redact --no-banner --no-color
+gitleaks dir tests/test_esp_assets.py --redact --no-banner --no-color
+gitleaks dir docs/superpowers/plans/2026-07-09-v6-boot-amitabha-sound.md --redact --no-banner --no-color
+gitleaks dir docs/superpowers/specs/2026-07-09-v6-boot-amitabha-sound-design.md --redact --no-banner --no-color
+gitleaks dir esp_idf_demo/spiffs/boot_amitabha_1.pcm --redact --no-banner --no-color
 ```
 
-Expected: no leaks.
+Expected: changed files report no leaks. If a full-repo gitleaks run reports pre-existing findings outside this change, record those separately and do not treat them as newly introduced by this feature.
 
 ## Task 5: ESP-IDF Compile-Only
 

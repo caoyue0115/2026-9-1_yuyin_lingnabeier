@@ -214,6 +214,10 @@ class EspAssetTests(unittest.TestCase):
         self.assertTrue(boot_sound.exists())
         self.assertGreater(boot_sound.stat().st_size, 0)
         self.assertLessEqual(boot_sound.stat().st_size, 64 * 1024)
+        self.assertEqual(64_000, boot_sound.stat().st_size)
+        boot_sound_bytes = boot_sound.read_bytes()
+        self.assertEqual(0, len(boot_sound_bytes) % 2)
+        self.assertNotEqual(b"RIFF", boot_sound_bytes[:4])
 
     def test_record_prompt_audio_asset_is_small_pcm_resource(self) -> None:
         prompt = ESP_DIR / "spiffs" / "record_prompt_1.pcm"
@@ -827,6 +831,25 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_${CANARY_TRIGGER_SOURCE_UPPER}", script)
         self.assertIn("DEMO_BUTTON_GPIO         GPIO_NUM_${CANARY_BUTTON_GPIO}", script)
         self.assertNotIn("DEMO_WIFI_PASSWORD", script)
+
+    def test_ota_canary_app_only_scripts_disable_spiffs_boot_sound(self) -> None:
+        for script_path in (
+            ROOT / "scripts" / "build_esp_p3c_canary_artifact.sh",
+            ROOT / "scripts" / "build_esp_p3d_canary_artifact.sh",
+        ):
+            script = script_path.read_text(encoding="utf-8")
+
+            self.assertIn("OTA canary app artifact does not update SPIFFS", script)
+            self.assertIn("DEMO_BOOT_SOUND_ENABLED 0", script)
+
+    def test_boot_sound_plan_uses_reproducible_secret_scan(self) -> None:
+        plan = (
+            ROOT / "docs" / "superpowers" / "plans" / "2026-07-09-v6-boot-amitabha-sound.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("gitleaks detect --source . --no-git --redact --verbose", plan)
+        self.assertIn("gitleaks dir esp_idf_demo/main/config.h", plan)
+        self.assertIn("pre-existing", plan)
 
     def test_compile_only_package_injects_p3d_canary_config_without_password(self) -> None:
         script = (ROOT / "scripts" / "package_esp_compile_only.py").read_text(encoding="utf-8")
