@@ -186,6 +186,8 @@ static void app_log_runtime_config(void)
     ESP_LOGI(TAG, "  realtime_intro_enabled=%d", DEMO_REALTIME_INTRO_ENABLED);
     ESP_LOGI(TAG, "  realtime_intro_audio_parallel_enabled=%d", DEMO_REALTIME_INTRO_AUDIO_PARALLEL_ENABLED);
     ESP_LOGI(TAG, "  realtime_intro_path=%s", DEMO_REALTIME_INTRO_PATH);
+    ESP_LOGI(TAG, "  boot_sound_enabled=%d", DEMO_BOOT_SOUND_ENABLED);
+    ESP_LOGI(TAG, "  boot_sound_path=%s", DEMO_BOOT_SOUND_PATH);
     ESP_LOGI(TAG, "  realtime_audio_gate_wait_timeout_ms=%d", DEMO_REALTIME_AUDIO_GATE_WAIT_TIMEOUT_MS);
     ESP_LOGI(TAG, "  realtime_audio_parallel_task_stack_size=%d", DEMO_REALTIME_AUDIO_PARALLEL_TASK_STACK_SIZE);
     ESP_LOGI(TAG, "  trigger_poll_interval_ms=%d", DEMO_TRIGGER_POLL_INTERVAL_MS);
@@ -424,6 +426,29 @@ static void app_log_v5_uplink_metrics(const cloud_opus_uplink_metrics_t *metrics
     ESP_LOGI(TAG,
              "v5_uplink_total_ms=%.1f",
              (double)(esp_timer_get_time() - pipeline_start_us) / 1000.0);
+}
+
+static void app_play_boot_sound(void)
+{
+    if (!DEMO_BOOT_SOUND_ENABLED || DEMO_BOOT_SOUND_PATH[0] == '\0') {
+        return;
+    }
+
+    ESP_LOGI(TAG, "stage=boot_sound event=start");
+    const int64_t start_us = esp_timer_get_time();
+    esp_err_t ret = audio_out_play_pcm_file(DEMO_BOOT_SOUND_PATH,
+                                            DEMO_AUDIO_SAMPLE_RATE,
+                                            DEMO_AUDIO_CHANNELS,
+                                            DEMO_AUDIO_BITS_PER_SAMPLE,
+                                            DEMO_BOOT_SOUND_MAX_BYTES);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "stage=boot_sound event=done elapsed_ms=%.1f",
+                 (double)(esp_timer_get_time() - start_us) / 1000.0);
+    } else {
+        ESP_LOGW(TAG, "stage=boot_sound event=failed err=%s elapsed_ms=%.1f",
+                 esp_err_to_name(ret),
+                 (double)(esp_timer_get_time() - start_us) / 1000.0);
+    }
 }
 
 static void app_play_retry_prompt(const char *reason, const char *path)
@@ -2214,9 +2239,11 @@ static void app_runtime_task(void *arg)
     app_log_runtime_config();
     ESP_LOGI(TAG, "========================================");
 
-    if (DEMO_REALTIME_INTRO_ENABLED || DEMO_RECORD_PROMPT_ENABLED) {
+    if (DEMO_BOOT_SOUND_ENABLED || DEMO_REALTIME_INTRO_ENABLED || DEMO_RECORD_PROMPT_ENABLED) {
         (void)app_mount_spiffs();
     }
+
+    app_play_boot_sound();
 
     if (app_validate_runtime_config() != ESP_OK) {
         app_set_state(&s_app_state, APP_STATE_ERROR);

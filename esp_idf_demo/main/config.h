@@ -270,6 +270,18 @@
 #define DEMO_REALTIME_INTRO_MAX_BYTES (64 * 1024)
 #endif
 
+#ifndef DEMO_BOOT_SOUND_ENABLED
+#define DEMO_BOOT_SOUND_ENABLED 1
+#endif
+
+#ifndef DEMO_BOOT_SOUND_PATH
+#define DEMO_BOOT_SOUND_PATH "/spiffs/boot_amitabha_1.pcm"
+#endif
+
+#ifndef DEMO_BOOT_SOUND_MAX_BYTES
+#define DEMO_BOOT_SOUND_MAX_BYTES (64 * 1024)
+#endif
+
 #ifndef DEMO_RECORD_PROMPT_ENABLED
 #define DEMO_RECORD_PROMPT_ENABLED 1
 #endif
