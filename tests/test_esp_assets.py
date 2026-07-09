@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tarfile
 import tempfile
 
@@ -207,6 +208,13 @@ class EspAssetTests(unittest.TestCase):
         self.assertGreater(intro.stat().st_size, 0)
         self.assertLessEqual(intro.stat().st_size, 64 * 1024)
 
+    def test_boot_sound_audio_asset_is_small_pcm_resource(self) -> None:
+        boot_sound = ESP_DIR / "spiffs" / "boot_amitabha_1.pcm"
+
+        self.assertTrue(boot_sound.exists())
+        self.assertGreater(boot_sound.stat().st_size, 0)
+        self.assertLessEqual(boot_sound.stat().st_size, 64 * 1024)
+
     def test_record_prompt_audio_asset_is_small_pcm_resource(self) -> None:
         prompt = ESP_DIR / "spiffs" / "record_prompt_1.pcm"
 
@@ -242,7 +250,7 @@ class EspAssetTests(unittest.TestCase):
             output = tmp_path / "esp_compile_only_v37_p3d_002_20260520.tar.gz"
             result = subprocess.run(
                 [
-                    "python3",
+                    sys.executable,
                     str(ROOT / "scripts" / "package_esp_compile_only.py"),
                     "--source",
                     str(source_root),
@@ -317,7 +325,7 @@ class EspAssetTests(unittest.TestCase):
             output = tmp_path / "esp_compile_only_with_managed.tar.gz"
             subprocess.run(
                 [
-                    "python3",
+                    sys.executable,
                     str(ROOT / "scripts" / "package_esp_compile_only.py"),
                     "--source",
                     str(source_root),
@@ -351,6 +359,16 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_REALTIME_AUDIO_PARALLEL_TASK_STACK_SIZE", config)
         self.assertIn("DEMO_REALTIME_AUDIO_GATE_WAIT_TIMEOUT_MS", config)
 
+    def test_boot_sound_config_is_explicit_and_enabled_by_default(self) -> None:
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+
+        self.assertIn("DEMO_BOOT_SOUND_ENABLED", config)
+        self.assertEqual("1", _read_macro_value(config, "DEMO_BOOT_SOUND_ENABLED"))
+        self.assertIn("DEMO_BOOT_SOUND_PATH", config)
+        self.assertEqual('"/spiffs/boot_amitabha_1.pcm"', _read_macro_value(config, "DEMO_BOOT_SOUND_PATH"))
+        self.assertIn("DEMO_BOOT_SOUND_MAX_BYTES", config)
+        self.assertEqual("(64 * 1024)", _read_macro_value(config, "DEMO_BOOT_SOUND_MAX_BYTES"))
+
     def test_record_prompt_config_is_explicit(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
 
@@ -367,8 +385,30 @@ class EspAssetTests(unittest.TestCase):
     def test_spiffs_mount_is_kept_for_record_prompt_when_intro_is_disabled(self) -> None:
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
 
-        self.assertIn("DEMO_REALTIME_INTRO_ENABLED || DEMO_RECORD_PROMPT_ENABLED", main_source)
+        self.assertIn(
+            "DEMO_BOOT_SOUND_ENABLED || DEMO_REALTIME_INTRO_ENABLED || DEMO_RECORD_PROMPT_ENABLED",
+            main_source,
+        )
         self.assertNotIn("if (DEMO_REALTIME_INTRO_ENABLED) {\n        (void)app_mount_spiffs();", main_source)
+
+    def test_boot_sound_mount_and_playback_are_early_and_nonfatal(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "DEMO_BOOT_SOUND_ENABLED || DEMO_REALTIME_INTRO_ENABLED || DEMO_RECORD_PROMPT_ENABLED",
+            main_source,
+        )
+        self.assertIn("static void app_play_boot_sound(void)", main_source)
+        self.assertIn("stage=boot_sound event=start", main_source)
+        self.assertIn("stage=boot_sound event=done", main_source)
+        self.assertIn("stage=boot_sound event=failed", main_source)
+        self.assertIn("audio_out_play_pcm_file(DEMO_BOOT_SOUND_PATH", main_source)
+
+        boot_sound_call = main_source.index("app_play_boot_sound();")
+        validate_config = main_source.index("app_validate_runtime_config()")
+        network_start = main_source.index("app_network_start()")
+        self.assertLess(boot_sound_call, validate_config)
+        self.assertLess(boot_sound_call, network_start)
 
     def test_wifi_board_lite_uses_esp_wifi_connect_hotspot_provisioning(self) -> None:
         manifest = (ESP_DIR / "main" / "idf_component.yml").read_text(encoding="utf-8")
