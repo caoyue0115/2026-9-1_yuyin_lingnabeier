@@ -368,10 +368,26 @@ class EspAssetTests(unittest.TestCase):
 
         self.assertIn("DEMO_BOOT_SOUND_ENABLED", config)
         self.assertEqual("1", _read_macro_value(config, "DEMO_BOOT_SOUND_ENABLED"))
+        self.assertIn("DEMO_BOOT_SOUND_EMBEDDED_ENABLED", config)
+        self.assertEqual("1", _read_macro_value(config, "DEMO_BOOT_SOUND_EMBEDDED_ENABLED"))
         self.assertIn("DEMO_BOOT_SOUND_PATH", config)
         self.assertEqual('"/spiffs/boot_amitabha_1.pcm"', _read_macro_value(config, "DEMO_BOOT_SOUND_PATH"))
         self.assertIn("DEMO_BOOT_SOUND_MAX_BYTES", config)
         self.assertEqual("(64 * 1024)", _read_macro_value(config, "DEMO_BOOT_SOUND_MAX_BYTES"))
+
+    def test_boot_sound_is_embedded_for_app_only_ota(self) -> None:
+        main_cmake = (ESP_DIR / "main" / "CMakeLists.txt").read_text(encoding="utf-8")
+        audio_header = (ESP_DIR / "main" / "audio_out.h").read_text(encoding="utf-8")
+        audio_source = (ESP_DIR / "main" / "audio_out.c").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+
+        self.assertIn('target_add_binary_data(${COMPONENT_LIB} "../spiffs/boot_amitabha_1.pcm" BINARY)', main_cmake)
+        self.assertIn("audio_out_play_pcm_buffer", audio_header)
+        self.assertIn("audio_out_play_pcm_buffer", audio_source)
+        self.assertIn("_binary_boot_amitabha_1_pcm_start", main_source)
+        self.assertIn("_binary_boot_amitabha_1_pcm_end", main_source)
+        self.assertIn("audio_out_play_pcm_buffer(boot_sound_start", main_source)
+        self.assertNotIn("audio_out_play_pcm_file(DEMO_BOOT_SOUND_PATH", main_source)
 
     def test_record_prompt_config_is_explicit(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
@@ -389,24 +405,32 @@ class EspAssetTests(unittest.TestCase):
     def test_spiffs_mount_is_kept_for_record_prompt_when_intro_is_disabled(self) -> None:
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
 
-        self.assertIn(
-            "DEMO_BOOT_SOUND_ENABLED || DEMO_REALTIME_INTRO_ENABLED || DEMO_RECORD_PROMPT_ENABLED",
-            main_source,
-        )
+        self.assertIn("static bool app_needs_spiffs_audio(void)", main_source)
+        self.assertIn("DEMO_REALTIME_INTRO_ENABLED && DEMO_REALTIME_INTRO_PATH[0] != '\\0'", main_source)
+        self.assertIn("DEMO_RECORD_PROMPT_ENABLED && DEMO_RECORD_PROMPT_PATH[0] != '\\0'", main_source)
+        self.assertIn("if (app_needs_spiffs_audio()) {\n        (void)app_mount_spiffs();", main_source)
         self.assertNotIn("if (DEMO_REALTIME_INTRO_ENABLED) {\n        (void)app_mount_spiffs();", main_source)
 
-    def test_boot_sound_mount_and_playback_are_early_and_nonfatal(self) -> None:
+    def test_spiffs_mount_includes_retry_prompts_without_boot_sound(self) -> None:
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
 
-        self.assertIn(
-            "DEMO_BOOT_SOUND_ENABLED || DEMO_REALTIME_INTRO_ENABLED || DEMO_RECORD_PROMPT_ENABLED",
-            main_source,
-        )
+        self.assertIn("static bool app_needs_spiffs_audio(void)", main_source)
+        self.assertIn("DEMO_RECORD_RETRY_REARM_PROMPT_PATH[0] != '\\0'", main_source)
+        self.assertIn("DEMO_RECORD_RETRY_TIMEOUT_PROMPT_PATH[0] != '\\0'", main_source)
+        self.assertIn("DEMO_RECORD_RETRY_ERROR_PROMPT_PATH[0] != '\\0'", main_source)
+        self.assertIn("if (app_needs_spiffs_audio()) {\n        (void)app_mount_spiffs();", main_source)
+        self.assertNotIn("if (DEMO_BOOT_SOUND_ENABLED ||", main_source)
+
+    def test_boot_sound_playback_is_embedded_early_and_nonfatal(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+
+        self.assertIn("if (app_needs_spiffs_audio()) {\n        (void)app_mount_spiffs();", main_source)
         self.assertIn("static void app_play_boot_sound(void)", main_source)
         self.assertIn("stage=boot_sound event=start", main_source)
         self.assertIn("stage=boot_sound event=done", main_source)
         self.assertIn("stage=boot_sound event=failed", main_source)
-        self.assertIn("audio_out_play_pcm_file(DEMO_BOOT_SOUND_PATH", main_source)
+        self.assertIn("audio_out_play_pcm_buffer(boot_sound_start", main_source)
+        self.assertNotIn("audio_out_play_pcm_file(DEMO_BOOT_SOUND_PATH", main_source)
 
         boot_sound_call = main_source.index("app_play_boot_sound();")
         validate_config = main_source.index("app_validate_runtime_config()")
@@ -832,15 +856,15 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_BUTTON_GPIO         GPIO_NUM_${CANARY_BUTTON_GPIO}", script)
         self.assertNotIn("DEMO_WIFI_PASSWORD", script)
 
-    def test_ota_canary_app_only_scripts_disable_spiffs_boot_sound(self) -> None:
+    def test_ota_canary_app_only_scripts_keep_embedded_boot_sound_enabled(self) -> None:
         for script_path in (
             ROOT / "scripts" / "build_esp_p3c_canary_artifact.sh",
             ROOT / "scripts" / "build_esp_p3d_canary_artifact.sh",
         ):
             script = script_path.read_text(encoding="utf-8")
 
-            self.assertIn("OTA canary app artifact does not update SPIFFS", script)
-            self.assertIn("DEMO_BOOT_SOUND_ENABLED 0", script)
+            self.assertNotIn("OTA canary app artifact does not update SPIFFS", script)
+            self.assertNotIn("DEMO_BOOT_SOUND_ENABLED 0", script)
 
     def test_boot_sound_plan_uses_reproducible_secret_scan(self) -> None:
         plan = (
