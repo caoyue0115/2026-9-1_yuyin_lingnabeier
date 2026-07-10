@@ -274,6 +274,10 @@
 #define DEMO_BOOT_SOUND_ENABLED 1
 #endif
 
+#ifndef DEMO_BOOT_SOUND_EMBEDDED_ENABLED
+#define DEMO_BOOT_SOUND_EMBEDDED_ENABLED 1
+#endif
+
 #ifndef DEMO_BOOT_SOUND_PATH
 #define DEMO_BOOT_SOUND_PATH "/spiffs/boot_amitabha_1.pcm"
 #endif

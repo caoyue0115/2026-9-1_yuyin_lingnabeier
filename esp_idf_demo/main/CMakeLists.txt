@@ -4,5 +4,7 @@ idf_component_register(SRCS "main.c" "trigger_input.c" "audio_in.c" "cloud_clien
                                 esp_vocat espressif__esp_lcd_touch esp_websocket_client spiffs
                                 esp_app_format app_update 78__esp-wifi-connect espressif__esp-sr)
 
+target_add_binary_data(${COMPONENT_LIB} "../spiffs/boot_amitabha_1.pcm" BINARY)
+
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/../spiffs")
 spiffs_create_partition_image(storage ../spiffs FLASH_IN_PROJECT)

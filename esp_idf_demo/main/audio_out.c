@@ -1275,6 +1275,73 @@ esp_err_t audio_out_play_wav_url(const char *audio_url)
     return ret;
 }
 
+esp_err_t audio_out_play_pcm_buffer(const uint8_t *pcm_bytes,
+                                    size_t pcm_bytes_size,
+                                    uint32_t sample_rate,
+                                    uint16_t channels,
+                                    uint16_t bits_per_sample,
+                                    size_t max_bytes)
+{
+    if (pcm_bytes == NULL || pcm_bytes_size == 0 || sample_rate == 0 ||
+        channels != 1 || bits_per_sample != 16 || max_bytes == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t bytes_to_play = pcm_bytes_size;
+    if (bytes_to_play > max_bytes) {
+        bytes_to_play = max_bytes;
+    }
+    bytes_to_play -= bytes_to_play % sizeof(int16_t);
+    if (bytes_to_play == 0) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    esp_err_t ret = audio_out_open_pcm_stream(sample_rate, channels, bits_per_sample);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Playing PCM buffer: bytes=%u rate=%u max_bytes=%u",
+             (unsigned)bytes_to_play, (unsigned)sample_rate, (unsigned)max_bytes);
+
+    size_t total_written = 0;
+    size_t offset = 0;
+    const int64_t start_us = esp_timer_get_time();
+
+    while (offset < bytes_to_play) {
+        size_t chunk_bytes = bytes_to_play - offset;
+        if (chunk_bytes > DEMO_AUDIO_PLAY_CHUNK_BYTES) {
+            chunk_bytes = DEMO_AUDIO_PLAY_CHUNK_BYTES;
+        }
+        chunk_bytes -= chunk_bytes % sizeof(int16_t);
+        if (chunk_bytes == 0) {
+            break;
+        }
+
+        size_t written_bytes = 0;
+        ret = audio_out_write_pcm_chunk(pcm_bytes + offset, chunk_bytes, &written_bytes);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "PCM buffer speaker write failed: %s", esp_err_to_name(ret));
+            break;
+        }
+
+        offset += chunk_bytes;
+        total_written += written_bytes;
+    }
+
+    esp_err_t close_ret = audio_out_close_pcm_stream();
+    if (ret == ESP_OK && close_ret != ESP_OK) {
+        ret = close_ret;
+    }
+
+    ESP_LOGI(TAG,
+             "PCM buffer playback done: read_bytes=%u written_bytes=%u elapsed_ms=%.1f",
+             (unsigned)offset,
+             (unsigned)total_written,
+             (double)(esp_timer_get_time() - start_us) / 1000.0);
+    return ret;
+}
+
 esp_err_t audio_out_play_pcm_file(const char *path,
                                   uint32_t sample_rate,
                                   uint16_t channels,

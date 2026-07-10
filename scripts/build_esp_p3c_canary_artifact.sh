@@ -46,8 +46,6 @@ ln -s "${ROOT_DIR}/esp_idf_demo/managed_components" "${SRC_DIR}/esp_idf_demo/man
 
 CONFIG_H="${SRC_DIR}/esp_idf_demo/main/config.h"
 perl -0pi -e 's/#define DEMO_OTA_BOOT_SWITCH_ENABLED 0/#define DEMO_OTA_BOOT_SWITCH_ENABLED 1/' "${CONFIG_H}"
-# OTA canary app artifact does not update SPIFFS; keep this SPIFFS-backed sound full-flash only.
-perl -0pi -e 's/#define DEMO_BOOT_SOUND_ENABLED 1/#define DEMO_BOOT_SOUND_ENABLED 0/' "${CONFIG_H}"
 perl -0pi -e "s/#define DEMO_WIFI_SSID\s+\"\"/#define DEMO_WIFI_SSID           \"${CANARY_WIFI_SSID}\"/" "${CONFIG_H}"
 perl -0pi -e "s|#define DEMO_SERVER_BASE_URL\s+\"\"|#define DEMO_SERVER_BASE_URL     \"${CANARY_SERVER_BASE_URL}\"|" "${CONFIG_H}"
 perl -0pi -e "s/#define DEMO_DEVICE_ID\s+\"\"/#define DEMO_DEVICE_ID           \"${CANARY_DEVICE_ID}\"/" "${CONFIG_H}"

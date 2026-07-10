@@ -25,6 +25,13 @@ esp_err_t audio_out_play_pcm_file(const char *path,
                                   uint16_t bits_per_sample,
                                   size_t max_bytes);
 
+esp_err_t audio_out_play_pcm_buffer(const uint8_t *pcm_bytes,
+                                    size_t pcm_bytes_size,
+                                    uint32_t sample_rate,
+                                    uint16_t channels,
+                                    uint16_t bits_per_sample,
+                                    size_t max_bytes);
+
 esp_err_t audio_out_open_pcm_stream(uint32_t sample_rate,
                                     uint16_t channels,
                                     uint16_t bits_per_sample);
