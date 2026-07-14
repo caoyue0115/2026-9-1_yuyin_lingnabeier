@@ -178,6 +178,14 @@ def test_handlers_reject_control_that_conflicts_with_expected_conversation() -> 
         fsm.on_turn_start(parse_client_control(_turn_control("turn_start")))
 
 
+def test_failed_first_control_does_not_bind_conversation() -> None:
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+
+    with pytest.raises(ProtocolError, match="^turn_mismatch$"):
+        fsm.on_turn_start(parse_client_control(_turn_control("turn_start", turn_id="other-turn")))
+    assert fsm.conversation_id is None
+
+
 def test_turn_transition_preserves_source_correlation_for_wire_conversion() -> None:
     fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     transition = fsm.on_turn_start(parse_client_control(_turn_control("turn_start")))
@@ -486,6 +494,51 @@ def test_server_event_defensively_copies_and_freezes_data() -> None:
         event.data["acknowledged_type"] = "turn_start"  # type: ignore[index]
 
 
+@pytest.mark.parametrize(
+    "event_factory",
+    [
+        lambda: ServerEvent(
+            type="ack",
+            conversation_id="conversation-1",
+            turn_id="turn-1",
+            turn_index=0,
+            highest_contiguous_sequence=0,
+            data={"acknowledged_type": "turn_start"},
+        ),
+        lambda: ServerEvent(
+            type="asr_final",
+            conversation_id="conversation-1",
+            turn_id="turn-1",
+            turn_index=0,
+            outcome=TurnOutcome.PLAYED,
+            data={"text": "question"},
+        ),
+    ],
+)
+def test_server_event_rejects_invalid_envelope_shapes(event_factory: object) -> None:
+    with pytest.raises(ProtocolError):
+        event_factory()  # type: ignore[operator]
+
+
+def test_server_event_rejects_invalid_event_data_at_construction() -> None:
+    with pytest.raises(ProtocolError, match="^unexpected_event_data$"):
+        ServerEvent(
+            type="turn_cancelled",
+            conversation_id="conversation-1",
+            turn_id="turn-1",
+            turn_index=0,
+            data={"reason": "late"},
+        )
+    with pytest.raises(ProtocolError, match="^missing_text$"):
+        ServerEvent(
+            type="asr_final",
+            conversation_id="conversation-1",
+            turn_id="turn-1",
+            turn_index=0,
+            data={"text": 1},
+        )
+
+
 @pytest.mark.parametrize("sequence", [None, -2, "0"])
 def test_binary_ack_requires_a_valid_highest_contiguous_sequence(sequence: object) -> None:
     with pytest.raises(ProtocolError, match="^invalid_highest_contiguous_sequence$"):
@@ -541,6 +594,15 @@ def test_frames_reject_empty_payload_and_bound_unique_metadata() -> None:
     )
     with pytest.raises(ProtocolError, match="^frame_limit_exceeded$"):
         fsm.ingest_frame(MAX_FRAMES_PER_TURN, b"x")
+
+
+def test_changed_duplicate_empty_frame_precedes_empty_frame_rejection() -> None:
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+    fsm.on_turn_start()
+    fsm.ingest_frame(0, b"x")
+
+    with pytest.raises(ProtocolError, match="^sequence_conflict$"):
+        fsm.ingest_frame(0, b"")
 
 
 def test_failed_asr_and_result_transitions_leave_state_unchanged() -> None:

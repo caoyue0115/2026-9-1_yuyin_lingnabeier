@@ -405,6 +405,8 @@ class TurnStateMachine:
         duplicate = self._check_duplicate(sequence, digest)
         if duplicate is not None:
             return duplicate
+        if not payload:
+            raise ProtocolError("empty_frame")
         if frame_bytes > MAX_FRAME_BYTES:
             raise ProtocolError("frame_too_large")
         is_new = sequence not in self._frame_digests
@@ -506,11 +508,11 @@ class TurnStateMachine:
         if control.type != expected_type:
             raise ProtocolError("unexpected_control")
         _require_turn_correlation(control.conversation_id, control.turn_id, control.turn_index)
-        self._bind_conversation(control.conversation_id)
         if control.turn_id != self.turn_id:
             raise ProtocolError("turn_mismatch")
         if control.turn_index != self.turn_index:
             raise ProtocolError("turn_index_mismatch")
+        self._bind_conversation(control.conversation_id)
 
     def _bind_conversation(self, conversation_id: str | None) -> None:
         conversation_id = _require_nonempty_string(conversation_id, "conversation_id")
@@ -621,42 +623,88 @@ def _require_turn_correlation(
 
 def _validate_server_event(event: ServerEvent) -> None:
     if event.type == "turn_complete":
+        _require_event_data_keys(event.data, allowed=frozenset())
         if not isinstance(event.outcome, TurnOutcome):
             raise ProtocolError("invalid_turn_outcome")
+        _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
         return
     if event.type == "ack":
+        _require_event_data_keys(event.data, allowed=frozenset({"acknowledged_type"}))
+        _require_absent(event.outcome, "outcome")
         acknowledged_type = _require_event_data_string(event.data, "acknowledged_type")
         if acknowledged_type == "binary":
             sequence = event.highest_contiguous_sequence
             if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < -1:
                 raise ProtocolError("invalid_highest_contiguous_sequence")
+        else:
+            _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
+            if acknowledged_type != "turn_start":
+                raise ProtocolError("unsupported_acknowledged_type")
         return
     if event.type == "asr_final":
+        _require_event_data_keys(event.data, allowed=frozenset({"text"}))
+        _require_absent(event.outcome, "outcome")
+        _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
         _require_event_data_string(event.data, "text")
         return
     if event.type == "turn_result":
+        _require_event_data_keys(
+            event.data, allowed=frozenset({"session_id", "audio_stream_url", "status"})
+        )
+        _require_absent(event.outcome, "outcome")
+        _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
         _require_event_data_string(event.data, "session_id")
         _require_event_data_string(event.data, "audio_stream_url")
         if _require_event_data_string(event.data, "status") != "ready":
             raise ProtocolError("unsupported_turn_result_status")
         return
+    if event.type == "turn_cancelled":
+        _require_event_data_keys(event.data, allowed=frozenset())
+        _require_absent(event.outcome, "outcome")
+        _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
+        return
     if event.type == "conversation_ready":
+        _require_conversation_event_shape(event)
+        _require_event_data_keys(event.data, allowed=frozenset({"client_conversation_id"}))
         _require_event_data_string(event.data, "client_conversation_id")
         return
+    if event.type == "conversation_done":
+        _require_conversation_event_shape(event)
+        _require_event_data_keys(event.data, allowed=frozenset())
+        return
     if event.type == "error":
+        _require_conversation_event_shape(event)
+        _require_event_data_keys(event.data, allowed=frozenset({"code", "message"}))
         _require_event_data_string(event.data, "code")
+        if "message" in event.data and not isinstance(event.data["message"], str):
+            raise ProtocolError("invalid_message")
 
 
 def _require_event_data_string(data: Mapping[str, Any], field_name: str) -> str:
     return _require_nonempty_string(data.get(field_name), field_name)
 
 
+def _require_event_data_keys(data: Mapping[str, Any], *, allowed: frozenset[str]) -> None:
+    if not set(data).issubset(allowed):
+        raise ProtocolError("unexpected_event_data")
+
+
+def _require_absent(value: Any, field_name: str) -> None:
+    if value is not None:
+        raise ProtocolError(f"unexpected_{field_name}")
+
+
+def _require_conversation_event_shape(event: ServerEvent) -> None:
+    _require_absent(event.turn_id, "turn_id")
+    _require_absent(event.turn_index, "turn_index")
+    _require_absent(event.outcome, "outcome")
+    _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
+
+
 def _frame_payload(payload: bytes | bytearray | memoryview) -> bytes:
     if not isinstance(payload, (bytes, bytearray, memoryview)):
         raise ProtocolError("invalid_frame_bytes")
     payload = bytes(payload)
-    if not payload:
-        raise ProtocolError("empty_frame")
     return payload
 
 
