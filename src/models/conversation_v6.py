@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from hashlib import sha256
 from time import monotonic as default_monotonic
 from typing import Any, Callable, Mapping
 
@@ -265,6 +266,7 @@ class ConversationLimits:
         self._started_at = monotonic() if started_at is None else _validate_timestamp(started_at)
         self._last_activity_at = self._started_at
         self._turn_ids: set[str] = set()
+        self._turn_indices: set[int] = set()
 
     @property
     def turn_count(self) -> int:
@@ -279,22 +281,39 @@ class ConversationLimits:
         self.check_deadline(now)
         self._last_activity_at = now
 
-    def start_turn(self, turn_id: str, *, now: float | None = None) -> None:
+    def start_turn(self, turn_id: str, turn_index: int, *, now: float | None = None) -> None:
         self.note_activity(self._monotonic() if now is None else now)
         turn_id = _require_nonempty_string(turn_id, "turn_id")
         if turn_id in self._turn_ids:
-            return
+            raise ProtocolError("turn_id_reused")
         if len(self._turn_ids) >= MAX_TURNS:
             raise ProtocolError("turn_limit_exceeded")
+        turn_index = _validate_turn_index(turn_index)
+        if turn_index in self._turn_indices or turn_index != len(self._turn_ids):
+            raise ProtocolError("turn_index_conflict")
         self._turn_ids.add(turn_id)
+        self._turn_indices.add(turn_index)
 
 
 class TurnStateMachine:
     """Pure per-turn state and binary frame sequencing for the v6 protocol."""
 
-    def __init__(self, turn_id: str, turn_index: int) -> None:
+    def __init__(
+        self,
+        turn_id: str,
+        turn_index: int,
+        *,
+        conversation_id: str | None = None,
+        limits: ConversationLimits | None = None,
+        monotonic: Callable[[], float] = default_monotonic,
+    ) -> None:
         self.turn_id = _require_nonempty_string(turn_id, "turn_id")
         self.turn_index = _validate_turn_index(turn_index)
+        self.conversation_id = (
+            None if conversation_id is None else _require_nonempty_string(conversation_id, "conversation_id")
+        )
+        self._limits = limits
+        self._monotonic = monotonic
         self.state = TurnState.IDLE
         self._frame_digests: dict[int, str] = {}
         self._highest_contiguous_sequence = -1
@@ -314,9 +333,14 @@ class TurnStateMachine:
         return self._audio_bytes
 
     def validate_correlation(
-        self, message: ClientControl | ServerEvent, *, conversation_id: str
+        self, message: ClientControl | ServerEvent, *, conversation_id: str | None = None
     ) -> None:
-        if message.conversation_id != _require_nonempty_string(conversation_id, "conversation_id"):
+        expected_conversation_id = conversation_id or self.conversation_id
+        if expected_conversation_id is None:
+            raise ProtocolError("missing_conversation_id")
+        if message.conversation_id != _require_nonempty_string(
+            expected_conversation_id, "conversation_id"
+        ):
             raise ProtocolError("conversation_mismatch")
         if message.turn_id != self.turn_id:
             raise ProtocolError("turn_mismatch")
@@ -325,6 +349,7 @@ class TurnStateMachine:
 
     def on_turn_start(self, control: ClientControl | None = None) -> TurnTransition:
         self._validate_control(control, "turn_start")
+        self._note_activity(start_turn=True)
         self._require_state(TurnState.IDLE)
         self._frame_digests.clear()
         self._highest_contiguous_sequence = -1
@@ -334,20 +359,22 @@ class TurnStateMachine:
 
     def accept_frame(self, sequence: int, digest: str) -> TurnTransition:
         self._require_state(TurnState.RECEIVING)
+        self._note_activity()
         duplicate = self._check_duplicate(sequence, digest)
         if duplicate is not None:
             return duplicate
-        return self._record_frame(sequence, digest, frame_bytes=0)
+        raise ProtocolError("frame_size_required")
 
-    def ingest_frame(
-        self, sequence: int, digest: str, payload_or_size: bytes | bytearray | memoryview | int
-    ) -> TurnTransition:
+    def ingest_frame(self, sequence: int, payload: bytes | bytearray | memoryview) -> TurnTransition:
         """Accept a binary payload after enforcing per-frame and per-turn byte limits."""
         self._require_state(TurnState.RECEIVING)
+        self._note_activity()
+        payload = _frame_payload(payload)
+        digest = sha256(payload).hexdigest()
         duplicate = self._check_duplicate(sequence, digest)
         if duplicate is not None:
             return duplicate
-        frame_bytes = _frame_byte_count(payload_or_size)
+        frame_bytes = len(payload)
         if frame_bytes > MAX_FRAME_BYTES:
             raise ProtocolError("frame_too_large")
         if self._audio_bytes + frame_bytes > MAX_TURN_AUDIO_BYTES:
@@ -356,20 +383,24 @@ class TurnStateMachine:
 
     def on_turn_end(self, control: ClientControl | None = None) -> None:
         self._validate_control(control, "turn_end")
+        self._note_activity()
         self._require_state(TurnState.RECEIVING)
         self.state = TurnState.PROCESSING
 
     def on_asr_final(self, text: str) -> TurnTransition:
+        self._note_activity()
         self._require_state(TurnState.PROCESSING)
         self.state = TurnState.RESULT_READY
         return self._transition("asr_final", data={"text": text})
 
     def on_asr_empty(self) -> TurnTransition:
+        self._note_activity()
         self._require_state(TurnState.PROCESSING)
         self.state = TurnState.COMPLETED
         return self._transition("turn_complete", outcome=TurnOutcome.ASR_EMPTY)
 
     def on_turn_result(self, *, session_id: str, audio_stream_url: str) -> TurnTransition:
+        self._note_activity()
         self._require_state(TurnState.RESULT_READY)
         self.state = TurnState.PLAYING
         return self._transition(
@@ -379,18 +410,22 @@ class TurnStateMachine:
 
     def on_turn_playback_complete(self, control: ClientControl | None = None) -> TurnTransition:
         self._validate_control(control, "turn_playback_complete")
+        self._note_activity()
         self._require_state(TurnState.PLAYING)
         self.state = TurnState.COMPLETED
         return self._transition("turn_complete", outcome=TurnOutcome.PLAYED)
 
     def on_technical_error(self) -> TurnTransition:
+        self._note_activity()
         return self._complete_error(TurnOutcome.TECHNICAL_ERROR)
 
     def on_rejected(self) -> TurnTransition:
+        self._note_activity()
         return self._complete_error(TurnOutcome.REJECTED)
 
     def begin_cancel(self, control: ClientControl | None = None) -> None:
         self._validate_control(control, "turn_cancel")
+        self._note_activity()
         if self.state is TurnState.CANCELLED:
             return
         if self.state not in {
@@ -404,6 +439,7 @@ class TurnStateMachine:
         self.state = TurnState.CANCELLING
 
     def on_turn_cancelled(self) -> TurnTransition:
+        self._note_activity()
         if self.state is TurnState.CANCELLED:
             assert self._cancelled_event is not None
             return self._cancelled_event
@@ -428,10 +464,27 @@ class TurnStateMachine:
         if control.type != expected_type:
             raise ProtocolError("unexpected_control")
         _require_turn_correlation(control.conversation_id, control.turn_id, control.turn_index)
+        self._bind_conversation(control.conversation_id)
         if control.turn_id != self.turn_id:
             raise ProtocolError("turn_mismatch")
         if control.turn_index != self.turn_index:
             raise ProtocolError("turn_index_mismatch")
+
+    def _bind_conversation(self, conversation_id: str | None) -> None:
+        conversation_id = _require_nonempty_string(conversation_id, "conversation_id")
+        if self.conversation_id is None:
+            self.conversation_id = conversation_id
+        elif self.conversation_id != conversation_id:
+            raise ProtocolError("conversation_mismatch")
+
+    def _note_activity(self, *, start_turn: bool = False) -> None:
+        if self._limits is None:
+            return
+        now = self._monotonic()
+        if start_turn:
+            self._limits.start_turn(self.turn_id, self.turn_index, now=now)
+        else:
+            self._limits.note_activity(now)
 
     def _require_state(self, expected: TurnState) -> None:
         if self.state is not expected:
@@ -525,7 +578,11 @@ def _validate_server_event(event: ServerEvent) -> None:
             raise ProtocolError("invalid_turn_outcome")
         return
     if event.type == "ack":
-        _require_event_data_string(event.data, "acknowledged_type")
+        acknowledged_type = _require_event_data_string(event.data, "acknowledged_type")
+        if acknowledged_type == "binary":
+            sequence = event.highest_contiguous_sequence
+            if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < -1:
+                raise ProtocolError("invalid_highest_contiguous_sequence")
         return
     if event.type == "asr_final":
         _require_event_data_string(event.data, "text")
@@ -545,14 +602,10 @@ def _require_event_data_string(data: Mapping[str, Any], field_name: str) -> str:
     return _require_nonempty_string(data.get(field_name), field_name)
 
 
-def _frame_byte_count(payload_or_size: bytes | bytearray | memoryview | int) -> int:
-    if isinstance(payload_or_size, int) and not isinstance(payload_or_size, bool):
-        if payload_or_size < 0:
-            raise ProtocolError("invalid_frame_bytes")
-        return payload_or_size
-    if isinstance(payload_or_size, (bytes, bytearray, memoryview)):
-        return len(payload_or_size)
-    raise ProtocolError("invalid_frame_bytes")
+def _frame_payload(payload: bytes | bytearray | memoryview) -> bytes:
+    if not isinstance(payload, (bytes, bytearray, memoryview)):
+        raise ProtocolError("invalid_frame_bytes")
+    return bytes(payload)
 
 
 def _validate_timestamp(value: Any) -> float:

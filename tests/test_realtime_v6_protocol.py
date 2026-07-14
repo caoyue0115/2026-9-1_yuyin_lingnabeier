@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from src.models.conversation_v6 import (
@@ -150,12 +152,31 @@ def test_controls_reject_missing_or_mismatched_correlation() -> None:
         )
 
 
+def test_handlers_bind_first_control_conversation_and_reject_later_mismatch() -> None:
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+    fsm.on_turn_start(parse_client_control(_turn_control("turn_start")))
+
+    with pytest.raises(ProtocolError, match="^conversation_mismatch$"):
+        fsm.on_turn_end(
+            parse_client_control(_turn_control("turn_end", conversation_id="other-conversation"))
+        )
+
+
+def test_handlers_reject_control_that_conflicts_with_expected_conversation() -> None:
+    fsm = TurnStateMachine(
+        turn_id="turn-1", turn_index=0, conversation_id="expected-conversation"
+    )
+
+    with pytest.raises(ProtocolError, match="^conversation_mismatch$"):
+        fsm.on_turn_start(parse_client_control(_turn_control("turn_start")))
+
+
 def test_golden_played_trace_preserves_turn_correlation() -> None:
     fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
 
     ready = conversation_ready_event("client-1", "conversation-1")
     start_ack = _wire_event(fsm.on_turn_start())
-    frame_ack = _wire_event(fsm.accept_frame(0, "digest-0"))
+    frame_ack = _wire_event(fsm.ingest_frame(0, b"frame-0"))
     fsm.on_turn_end()
     asr_final = _wire_event(fsm.on_asr_final("question"))
     result = _wire_event(fsm.on_turn_result(session_id="session-1", audio_stream_url="/audio"))
@@ -231,9 +252,9 @@ def test_frame_ack_is_highest_contiguous_and_duplicate_is_reacked() -> None:
     fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     fsm.on_turn_start()
 
-    out_of_order = _wire_event(fsm.accept_frame(1, "digest-1"))
-    first = _wire_event(fsm.accept_frame(0, "digest-0"))
-    duplicate = _wire_event(fsm.accept_frame(0, "digest-0"))
+    out_of_order = _wire_event(fsm.ingest_frame(1, b"frame-1"))
+    first = _wire_event(fsm.ingest_frame(0, b"frame-0"))
+    duplicate = _wire_event(fsm.accept_frame(0, hashlib.sha256(b"frame-0").hexdigest()))
 
     assert out_of_order.highest_contiguous_sequence == -1
     assert first.highest_contiguous_sequence == 1
@@ -245,7 +266,7 @@ def test_frame_ack_is_highest_contiguous_and_duplicate_is_reacked() -> None:
 def test_frame_sequence_conflict_rejects_changed_duplicate() -> None:
     fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     fsm.on_turn_start()
-    fsm.accept_frame(0, "digest-0")
+    fsm.ingest_frame(0, b"frame-0")
 
     with pytest.raises(ProtocolError, match="^sequence_conflict$"):
         fsm.accept_frame(0, "different-digest")
@@ -254,13 +275,13 @@ def test_frame_sequence_conflict_rejects_changed_duplicate() -> None:
 def test_binary_sequence_resets_for_each_turn() -> None:
     first_turn = TurnStateMachine(turn_id="turn-1", turn_index=0)
     first_turn.on_turn_start()
-    first_ack = _wire_event(first_turn.accept_frame(0, "first"))
+    first_ack = _wire_event(first_turn.ingest_frame(0, b"first"))
     assert first_ack.highest_contiguous_sequence == 0
     _assert_turn_event_correlation(first_ack)
 
     second_turn = TurnStateMachine(turn_id="turn-2", turn_index=1)
     second_turn.on_turn_start()
-    second_ack = _wire_event(second_turn.accept_frame(0, "second"), turn_id="turn-2", turn_index=1)
+    second_ack = _wire_event(second_turn.ingest_frame(0, b"second"), turn_id="turn-2", turn_index=1)
     assert second_ack.highest_contiguous_sequence == 0
     _assert_turn_event_correlation(second_ack, turn_id="turn-2", turn_index=1)
 
@@ -279,38 +300,63 @@ def test_frame_size_and_turn_audio_limits_are_enforced() -> None:
     fsm.on_turn_start()
 
     with pytest.raises(ProtocolError, match="^frame_too_large$"):
-        fsm.ingest_frame(0, "too-large", MAX_FRAME_BYTES + 1)
+        fsm.ingest_frame(0, b"x" * (MAX_FRAME_BYTES + 1))
 
     for sequence in range(MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES):
-        fsm.ingest_frame(sequence, f"digest-{sequence}", MAX_FRAME_BYTES)
+        fsm.ingest_frame(sequence, b"x" * MAX_FRAME_BYTES)
     remainder = MAX_TURN_AUDIO_BYTES % MAX_FRAME_BYTES
     if remainder:
-        fsm.ingest_frame(MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES, "remainder", remainder)
+        fsm.ingest_frame(MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES, b"x" * remainder)
 
     with pytest.raises(ProtocolError, match="^turn_audio_limit_exceeded$"):
-        fsm.ingest_frame((MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES) + 1, "over-limit", 1)
+        fsm.ingest_frame((MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES) + 1, b"x")
 
 
 def test_changed_duplicate_digest_wins_over_oversized_ingestion_error() -> None:
     fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     fsm.on_turn_start()
-    fsm.ingest_frame(0, "digest-0", b"x")
+    fsm.ingest_frame(0, b"x")
 
     with pytest.raises(ProtocolError, match="^sequence_conflict$"):
-        fsm.ingest_frame(0, "changed-digest", MAX_FRAME_BYTES + 1)
+        fsm.ingest_frame(0, b"y" * (MAX_FRAME_BYTES + 1))
+
+
+def test_accept_frame_only_reacks_measured_frames() -> None:
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+    fsm.on_turn_start()
+
+    with pytest.raises(ProtocolError, match="^frame_size_required$"):
+        fsm.accept_frame(0, "unmeasured")
+
+    payload = b"frame-0"
+    fsm.ingest_frame(0, payload)
+    duplicate = fsm.accept_frame(0, hashlib.sha256(payload).hexdigest())
+    assert duplicate.highest_contiguous_sequence == 0
 
 
 def test_conversation_limits_enforce_turn_count_and_connection_duration() -> None:
     limits = ConversationLimits(started_at=10.0)
 
     for turn_index in range(MAX_TURNS):
-        limits.start_turn(f"turn-{turn_index}", now=10.0)
+        limits.start_turn(f"turn-{turn_index}", turn_index, now=10.0)
     with pytest.raises(ProtocolError, match="^turn_limit_exceeded$"):
-        limits.start_turn("turn-over-limit", now=10.0)
+        limits.start_turn("turn-over-limit", MAX_TURNS, now=10.0)
 
     timed_limits = ConversationLimits(started_at=10.0)
     with pytest.raises(ProtocolError, match="^connection_time_exceeded$"):
-        timed_limits.start_turn("turn-0", now=10.0 + MAX_CONNECTION_SECONDS + 1)
+        timed_limits.start_turn("turn-0", 0, now=10.0 + MAX_CONNECTION_SECONDS + 1)
+
+
+def test_conversation_limits_reject_reused_turn_ids_and_conflicting_indices() -> None:
+    limits = ConversationLimits(started_at=0.0)
+    limits.start_turn("turn-0", 0, now=0.0)
+
+    with pytest.raises(ProtocolError, match="^turn_id_reused$"):
+        limits.start_turn("turn-0", 0, now=0.0)
+    with pytest.raises(ProtocolError, match="^turn_index_conflict$"):
+        limits.start_turn("turn-1", 0, now=0.0)
+    with pytest.raises(ProtocolError, match="^turn_index_conflict$"):
+        limits.start_turn("turn-2", 2, now=0.0)
 
 
 def test_conversation_deadline_expires_while_idle_and_active() -> None:
@@ -320,7 +366,7 @@ def test_conversation_deadline_expires_while_idle_and_active() -> None:
 
     active_limits = ConversationLimits(started_at=0.0)
     active_limits.note_activity(10.0)
-    active_limits.start_turn("turn-0", now=20.0)
+    active_limits.start_turn("turn-0", 0, now=20.0)
     with pytest.raises(ProtocolError, match="^connection_time_exceeded$"):
         active_limits.check_deadline(MAX_CONNECTION_SECONDS + 1)
 
@@ -345,6 +391,35 @@ def test_turn_result_requires_its_wire_fields_at_construction() -> None:
             turn_id="turn-1",
             turn_index=0,
         )
+
+
+@pytest.mark.parametrize("sequence", [None, -2, "0"])
+def test_binary_ack_requires_a_valid_highest_contiguous_sequence(sequence: object) -> None:
+    with pytest.raises(ProtocolError, match="^invalid_highest_contiguous_sequence$"):
+        ServerEvent(
+            type="ack",
+            conversation_id="conversation-1",
+            turn_id="turn-1",
+            turn_index=0,
+            highest_contiguous_sequence=sequence,  # type: ignore[arg-type]
+            data={"acknowledged_type": "binary"},
+        )
+
+
+def test_fsm_activity_checks_attached_conversation_deadline() -> None:
+    now = [0.0]
+    limits = ConversationLimits(started_at=0.0)
+    fsm = TurnStateMachine(
+        turn_id="turn-1",
+        turn_index=0,
+        limits=limits,
+        monotonic=lambda: now[0],
+    )
+    fsm.on_turn_start()
+    now[0] = MAX_CONNECTION_SECONDS + 1
+
+    with pytest.raises(ProtocolError, match="^connection_time_exceeded$"):
+        fsm.ingest_frame(0, b"frame-0")
 
 
 def test_protocol_limits_are_locked() -> None:
