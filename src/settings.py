@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     realtime_tts_warmup_enabled: bool = True
     realtime_llm_compact_top_k: int = 1
     realtime_llm_compact_snippet_chars: int = 36
+    conversation_v6_audio_queue_bytes: int = 256 * 1024
+    conversation_v6_cancel_timeout_seconds: float = 2.0
+    conversation_v6_close_timeout_seconds: float = 2.0
+    conversation_v6_question_chars: int = 512
+    conversation_v6_answer_chars: int = 4096
     project_name: str = "Religion Cloud Demo"
     version: str = "0.1.0"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
