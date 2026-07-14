@@ -5,12 +5,14 @@ from enum import StrEnum
 from hashlib import sha256
 from time import monotonic as default_monotonic
 from typing import Any, Callable, Mapping
+from types import MappingProxyType
 
 
 MAX_TURNS = 4
 MAX_FRAME_BYTES = 4096
 MAX_TURN_AUDIO_BYTES = 16_000 * 2 * 8
 MAX_CONNECTION_SECONDS = 180
+MAX_FRAMES_PER_TURN = 1024
 SUPPORTED_AUDIO_FORMATS = frozenset({"opus"})
 SUPPORTED_ANSWER_MODES = frozenset({"streaming"})
 
@@ -44,6 +46,10 @@ class ProtocolError(ValueError):
 _TURN_CONTROLS = frozenset({"turn_start", "turn_end", "turn_cancel", "turn_playback_complete"})
 _CONVERSATION_CONTROLS = frozenset({"conversation_start", "conversation_end"})
 _TURN_EVENTS = frozenset({"ack", "asr_final", "turn_result", "turn_complete", "turn_cancelled"})
+_SERVER_EVENTS = _TURN_EVENTS | frozenset({"conversation_ready", "conversation_done", "error"})
+_RESERVED_EVENT_DATA_KEYS = frozenset(
+    {"type", "conversation_id", "turn_id", "turn_index", "outcome", "highest_contiguous_sequence"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,8 +86,16 @@ class ServerEvent:
     data: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.type, str):
+            raise ProtocolError("invalid_server_event_type")
+        if self.type not in _SERVER_EVENTS:
+            raise ProtocolError("unknown_server_event")
         if not isinstance(self.data, Mapping):
             raise ProtocolError("invalid_event_data")
+        data = dict(self.data)
+        if _RESERVED_EVENT_DATA_KEYS.intersection(data):
+            raise ProtocolError("reserved_event_data")
+        object.__setattr__(self, "data", MappingProxyType(data))
         if self.type in _TURN_EVENTS:
             _require_turn_correlation(self.conversation_id, self.turn_id, self.turn_index)
         elif self.type in {"conversation_ready", "conversation_done", "error"}:
@@ -89,12 +103,14 @@ class ServerEvent:
         _validate_server_event(self)
 
     def to_payload(self) -> dict[str, Any]:
+        self.__post_init__()
         if self.type in _TURN_EVENTS:
             _require_turn_correlation(self.conversation_id, self.turn_id, self.turn_index)
         elif self.type in {"conversation_ready", "conversation_done", "error"}:
             _require_nonempty_string(self.conversation_id, "conversation_id")
 
-        payload: dict[str, Any] = {"type": self.type, **self.data}
+        payload: dict[str, Any] = dict(self.data)
+        payload["type"] = self.type
         if self.conversation_id is not None:
             payload["conversation_id"] = self.conversation_id
         if self.turn_id is not None:
@@ -114,6 +130,8 @@ def parse_client_control(payload: Mapping[str, Any]) -> ClientControl:
         raise ProtocolError("invalid_control")
 
     message_type = payload.get("type")
+    if not isinstance(message_type, str):
+        raise ProtocolError("invalid_control_type")
     if message_type not in _TURN_CONTROLS | _CONVERSATION_CONTROLS:
         raise ProtocolError("unknown_control")
 
@@ -281,6 +299,9 @@ class ConversationLimits:
     def turn_count(self) -> int:
         return len(self._turn_ids)
 
+    def now(self) -> float:
+        return self._monotonic()
+
     def check_deadline(self, now: float) -> None:
         now = _validate_timestamp(now)
         if now - self._started_at > MAX_CONNECTION_SECONDS:
@@ -314,7 +335,7 @@ class TurnStateMachine:
         *,
         conversation_id: str | None = None,
         limits: ConversationLimits | None = None,
-        monotonic: Callable[[], float] = default_monotonic,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self.turn_id = _require_nonempty_string(turn_id, "turn_id")
         self.turn_index = _validate_turn_index(turn_index)
@@ -322,7 +343,7 @@ class TurnStateMachine:
             None if conversation_id is None else _require_nonempty_string(conversation_id, "conversation_id")
         )
         self._limits = limits
-        self._monotonic = monotonic
+        self._monotonic = monotonic or (limits.now if limits is not None else default_monotonic)
         self.state = TurnState.IDLE
         self._frame_digests: dict[int, str] = {}
         self._highest_contiguous_sequence = -1
@@ -401,6 +422,7 @@ class TurnStateMachine:
         self.state = TurnState.PROCESSING
 
     def on_asr_final(self, text: str) -> TurnTransition:
+        text = _require_nonempty_string(text, "text")
         self._note_activity()
         self._require_state(TurnState.PROCESSING)
         self.state = TurnState.RESULT_READY
@@ -413,6 +435,8 @@ class TurnStateMachine:
         return self._transition("turn_complete", outcome=TurnOutcome.ASR_EMPTY)
 
     def on_turn_result(self, *, session_id: str, audio_stream_url: str) -> TurnTransition:
+        session_id = _require_nonempty_string(session_id, "session_id")
+        audio_stream_url = _require_nonempty_string(audio_stream_url, "audio_stream_url")
         self._note_activity()
         self._require_state(TurnState.RESULT_READY)
         self.state = TurnState.PLAYING
@@ -466,7 +490,12 @@ class TurnStateMachine:
         return self.on_turn_cancelled()
 
     def _complete_error(self, outcome: TurnOutcome) -> TurnTransition:
-        if self.is_terminal or self.state is TurnState.CANCELLING:
+        if self.state not in {
+            TurnState.RECEIVING,
+            TurnState.PROCESSING,
+            TurnState.RESULT_READY,
+            TurnState.PLAYING,
+        }:
             raise ProtocolError("invalid_state")
         self.state = TurnState.COMPLETED
         return self._transition("turn_complete", outcome=outcome)
@@ -519,6 +548,8 @@ class TurnStateMachine:
         )
 
     def _record_frame(self, sequence: int, digest: str, *, frame_bytes: int) -> TurnTransition:
+        if len(self._frame_digests) >= MAX_FRAMES_PER_TURN:
+            raise ProtocolError("frame_limit_exceeded")
         self._frame_digests[sequence] = digest
         self._audio_bytes += frame_bytes
         while self._highest_contiguous_sequence + 1 in self._frame_digests:
@@ -623,7 +654,10 @@ def _require_event_data_string(data: Mapping[str, Any], field_name: str) -> str:
 def _frame_payload(payload: bytes | bytearray | memoryview) -> bytes:
     if not isinstance(payload, (bytes, bytearray, memoryview)):
         raise ProtocolError("invalid_frame_bytes")
-    return bytes(payload)
+    payload = bytes(payload)
+    if not payload:
+        raise ProtocolError("empty_frame")
+    return payload
 
 
 def _validate_timestamp(value: Any) -> float:

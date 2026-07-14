@@ -7,6 +7,7 @@ import pytest
 from src.models.conversation_v6 import (
     ConversationLimits,
     MAX_CONNECTION_SECONDS,
+    MAX_FRAMES_PER_TURN,
     MAX_FRAME_BYTES,
     MAX_TURN_AUDIO_BYTES,
     MAX_TURNS,
@@ -88,6 +89,12 @@ def test_client_controls_parse_with_required_correlation_fields() -> None:
     )
     assert end.conversation_id == "conversation-1"
     assert end.data["reason"] == "normal"
+
+
+@pytest.mark.parametrize("message_type", [None, True, 0, 1.5, [], {}])
+def test_client_controls_reject_every_non_string_type_with_protocol_error(message_type: object) -> None:
+    with pytest.raises(ProtocolError, match="^invalid_control_type$"):
+        parse_client_control({"type": message_type})
 
 
 @pytest.mark.parametrize(
@@ -448,6 +455,37 @@ def test_turn_result_requires_ready_status(status: object) -> None:
         )
 
 
+def test_server_event_rejects_unknown_and_reserved_data_keys() -> None:
+    with pytest.raises(ProtocolError, match="^unknown_server_event$"):
+        ServerEvent(type="unknown")
+    with pytest.raises(ProtocolError, match="^reserved_event_data$"):
+        ServerEvent(
+            type="ack",
+            conversation_id="conversation-1",
+            turn_id="turn-1",
+            turn_index=0,
+            highest_contiguous_sequence=0,
+            data={"acknowledged_type": "binary", "turn_id": "other-turn"},
+        )
+
+
+def test_server_event_defensively_copies_and_freezes_data() -> None:
+    data = {"acknowledged_type": "binary"}
+    event = ServerEvent(
+        type="ack",
+        conversation_id="conversation-1",
+        turn_id="turn-1",
+        turn_index=0,
+        highest_contiguous_sequence=0,
+        data=data,
+    )
+    data["acknowledged_type"] = "turn_start"
+
+    assert event.to_payload()["acknowledged_type"] == "binary"
+    with pytest.raises(TypeError):
+        event.data["acknowledged_type"] = "turn_start"  # type: ignore[index]
+
+
 @pytest.mark.parametrize("sequence", [None, -2, "0"])
 def test_binary_ack_requires_a_valid_highest_contiguous_sequence(sequence: object) -> None:
     with pytest.raises(ProtocolError, match="^invalid_highest_contiguous_sequence$"):
@@ -475,6 +513,60 @@ def test_fsm_activity_checks_attached_conversation_deadline() -> None:
 
     with pytest.raises(ProtocolError, match="^connection_time_exceeded$"):
         fsm.ingest_frame(0, b"frame-0")
+
+
+def test_fsm_uses_the_attached_limits_clock_when_no_clock_is_supplied() -> None:
+    now = [0.0]
+    limits = ConversationLimits(monotonic=lambda: now[0])
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0, limits=limits)
+    fsm.on_turn_start()
+    now[0] = MAX_CONNECTION_SECONDS + 1
+
+    with pytest.raises(ProtocolError, match="^connection_time_exceeded$"):
+        fsm.ingest_frame(0, b"frame-0")
+
+
+def test_frames_reject_empty_payload_and_bound_unique_metadata() -> None:
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+    fsm.on_turn_start()
+
+    with pytest.raises(ProtocolError, match="^empty_frame$"):
+        fsm.ingest_frame(0, b"")
+
+    for sequence in range(MAX_FRAMES_PER_TURN):
+        fsm.ingest_frame(sequence, b"x")
+    assert (
+        fsm.accept_frame(0, hashlib.sha256(b"x").hexdigest()).highest_contiguous_sequence
+        == MAX_FRAMES_PER_TURN - 1
+    )
+    with pytest.raises(ProtocolError, match="^frame_limit_exceeded$"):
+        fsm.ingest_frame(MAX_FRAMES_PER_TURN, b"x")
+
+
+def test_failed_asr_and_result_transitions_leave_state_unchanged() -> None:
+    asr_fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+    asr_fsm.on_turn_start()
+    asr_fsm.on_turn_end()
+    with pytest.raises(ProtocolError, match="^missing_text$"):
+        asr_fsm.on_asr_final("")
+    assert asr_fsm.state is TurnState.PROCESSING
+
+    result_fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+    result_fsm.on_turn_start()
+    result_fsm.on_turn_end()
+    result_fsm.on_asr_final("question")
+    with pytest.raises(ProtocolError, match="^missing_session_id$"):
+        result_fsm.on_turn_result(session_id="", audio_stream_url="/audio")
+    assert result_fsm.state is TurnState.RESULT_READY
+
+
+@pytest.mark.parametrize("transition", ["on_technical_error", "on_rejected"])
+def test_error_completion_rejects_idle_without_mutating_state(transition: str) -> None:
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+
+    with pytest.raises(ProtocolError, match="^invalid_state$"):
+        getattr(fsm, transition)()
+    assert fsm.state is TurnState.IDLE
 
 
 def test_protocol_limits_are_locked() -> None:
