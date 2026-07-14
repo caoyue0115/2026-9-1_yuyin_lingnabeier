@@ -56,7 +56,7 @@
 - 已保存 Wi-Fi 时先扫描，按 SSID 合并同名 BSSID，保留最强 RSSI 的 BSSID，再过滤出当前可见的已保存网络并按 RSSI 从强到弱排序。
 - 未扫描到任何已保存网络时，不等待满额预算；扫描结束后立即播放“请联网”并开启配网热点。
 - 8 秒是从启动扫描开始计算的单调时钟绝对截止时间，包含扫描、关联、认证和 DHCP；任一步都不得单独重新获得 8 秒。
-- 扫描到候选时按排序结果完成第一遍，每个候选先尝试 1 次；仍有预算时再对失败候选完成第二遍。每个候选最多 2 次。
+- 扫描到候选时按排序结果完成第一遍，每个候选先尝试 1 次；单次候选从开始关联到获得 IP 的上限为 3 秒，超时必须主动 disconnect 并切换下一候选，不能由底层组件继续重试同一 AP。仍有全局预算时再对失败候选完成第二遍，每个候选最多 2 次；全局截止时间优先，未轮到的候选留给后续后台扫描。
 - 8 秒内获得 IP 即视为成功，播放“阿弥陀佛”并进入待机。
 - 8 秒预算耗尽后播放一次“请联网”，开启配网热点。
 
@@ -80,7 +80,7 @@ NVS 使用带版本号的新 schema，每条记录包含 SSID、密码、最近�
 2. 在新的临时 namespace 写入完整记录、schema 版本和校验标志，并 `nvs_commit`。
 3. 重新读取并校验成功后，原子设置新 schema 的 active 标志；掉电前旧键始终保持不动。
 4. 新版本只在 active 标志有效时使用新 schema，否则回退读取旧键并重新迁移。
-5. 本阶段不删除旧键，确保回滚旧 app 后仍能联网；后续稳定版本再单独决定清理。
+5. 本阶段不删除旧键，确保回滚旧 app 后仍保留升级前的凭据；旧 app 不保证识别升级后新增网络或修改后的密码，后续稳定版本再单独决定双写或清理策略。
 
 编译期 `DEMO_WIFI_SSID` 只在“新旧 NVS 都没有凭据”时作为一次性出厂种子写入，不得在每次启动时刷新最近成功顺序、覆盖用户密码或挤掉用户保存的网络。
 
@@ -101,7 +101,7 @@ NVS 使用带版本号的新 schema，每条记录包含 SSID、密码、最近�
 
 ### 4.5 配网边界
 
-Demo 阶段保留 `http://192.168.4.1` 和开放 AP，以降低开发成本，但只允许在无凭据启动或 GPIO0 长按触发后的物理在场窗口内开启，窗口最长 5 分钟。提交成功由服务器端安排延迟关闭 AP，不依赖完成页 JavaScript 调用 `/exit`；若 STA 验证失败，AP 保持或自动恢复到剩余窗口。SmartConfig 在本产品构建中关闭，日志严禁输出 Wi-Fi 密码。
+Demo 阶段保留 `http://192.168.4.1` 和开放 AP，以降低开发成本。无任何凭据的设备持续保留 AP，直到成功提交并验证网络，避免当前阻塞式启动下进入无法重开的状态；已有凭据时由 GPIO0 长按触发的重配窗口最长 5 分钟，超时恢复原 STA 重连。提交成功由服务器端安排延迟关闭 AP，不依赖完成页 JavaScript 调用 `/exit`；若 STA 验证失败，AP 保持或自动恢复到剩余窗口。SmartConfig 在本产品构建中关闭，日志严禁输出 Wi-Fi 密码。
 
 ## 5. v6 持久会话协议
 
@@ -151,7 +151,7 @@ Demo 阶段保留 `http://192.168.4.1` 和开放 AP，以降低开发成本，�
 
 每个 `turn_start` 将 binary Opus sequence 重置为 0，作用域是 `(conversation_id, turn_id)`。相同 sequence 和相同载荷按重复帧忽略并重发 ACK；相同 sequence 但载荷不同属于 `sequence_conflict` 并关闭会话。服务器限制单帧、单轮累计音频字节、单轮时长和连接总时长，超限返回稳定错误码。
 
-每轮规范状态为 `IDLE -> RECEIVING -> PROCESSING -> RESULT_READY -> PLAYING -> COMPLETED`，取消可从 `RECEIVING/PROCESSING/RESULT_READY/PLAYING` 进入 `CANCELLING -> CANCELLED`。同一连接任何时刻只有一轮不处于终态。`turn_result` 只表示结果和音频 URL 已准备好；板端在 HTTP 音频自然 EOF 且播放队列排空后发送 `turn_playback_complete`，服务器随后发送 `turn_complete`，此时才能开始下一轮。
+每轮规范状态为 `IDLE -> RECEIVING -> PROCESSING -> RESULT_READY -> PLAYING -> COMPLETED`，取消可从 `RECEIVING/PROCESSING/RESULT_READY/PLAYING` 进入 `CANCELLING -> CANCELLED`。`COMPLETED` 和 `CANCELLED` 是终态；ASR 空结果、处理前技术失败和协议拒绝分别用 `turn_complete(outcome=asr_empty|technical_error|rejected)` 进入 `COMPLETED`。同一连接任何时刻只有一轮不处于终态。`turn_result` 只表示结果和音频 URL 已准备好；板端在 HTTP 音频自然 EOF 且播放队列排空后发送 `turn_playback_complete`，服务器随后发送 `turn_complete(outcome=played)`，此时才能开始下一轮。
 
 `turn_cancel` 是幂等请求。服务器收到后设置共享取消令牌、停止生产者、关闭提供商流、清空音频缓冲并等待工作者有界退出；完成上述清理后才发送 `turn_cancelled`。`turn_cancelled` 是取消屏障，屏障之后该轮不得再产生可消费的 `asr_final`、`turn_result` 或音频字节。已发出的迟到事件由板端按 `(conversation_id, turn_id)` 丢弃。取消轮次的音频 URL 此后返回 HTTP 410。
 
@@ -169,7 +169,7 @@ Demo 阶段保留 `http://192.168.4.1` 和开放 AP，以降低开发成本，�
 
 Demo/COM4 阶段允许继续使用现有 HTTP/WS 和 `X-Device-Id`，不把 TLS 与设备证书放进第一阶段功能关键路径；但必须保留请求大小/速率上限、短时随机音频 URL、取消后 410、敏感日志禁令和服务端输入校验。
 
-向客户设备批量发布前必须完成独立安全门槛：CA 校验的 HTTPS/WSS、每设备凭据或签名、重放保护、与 device/turn 绑定且短时有效的音频授权。该门槛可以独立 PR 实施，但未完成时不得宣称生产安全或扩大到非受控网络。
+向客户设备批量发布前必须建立可追踪的独立安全规格和发布检查，至少覆盖：CA 校验的 HTTPS/WSS、每设备凭据或签名、重放保护、与 device/turn 绑定且短时有效的音频授权、签名 OTA/secure boot、Flash 与 NVS 加密、调试接口关闭策略，以及设备凭据轮换和吊销。该门槛可以独立 PR 实施，但未完成时不得宣称生产安全或扩大到非受控网络。
 
 ## 6. 板端多轮状态机
 
@@ -194,6 +194,7 @@ Demo/COM4 阶段允许继续使用现有 HTTP/WS 和 `X-Device-Id`，不把 TLS 
 
 - 只有 ASR 返回有效文本并开始处理该问题时，才消耗一次追问额度。
 - 已检测到语音但 ASR 结果为空时，播放一次“请重讲”，重新开放 5 秒，不消耗额度。
+- ASR 空结果的旧轮收到 `turn_complete(outcome=asr_empty)` 后才播放“请重讲”；重讲保持相同 `turn_index`，但必须创建新的 `turn_id`。
 - 每个追问位置最多允许 1 次重讲。
 - 重讲后无人说话或仍无有效文本时，播放“善哉”并正常结束。
 - 网络、WebSocket、服务器、解码或播放技术故障时播放“请重试”，异常结束，不播放“善哉”。
@@ -214,7 +215,7 @@ Demo/COM4 阶段允许继续使用现有 HTTP/WS 和 `X-Device-Id`，不把 TLS 
 - prompt arbiter：所有本地提示音的唯一入口，维护单队列、优先级、去重键和可打断属性；网络事件只提交语义事件，不直接播放。
 - `cloud_conversation`：v6 WebSocket、每轮上传、保活、取消和关闭，不直接操作麦克风或扬声器。
 - conversation controller：追问计数、5 秒窗口、重讲和结束原因。
-- `playback_session`：第一阶段即引入的当前回答下行 owner。一个 session 拥有 HTTP 请求、解码、jitter、I2S 输出和共享取消令牌，提供 `start/cancel/join`；`cancel` 和 `join` 幂等，所有子任务都在同一有界清理路径退出。
+- `playback_session`：第一阶段即引入的当前回答下行 owner。一个 session 拥有 HTTP 请求、解码、jitter、播放生命周期和共享取消令牌，并通过底层音频输出接口提交 PCM；它提供 `start/cancel/join`，`cancel` 和 `join` 幂等，所有子任务都在同一有界清理路径退出。第二阶段引入 `audio_duplex_session` 后，`playback_session` 只持有 TX lease，不直接配置或销毁 I2S/codec。
 - 现有 `audio_in`、`audio_out`：继续负责录音/VAD和底层音频输出，不再各自决定回答下载任务生命周期。
 - 服务端 conversation session：拥有当前轮 worker/future、取消令牌、有界音频队列、上下文和状态机；存储层只保存有界状态，不拥有后台线程。
 
@@ -239,6 +240,7 @@ prompt arbiter 的固定优先级为：技术故障/“请重试” > 配网“�
 
 - 5 个凭据上限、相同 SSID 更新、最近成功排序和第 6 项淘汰。
 - 可见候选 RSSI 排序、单候选 2 次和 8 秒总预算。
+- 最强候选持续无法获得 IP 时，3 秒主动切换，第二候选仍能在 8 秒总预算内成功。
 - 运行时 12 秒提示阈值以及 15/30/60/60 秒重扫节奏。
 - 每个断网事件只播一次“请联网”，提示后恢复只播一次“阿弥陀佛”。
 - 所有新增 PCM 的格式、大小、嵌入符号和 app-only OTA 可达性。
@@ -288,6 +290,6 @@ prompt arbiter 的固定优先级为：技术故障/“请重试” > 配网“�
 5. 先做单设备 canary，再扩大 OTA。
 6. 回滚时旧固件继续使用 v5；服务器保留 v6 不影响旧设备。
 
-任何新 app 启动时都必须在阻塞式 `app_network_start()` 之前检查 OTA pending 状态并启动本地回滚超时任务。离线业务就绪定义为：NVS 可读、音频链路初始化成功、触发输入可进入待机或配网状态；联网和云端上报不是取消回滚的前置条件。验证成功后的报告可在联网后补发。
+任何新 app 启动时都必须在阻塞式 `app_network_start()` 之前检查 OTA pending 状态并启动本地回滚超时任务。工厂烧录且没有 OTA pending 时允许无凭据持续配网；OTA pending 启动必须区分升级前是否已有凭据：已有凭据时，只有 NVS 迁移成功、音频链路初始化成功且至少获得一次 IP 后才能调用 `esp_ota_mark_app_valid_cancel_rollback()`；pending 状态下凭据缺失、迁移失败或超时均不得标记有效，应重启并让 bootloader rollback。云端确认上报不是取消回滚的前置条件，可在联网后补发。
 
 第一阶段合并并稳定后，才开始第二阶段唤醒词打断与 AEC。

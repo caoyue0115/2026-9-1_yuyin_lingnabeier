@@ -77,15 +77,15 @@ reference buffer 必须：
 
 ### 6.2 麦克风与参考同步
 
-启用 barge-in 的构建从启动起只创建一次 `MR` AFE，`aec_init=true`，不再先创建 `M` 后运行时切换。普通待机继续给同一 AFE 喂麦克风和全零 reference，但只按现有待机规则接受 WakeNet；云端回答开始时清空 AFE 状态和 reference 队列，切入带真实 reference 的播放期监听。其他处理项保持最小化，除非真机数据证明必须启用。
+启用 barge-in 的构建从启动起只创建一次 `MR` AFE，`aec_init=true`，不再先创建 `M` 后运行时切换。普通待机继续给同一 AFE 喂麦克风和全零 reference，但调用 AFE `disable_aec`，只按现有待机规则接受 WakeNet；云端回答开始时调用 `enable_aec` 和 `reset_buffer` 并清空 reference 队列，切入带真实 reference 的播放期监听。其他处理项保持最小化，除非真机数据证明必须启用。
 
-板级新增唯一 `audio_duplex_session` owner，串行管理 ES8311、ES7210 和共享 I2S data interface 的打开、格式配置、开始、停止与关闭。播放任务、录音任务和 WakeNet task 只能申请 session/提交数据，不得各自重配或销毁 codec/I2S 句柄。状态转换必须等待前一 owner 操作完成，避免关闭麦克风时连带破坏仍在静音收尾的扬声器。
+第二阶段在第一阶段 `playback_session` 下方新增唯一的板级 `audio_duplex_session` owner，串行管理 ES8311、ES7210 和共享 I2S data interface 的打开、格式配置、开始、停止与关闭。`playback_session` 只持有 TX lease；录音和 WakeNet 持有 RX lease。各任务只能通过 lease 提交数据，不得自行重配或销毁 codec/I2S 句柄。状态转换必须等待前一 owner 操作完成，避免关闭麦克风时连带破坏仍在静音收尾的扬声器。
 
 播放开始标定一个可配置的 `mic_minus_reference_delay_samples`，以 sample counter 对齐麦克风块和 reference 块；初始值来自有线/声学 loopback 测量，真机矩阵允许按板型配置。音量变化、underrun、seek、取消或 sample counter 跳变时重置 AFE 和对齐器。时钟漂移或短时 reference 缺帧不得导致越界或死锁。无法取得有效参考时，该音频块不得直接绕过 AEC 喂给 WakeNet；应丢弃该块并记录降级指标，以避免设备自身回答触发。
 
 ### 6.3 生命周期
 
-- 云端回答开始实际出声前，由 `audio_duplex_session` 复位常驻 MR AFE、sample counter 对齐器和 reference 队列。
+- 云端回答开始实际出声前，由 `audio_duplex_session` 对常驻 MR AFE 调用 `reset_buffer`，并复位 sample counter 对齐器和 reference 队列。
 - 回答播放期间持续 feed/fetch。
 - 本地提示音开始前停止接受 barge-in。
 - 回答正常结束、取消或技术错误时退出播放期接受窗口、清空真实 reference，并恢复待机的零 reference feed；不销毁 AFE 模型。
@@ -100,12 +100,14 @@ reference buffer 必须：
 1. 原子设置 cancel 标志，确保只处理第一次检测。
 2. 立即调用第一阶段 `playback_session_cancel(BARGE_IN)`；该 session 统一停止 HTTP 流、解码、jitter 和 I2S 写入。
 3. `playback_session` owner 清空接收、解码和播放队列；WakeNet task 不直接操作这些资源。
-4. 向服务器发送当前轮 `turn_cancel`；取消确认可异步到达，不阻塞本地静音。
+4. 向服务器发送当前轮 `turn_cancel`；取消确认可异步到达，不阻塞本地静音、播放“请讲”或本地录音，但新问题不得上传。
 5. 停止播放期 WakeNet/AEC，清空 reference buffer。
-6. 保留约 150ms 扬声器尾音保护时间。
+6. codec/PA 静音后保留约 150ms 的无声尾音保护时间，再播放提示；该时间不允许扬声器继续输出被打断回答。
 7. 播放本地“请讲”。
 8. 使用现有录音/VAD开始追问。
 9. ASR 返回有效问题后才消耗一次追问额度。
+
+同会话追问上传前必须收到匹配 `(conversation_id, turn_id)` 的 `turn_cancelled` 屏障。2 秒内未收到时，按技术故障关闭旧 conversation、丢弃已录制追问并播放“请重试”，不得在旧上下文上发送新的 `turn_start`。
 
 被打断回答的文本可留在服务器当前会话上下文中，但必须标记为 `interrupted=true`。后续 LLM可以知道上一轮回答未完整播放，避免假设用户已经听完全部内容。
 
@@ -139,7 +141,7 @@ reference buffer 必须：
 
 取消可以从 WakeNet task 发出事件，但资源回收由各自 owner task 完成。不得从 WakeNet 回调直接强制删除音频或 WebSocket task。
 
-HTTP 读取、解码和 jitter task 都必须观察同一个取消信号。WakeNet 命中至最后一次 I2S 提交目标不超过 200ms；本地 playback owner 的全部任务在 1 秒内退出，服务器取消屏障在 2 秒内返回。重复取消、取消与自然 EOF 同时发生、取消与网络错误同时发生都必须安全；本地静音不等待服务器屏障。
+HTTP 读取、解码和 jitter task 都必须观察同一个取消信号。分别记录 cancel 请求、最后一次 PCM write、codec/PA mute 和声学能量降至阈值的时间；WakeNet 命中至可靠硬件 mute 的硬门槛不超过 200ms，并在 COM4 用麦克风录音确认声学静音。如果 DMA 无法及时 flush，必须使用 codec mute 或板级 PA 控制，不能用“最后一次 I2S 提交”代替静音指标。本地 playback owner 的全部任务在 1 秒内退出，服务器取消屏障在 2 秒内返回。重复取消、取消与自然 EOF 同时发生、取消与网络错误同时发生都必须安全；本地静音不等待服务器屏障。
 
 ## 9. 功能开关与降级
 
@@ -192,7 +194,7 @@ HTTP 读取、解码和 jitter task 都必须观察同一个取消信号。WakeN
 - 首次 WakeNet 事件触发一次取消，重复事件幂等。
 - HTTP读取、解码、jitter和播放队列均响应取消。
 - `audio_duplex_session` 串行化 codec/I2S 生命周期，覆盖播放开始、录音开始、取消和技术错误竞态。
-- 功能开启构建只创建 MR AFE，普通待机用零 reference；功能关闭构建保持 M AFE，运行时不切换 feed shape。
+- 功能开启构建只创建 MR AFE，普通待机用零 reference 且禁用 AEC，播放前启用 AEC 并调用 `reset_buffer`；功能关闭构建保持 M AFE，运行时不切换 feed shape。普通待机 WakeNet 命中率和 CPU 占用必须与关闭功能基线对比。
 - sample counter 对齐、配置延迟、reference 缺帧、underrun、音量变化和取消均触发预期重置。
 - `turn_cancel` 正确发送并处理迟到的 `turn_result`、`turn_cancelled` 和 EOF竞态。
 - 有额度时保留 conversation；额度耗尽时创建新 conversation。
@@ -219,7 +221,7 @@ HTTP 读取、解码和 jitter task 都必须观察同一个取消信号。WakeN
 - 从 WakeNet 报告命中到扬声器静音目标不超过约 200ms。
 - 连续多次打断无崩溃、看门狗、音频死锁或明显内存增长。
 - AEC/WakeNet 并发不得造成回答持续卡顿、严重 underrun 或网络吞吐回退。
-- 与关闭功能的同音频基线相比，开启后 underrun 率不增加超过 1 个百分点；内部 RAM/PSRAM 和 CPU/栈指标满足第 10 节预算。
+- underrun 率定义为 `underrun_duration_us / total_playback_duration_us`。与关闭功能的同音频基线相比，开启后该比例不增加超过 1 个百分点；同时单独记录每播放分钟的 underrun 次数，内部 RAM/PSRAM 和 CPU/栈指标满足第 10 节预算。
 - 声学矩阵记录可复现的误唤醒率、漏唤醒率和 ERLE/残余回声。Demo 放行门槛为连续播放 30 分钟零自唤醒、每个距离/音量组合至少 10 次人工唤醒成功率不低于 90%；客户发布前再根据样机数据收紧。
 
 若 200ms 目标或误唤醒可靠性未达到，功能保持默认关闭，不进入正式发布配置。
