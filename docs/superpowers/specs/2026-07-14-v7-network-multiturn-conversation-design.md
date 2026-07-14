@@ -135,6 +135,7 @@ Demo 阶段保留 `http://192.168.4.1` 和开放 AP，以降低开发成本。�
 - binary Opus frame：复用现有 framed-v1 二进制封装和 sequence 规则。
 - `turn_end`：结束当前轮上行。
 - `turn_cancel`：取消当前轮生成或音频消费；第一阶段服务器实现和测试，板端在第二阶段打断功能中使用。
+- `turn_playback_complete`：板端确认匹配轮次的 HTTP 音频自然 EOF 且播放队列已排空，携带 `conversation_id`、`turn_id` 和 `turn_index`。
 - `conversation_end`：携带正常结束或错误结束原因。
 
 服务器消息：
@@ -143,6 +144,7 @@ Demo 阶段保留 `http://192.168.4.1` 和开放 AP，以降低开发成本。�
 - `ack`：携带被确认的消息类型；帧 ACK 还携带 `highest_contiguous_sequence`，表示服务器已接收的最高连续帧，不表示 ASR、LLM、TTS 或持久化完成。
 - `asr_final`：返回当前轮识别结果。
 - `turn_result`：返回当前轮 `session_id`、`audio_stream_url` 和结果状态，但保持 WebSocket 打开。
+- `turn_complete`：服务器宣布匹配轮次进入终态，携带 `conversation_id`、`turn_id`、`turn_index` 和 `outcome`；`outcome` 只能是 `played`、`asr_empty`、`technical_error` 或 `rejected`。
 - `turn_cancelled`：确认资源已取消。
 - `conversation_done`：确认会话清理完成。
 - `error`：返回稳定错误码和可选错误信息。
