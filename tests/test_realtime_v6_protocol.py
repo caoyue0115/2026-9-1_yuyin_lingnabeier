@@ -10,9 +10,11 @@ from src.models.conversation_v6 import (
     MAX_TURNS,
     ProtocolError,
     ServerEvent,
+    TurnTransition,
     TurnOutcome,
     TurnState,
     TurnStateMachine,
+    build_turn_event,
     conversation_done_event,
     conversation_ready_event,
     parse_client_control,
@@ -46,6 +48,17 @@ def _assert_turn_event_correlation(
     assert event.conversation_id == "conversation-1"
     assert event.turn_id == turn_id
     assert event.turn_index == turn_index
+
+
+def _wire_event(
+    transition: TurnTransition, *, turn_id: str = "turn-1", turn_index: int = 0
+) -> ServerEvent:
+    return build_turn_event(
+        transition,
+        conversation_id="conversation-1",
+        turn_id=turn_id,
+        turn_index=turn_index,
+    )
 
 
 def test_client_controls_parse_with_required_correlation_fields() -> None:
@@ -113,31 +126,40 @@ def test_controls_reject_missing_or_mismatched_correlation() -> None:
     with pytest.raises(ProtocolError):
         parse_client_control({"type": "turn_start", "turn_id": "turn-1", "turn_index": 0})
 
-    fsm = TurnStateMachine(conversation_id="conversation-1", turn_id="turn-1", turn_index=0)
-    fsm.validate_correlation(parse_client_control(_turn_control("turn_start")))
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+    fsm.validate_correlation(
+        parse_client_control(_turn_control("turn_start")), conversation_id="conversation-1"
+    )
 
     with pytest.raises(ProtocolError):
         fsm.validate_correlation(
             parse_client_control(
                 _turn_control("turn_end", conversation_id="other-conversation")
-            )
+            ),
+            conversation_id="conversation-1",
         )
     with pytest.raises(ProtocolError):
-        fsm.validate_correlation(parse_client_control(_turn_control("turn_end", turn_id="other-turn")))
+        fsm.validate_correlation(
+            parse_client_control(_turn_control("turn_end", turn_id="other-turn")),
+            conversation_id="conversation-1",
+        )
     with pytest.raises(ProtocolError):
-        fsm.validate_correlation(parse_client_control(_turn_control("turn_end", turn_index=1)))
+        fsm.validate_correlation(
+            parse_client_control(_turn_control("turn_end", turn_index=1)),
+            conversation_id="conversation-1",
+        )
 
 
 def test_golden_played_trace_preserves_turn_correlation() -> None:
-    fsm = TurnStateMachine(conversation_id="conversation-1", turn_id="turn-1", turn_index=0)
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
 
     ready = conversation_ready_event("client-1", "conversation-1")
-    start_ack = fsm.on_turn_start()
-    frame_ack = fsm.accept_frame(0, "digest-0", 1)
+    start_ack = _wire_event(fsm.on_turn_start())
+    frame_ack = _wire_event(fsm.accept_frame(0, "digest-0"))
     fsm.on_turn_end()
-    asr_final = fsm.on_asr_final("question")
-    result = fsm.on_turn_result(session_id="session-1", audio_stream_url="/audio")
-    complete = fsm.on_turn_playback_complete()
+    asr_final = _wire_event(fsm.on_asr_final("question"))
+    result = _wire_event(fsm.on_turn_result(session_id="session-1", audio_stream_url="/audio"))
+    complete = _wire_event(fsm.on_turn_playback_complete())
     done = conversation_done_event("conversation-1")
 
     observed = [
@@ -159,13 +181,14 @@ def test_golden_played_trace_preserves_turn_correlation() -> None:
 
 
 def test_empty_asr_finishes_before_reprompt() -> None:
-    fsm = TurnStateMachine(conversation_id="conversation-1", turn_id="t1", turn_index=1)
+    fsm = TurnStateMachine(turn_id="t1", turn_index=1)
     fsm.on_turn_start()
     fsm.on_turn_end()
-    event = fsm.on_asr_empty()
-    assert event.type == "turn_complete"
-    assert event.outcome == TurnOutcome.ASR_EMPTY
-    _assert_turn_event_correlation(event, turn_id="t1", turn_index=1)
+    transition = fsm.on_asr_empty()
+    assert transition.type == "turn_complete"
+    assert transition.outcome == TurnOutcome.ASR_EMPTY
+    assert not hasattr(transition, "to_payload")
+    _assert_turn_event_correlation(_wire_event(transition, turn_id="t1", turn_index=1), turn_id="t1", turn_index=1)
     assert fsm.is_terminal
 
 
@@ -179,9 +202,9 @@ def test_empty_asr_finishes_before_reprompt() -> None:
 def test_terminal_error_outcomes_complete_turn(
     transition: str, expected_outcome: TurnOutcome
 ) -> None:
-    fsm = TurnStateMachine(conversation_id="conversation-1", turn_id="turn-1", turn_index=0)
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     fsm.on_turn_start()
-    event = getattr(fsm, transition)()
+    event = _wire_event(getattr(fsm, transition)())
 
     assert event.type == "turn_complete"
     assert event.outcome is expected_outcome
@@ -191,11 +214,11 @@ def test_terminal_error_outcomes_complete_turn(
 
 
 def test_cancel_transitions_to_cancelled_and_is_idempotent() -> None:
-    fsm = TurnStateMachine(conversation_id="conversation-1", turn_id="turn-1", turn_index=0)
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     fsm.on_turn_start()
 
-    cancelled = fsm.on_turn_cancel()
-    duplicate = fsm.on_turn_cancel()
+    cancelled = _wire_event(fsm.on_turn_cancel())
+    duplicate = _wire_event(fsm.on_turn_cancel())
 
     assert cancelled.type == "turn_cancelled"
     assert duplicate == cancelled
@@ -205,12 +228,12 @@ def test_cancel_transitions_to_cancelled_and_is_idempotent() -> None:
 
 
 def test_frame_ack_is_highest_contiguous_and_duplicate_is_reacked() -> None:
-    fsm = TurnStateMachine(conversation_id="conversation-1", turn_id="turn-1", turn_index=0)
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     fsm.on_turn_start()
 
-    out_of_order = fsm.accept_frame(1, "digest-1", 1)
-    first = fsm.accept_frame(0, "digest-0", 1)
-    duplicate = fsm.accept_frame(0, "digest-0", 1)
+    out_of_order = _wire_event(fsm.accept_frame(1, "digest-1"))
+    first = _wire_event(fsm.accept_frame(0, "digest-0"))
+    duplicate = _wire_event(fsm.accept_frame(0, "digest-0"))
 
     assert out_of_order.highest_contiguous_sequence == -1
     assert first.highest_contiguous_sequence == 1
@@ -220,24 +243,24 @@ def test_frame_ack_is_highest_contiguous_and_duplicate_is_reacked() -> None:
 
 
 def test_frame_sequence_conflict_rejects_changed_duplicate() -> None:
-    fsm = TurnStateMachine(conversation_id="conversation-1", turn_id="turn-1", turn_index=0)
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     fsm.on_turn_start()
-    fsm.accept_frame(0, "digest-0", 1)
+    fsm.accept_frame(0, "digest-0")
 
     with pytest.raises(ProtocolError, match="^sequence_conflict$"):
-        fsm.accept_frame(0, "different-digest", 1)
+        fsm.accept_frame(0, "different-digest")
 
 
 def test_binary_sequence_resets_for_each_turn() -> None:
-    first_turn = TurnStateMachine(conversation_id="conversation-1", turn_id="turn-1", turn_index=0)
+    first_turn = TurnStateMachine(turn_id="turn-1", turn_index=0)
     first_turn.on_turn_start()
-    first_ack = first_turn.accept_frame(0, "first", 1)
+    first_ack = _wire_event(first_turn.accept_frame(0, "first"))
     assert first_ack.highest_contiguous_sequence == 0
     _assert_turn_event_correlation(first_ack)
 
-    second_turn = TurnStateMachine(conversation_id="conversation-1", turn_id="turn-2", turn_index=1)
+    second_turn = TurnStateMachine(turn_id="turn-2", turn_index=1)
     second_turn.on_turn_start()
-    second_ack = second_turn.accept_frame(0, "second", 1)
+    second_ack = _wire_event(second_turn.accept_frame(0, "second"), turn_id="turn-2", turn_index=1)
     assert second_ack.highest_contiguous_sequence == 0
     _assert_turn_event_correlation(second_ack, turn_id="turn-2", turn_index=1)
 
@@ -246,40 +269,82 @@ def test_turn_events_cannot_be_created_without_correlation() -> None:
     with pytest.raises(ProtocolError, match="^missing_conversation_id$"):
         ServerEvent(type="ack")
 
+    transition = TurnStateMachine(turn_id="turn-1", turn_index=0).on_turn_start()
     with pytest.raises(ProtocolError, match="^missing_conversation_id$"):
-        TurnStateMachine(conversation_id="", turn_id="turn-1", turn_index=0)
+        build_turn_event(transition, conversation_id="", turn_id="turn-1", turn_index=0)
 
 
 def test_frame_size_and_turn_audio_limits_are_enforced() -> None:
-    fsm = TurnStateMachine(conversation_id="conversation-1", turn_id="turn-1", turn_index=0)
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     fsm.on_turn_start()
 
     with pytest.raises(ProtocolError, match="^frame_too_large$"):
-        fsm.accept_frame(0, "too-large", MAX_FRAME_BYTES + 1)
+        fsm.ingest_frame(0, "too-large", MAX_FRAME_BYTES + 1)
 
     for sequence in range(MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES):
-        fsm.accept_frame(sequence, f"digest-{sequence}", MAX_FRAME_BYTES)
+        fsm.ingest_frame(sequence, f"digest-{sequence}", MAX_FRAME_BYTES)
     remainder = MAX_TURN_AUDIO_BYTES % MAX_FRAME_BYTES
     if remainder:
-        fsm.accept_frame(MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES, "remainder", remainder)
+        fsm.ingest_frame(MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES, "remainder", remainder)
 
     with pytest.raises(ProtocolError, match="^turn_audio_limit_exceeded$"):
-        fsm.accept_frame((MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES) + 1, "over-limit", 1)
+        fsm.ingest_frame((MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES) + 1, "over-limit", 1)
+
+
+def test_changed_duplicate_digest_wins_over_oversized_ingestion_error() -> None:
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+    fsm.on_turn_start()
+    fsm.ingest_frame(0, "digest-0", b"x")
+
+    with pytest.raises(ProtocolError, match="^sequence_conflict$"):
+        fsm.ingest_frame(0, "changed-digest", MAX_FRAME_BYTES + 1)
 
 
 def test_conversation_limits_enforce_turn_count_and_connection_duration() -> None:
-    now = [10.0]
-    limits = ConversationLimits(monotonic=lambda: now[0])
+    limits = ConversationLimits(started_at=10.0)
 
     for turn_index in range(MAX_TURNS):
-        limits.start_turn(f"turn-{turn_index}")
+        limits.start_turn(f"turn-{turn_index}", now=10.0)
     with pytest.raises(ProtocolError, match="^turn_limit_exceeded$"):
-        limits.start_turn("turn-over-limit")
+        limits.start_turn("turn-over-limit", now=10.0)
 
-    timed_limits = ConversationLimits(monotonic=lambda: now[0])
-    now[0] += MAX_CONNECTION_SECONDS + 1
+    timed_limits = ConversationLimits(started_at=10.0)
     with pytest.raises(ProtocolError, match="^connection_time_exceeded$"):
-        timed_limits.start_turn("turn-0")
+        timed_limits.start_turn("turn-0", now=10.0 + MAX_CONNECTION_SECONDS + 1)
+
+
+def test_conversation_deadline_expires_while_idle_and_active() -> None:
+    idle_limits = ConversationLimits(started_at=0.0)
+    with pytest.raises(ProtocolError, match="^connection_time_exceeded$"):
+        idle_limits.check_deadline(MAX_CONNECTION_SECONDS + 1)
+
+    active_limits = ConversationLimits(started_at=0.0)
+    active_limits.note_activity(10.0)
+    active_limits.start_turn("turn-0", now=20.0)
+    with pytest.raises(ProtocolError, match="^connection_time_exceeded$"):
+        active_limits.check_deadline(MAX_CONNECTION_SECONDS + 1)
+
+
+@pytest.mark.parametrize("outcome", [None, "played"])
+def test_turn_complete_requires_a_real_outcome(outcome: object) -> None:
+    with pytest.raises(ProtocolError, match="^invalid_turn_outcome$"):
+        ServerEvent(
+            type="turn_complete",
+            conversation_id="conversation-1",
+            turn_id="turn-1",
+            turn_index=0,
+            outcome=outcome,  # type: ignore[arg-type]
+        )
+
+
+def test_turn_result_requires_its_wire_fields_at_construction() -> None:
+    with pytest.raises(ProtocolError, match="^missing_session_id$"):
+        ServerEvent(
+            type="turn_result",
+            conversation_id="conversation-1",
+            turn_id="turn-1",
+            turn_index=0,
+        )
 
 
 def test_protocol_limits_are_locked() -> None:
