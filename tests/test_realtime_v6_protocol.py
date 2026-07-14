@@ -171,6 +171,37 @@ def test_handlers_reject_control_that_conflicts_with_expected_conversation() -> 
         fsm.on_turn_start(parse_client_control(_turn_control("turn_start")))
 
 
+def test_turn_transition_preserves_source_correlation_for_wire_conversion() -> None:
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+    transition = fsm.on_turn_start(parse_client_control(_turn_control("turn_start")))
+
+    assert transition.conversation_id == "conversation-1"
+    assert transition.turn_id == "turn-1"
+    assert transition.turn_index == 0
+
+    with pytest.raises(ProtocolError, match="^conversation_mismatch$"):
+        build_turn_event(
+            transition,
+            conversation_id="other-conversation",
+            turn_id="turn-1",
+            turn_index=0,
+        )
+    with pytest.raises(ProtocolError, match="^turn_mismatch$"):
+        build_turn_event(
+            transition,
+            conversation_id="conversation-1",
+            turn_id="other-turn",
+            turn_index=0,
+        )
+    with pytest.raises(ProtocolError, match="^turn_index_mismatch$"):
+        build_turn_event(
+            transition,
+            conversation_id="conversation-1",
+            turn_id="turn-1",
+            turn_index=1,
+        )
+
+
 def test_golden_played_trace_preserves_turn_correlation() -> None:
     fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
 
@@ -312,26 +343,34 @@ def test_frame_size_and_turn_audio_limits_are_enforced() -> None:
         fsm.ingest_frame((MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES) + 1, b"x")
 
 
-def test_changed_duplicate_digest_wins_over_oversized_ingestion_error() -> None:
+def test_ingestion_rejects_oversized_payload_before_low_level_sequence_check() -> None:
     fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     fsm.on_turn_start()
     fsm.ingest_frame(0, b"x")
 
-    with pytest.raises(ProtocolError, match="^sequence_conflict$"):
+    with pytest.raises(ProtocolError, match="^frame_too_large$"):
         fsm.ingest_frame(0, b"y" * (MAX_FRAME_BYTES + 1))
 
 
-def test_accept_frame_only_reacks_measured_frames() -> None:
+def test_accept_frame_is_the_low_level_sequence_primitive() -> None:
     fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     fsm.on_turn_start()
 
-    with pytest.raises(ProtocolError, match="^frame_size_required$"):
-        fsm.accept_frame(0, "unmeasured")
+    accepted = fsm.accept_frame(0, "digest-0")
+    assert accepted.highest_contiguous_sequence == 0
+    assert fsm.accept_frame(0, "digest-0").highest_contiguous_sequence == 0
+    with pytest.raises(ProtocolError, match="^sequence_conflict$"):
+        fsm.accept_frame(0, "changed-digest")
 
+
+def test_wire_ingestion_measures_payload_before_delegating_to_sequencing() -> None:
+    fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
+    fsm.on_turn_start()
     payload = b"frame-0"
-    fsm.ingest_frame(0, payload)
-    duplicate = fsm.accept_frame(0, hashlib.sha256(payload).hexdigest())
-    assert duplicate.highest_contiguous_sequence == 0
+
+    transition = fsm.ingest_frame(0, payload)
+    assert transition.highest_contiguous_sequence == 0
+    assert fsm.audio_bytes == len(payload)
 
 
 def test_conversation_limits_enforce_turn_count_and_connection_duration() -> None:
@@ -390,6 +429,22 @@ def test_turn_result_requires_its_wire_fields_at_construction() -> None:
             conversation_id="conversation-1",
             turn_id="turn-1",
             turn_index=0,
+        )
+
+
+@pytest.mark.parametrize("status", [None, "", "streaming"])
+def test_turn_result_requires_ready_status(status: object) -> None:
+    with pytest.raises(ProtocolError):
+        ServerEvent(
+            type="turn_result",
+            conversation_id="conversation-1",
+            turn_id="turn-1",
+            turn_index=0,
+            data={
+                "session_id": "session-1",
+                "audio_stream_url": "/audio",
+                "status": status,
+            },
         )
 
 

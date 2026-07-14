@@ -61,6 +61,9 @@ class TurnTransition:
     """Internal FSM output that cannot be serialized onto the wire."""
 
     type: str
+    turn_id: str
+    turn_index: int
+    conversation_id: str | None = None
     outcome: TurnOutcome | None = None
     highest_contiguous_sequence: int | None = None
     data: Mapping[str, Any] = field(default_factory=dict)
@@ -242,6 +245,12 @@ def build_turn_event(
 ) -> ServerEvent:
     if not isinstance(transition, TurnTransition) or transition.type not in _TURN_EVENTS:
         raise ProtocolError("invalid_turn_transition")
+    if turn_id != transition.turn_id:
+        raise ProtocolError("turn_mismatch")
+    if turn_index != transition.turn_index:
+        raise ProtocolError("turn_index_mismatch")
+    if transition.conversation_id is not None and conversation_id != transition.conversation_id:
+        raise ProtocolError("conversation_mismatch")
     return _turn_event(
         transition.type,
         conversation_id,
@@ -363,23 +372,24 @@ class TurnStateMachine:
         duplicate = self._check_duplicate(sequence, digest)
         if duplicate is not None:
             return duplicate
-        raise ProtocolError("frame_size_required")
+        return self._record_frame(sequence, digest, frame_bytes=0)
 
     def ingest_frame(self, sequence: int, payload: bytes | bytearray | memoryview) -> TurnTransition:
         """Accept a binary payload after enforcing per-frame and per-turn byte limits."""
         self._require_state(TurnState.RECEIVING)
         self._note_activity()
         payload = _frame_payload(payload)
-        digest = sha256(payload).hexdigest()
-        duplicate = self._check_duplicate(sequence, digest)
-        if duplicate is not None:
-            return duplicate
         frame_bytes = len(payload)
         if frame_bytes > MAX_FRAME_BYTES:
             raise ProtocolError("frame_too_large")
-        if self._audio_bytes + frame_bytes > MAX_TURN_AUDIO_BYTES:
+        digest = sha256(payload).hexdigest()
+        is_new = sequence not in self._frame_digests
+        if is_new and self._audio_bytes + frame_bytes > MAX_TURN_AUDIO_BYTES:
             raise ProtocolError("turn_audio_limit_exceeded")
-        return self._record_frame(sequence, digest, frame_bytes=frame_bytes)
+        transition = self.accept_frame(sequence, digest)
+        if is_new:
+            self._audio_bytes += frame_bytes
+        return transition
 
     def on_turn_end(self, control: ClientControl | None = None) -> None:
         self._validate_control(control, "turn_end")
@@ -526,6 +536,9 @@ class TurnStateMachine:
     ) -> TurnTransition:
         return TurnTransition(
             type=transition_type,
+            turn_id=self.turn_id,
+            turn_index=self.turn_index,
+            conversation_id=self.conversation_id,
             outcome=outcome,
             highest_contiguous_sequence=highest_contiguous_sequence,
             data={} if data is None else data,
@@ -590,6 +603,8 @@ def _validate_server_event(event: ServerEvent) -> None:
     if event.type == "turn_result":
         _require_event_data_string(event.data, "session_id")
         _require_event_data_string(event.data, "audio_stream_url")
+        if _require_event_data_string(event.data, "status") != "ready":
+            raise ProtocolError("unsupported_turn_result_status")
         return
     if event.type == "conversation_ready":
         _require_event_data_string(event.data, "client_conversation_id")
