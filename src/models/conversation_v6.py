@@ -380,9 +380,12 @@ class TurnStateMachine:
         self._note_activity()
         payload = _frame_payload(payload)
         frame_bytes = len(payload)
+        digest = sha256(payload).hexdigest()
+        duplicate = self._check_duplicate(sequence, digest)
+        if duplicate is not None:
+            return duplicate
         if frame_bytes > MAX_FRAME_BYTES:
             raise ProtocolError("frame_too_large")
-        digest = sha256(payload).hexdigest()
         is_new = sequence not in self._frame_digests
         if is_new and self._audio_bytes + frame_bytes > MAX_TURN_AUDIO_BYTES:
             raise ProtocolError("turn_audio_limit_exceeded")

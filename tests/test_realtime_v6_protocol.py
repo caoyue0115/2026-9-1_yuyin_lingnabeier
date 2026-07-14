@@ -343,12 +343,12 @@ def test_frame_size_and_turn_audio_limits_are_enforced() -> None:
         fsm.ingest_frame((MAX_TURN_AUDIO_BYTES // MAX_FRAME_BYTES) + 1, b"x")
 
 
-def test_ingestion_rejects_oversized_payload_before_low_level_sequence_check() -> None:
+def test_changed_duplicate_digest_precedes_oversized_frame_rejection() -> None:
     fsm = TurnStateMachine(turn_id="turn-1", turn_index=0)
     fsm.on_turn_start()
     fsm.ingest_frame(0, b"x")
 
-    with pytest.raises(ProtocolError, match="^frame_too_large$"):
+    with pytest.raises(ProtocolError, match="^sequence_conflict$"):
         fsm.ingest_frame(0, b"y" * (MAX_FRAME_BYTES + 1))
 
 
