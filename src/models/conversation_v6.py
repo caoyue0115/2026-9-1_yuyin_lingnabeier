@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Mapping
+from time import monotonic as default_monotonic
+from typing import Any, Callable, Mapping
 
 
 MAX_TURNS = 4
 MAX_FRAME_BYTES = 4096
 MAX_TURN_AUDIO_BYTES = 16_000 * 2 * 8
 MAX_CONNECTION_SECONDS = 180
+SUPPORTED_AUDIO_FORMATS = frozenset({"opus"})
+SUPPORTED_ANSWER_MODES = frozenset({"streaming"})
 
 
 class TurnState(StrEnum):
@@ -62,6 +65,12 @@ class ServerEvent:
     highest_contiguous_sequence: int | None = None
     data: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if self.type in _TURN_EVENTS:
+            _require_turn_correlation(self.conversation_id, self.turn_id, self.turn_index)
+        elif self.type in {"conversation_ready", "conversation_done", "error"}:
+            _require_nonempty_string(self.conversation_id, "conversation_id")
+
     def to_payload(self) -> dict[str, Any]:
         if self.type in _TURN_EVENTS:
             _require_turn_correlation(self.conversation_id, self.turn_id, self.turn_index)
@@ -97,6 +106,15 @@ def parse_client_control(payload: Mapping[str, Any]) -> ClientControl:
         )
         if payload.get("conversation_id") is not None:
             raise ProtocolError("unexpected_conversation_id")
+        _require_nonempty_string(payload.get("device_id"), "device_id")
+        audio_format = _require_nonempty_string(payload.get("audio_format"), "audio_format")
+        if audio_format not in SUPPORTED_AUDIO_FORMATS:
+            raise ProtocolError("unsupported_audio_format")
+        if payload.get("protocol_version") != "v6":
+            raise ProtocolError("unsupported_protocol_version")
+        answer_mode = _require_nonempty_string(payload.get("answer_mode"), "answer_mode")
+        if answer_mode not in SUPPORTED_ANSWER_MODES:
+            raise ProtocolError("unsupported_answer_mode")
         return ClientControl(
             type=message_type,
             client_conversation_id=client_conversation_id,
@@ -105,6 +123,7 @@ def parse_client_control(payload: Mapping[str, Any]) -> ClientControl:
 
     conversation_id = _require_nonempty_string(payload.get("conversation_id"), "conversation_id")
     if message_type == "conversation_end":
+        _require_nonempty_string(payload.get("reason"), "reason")
         return ClientControl(type=message_type, conversation_id=conversation_id, data=_extra_payload(payload))
 
     turn_id, turn_index = _parse_turn_correlation(payload)
@@ -200,6 +219,29 @@ def turn_cancelled_event(conversation_id: str, turn_id: str, turn_index: int) ->
     return _turn_event("turn_cancelled", conversation_id, turn_id, turn_index)
 
 
+class ConversationLimits:
+    """Connection-scoped turn and duration limits with an injectable clock."""
+
+    def __init__(self, *, monotonic: Callable[[], float] = default_monotonic) -> None:
+        self._monotonic = monotonic
+        self._started_at = monotonic()
+        self._turn_ids: set[str] = set()
+
+    @property
+    def turn_count(self) -> int:
+        return len(self._turn_ids)
+
+    def start_turn(self, turn_id: str) -> None:
+        if self._monotonic() - self._started_at > MAX_CONNECTION_SECONDS:
+            raise ProtocolError("connection_time_exceeded")
+        turn_id = _require_nonempty_string(turn_id, "turn_id")
+        if turn_id in self._turn_ids:
+            return
+        if len(self._turn_ids) >= MAX_TURNS:
+            raise ProtocolError("turn_limit_exceeded")
+        self._turn_ids.add(turn_id)
+
+
 class TurnStateMachine:
     """Pure per-turn state and binary frame sequencing for the v6 protocol."""
 
@@ -207,16 +249,15 @@ class TurnStateMachine:
         self,
         turn_id: str,
         turn_index: int,
-        conversation_id: str | None = None,
+        conversation_id: str,
     ) -> None:
         self.turn_id = _require_nonempty_string(turn_id, "turn_id")
         self.turn_index = _validate_turn_index(turn_index)
-        self.conversation_id = conversation_id
-        if conversation_id is not None:
-            _require_nonempty_string(conversation_id, "conversation_id")
+        self.conversation_id = _require_nonempty_string(conversation_id, "conversation_id")
         self.state = TurnState.IDLE
         self._frame_digests: dict[int, str] = {}
         self._highest_contiguous_sequence = -1
+        self._audio_bytes = 0
         self._cancelled_event: ServerEvent | None = None
 
     @property
@@ -227,9 +268,11 @@ class TurnStateMachine:
     def highest_contiguous_sequence(self) -> int:
         return self._highest_contiguous_sequence
 
+    @property
+    def audio_bytes(self) -> int:
+        return self._audio_bytes
+
     def validate_correlation(self, message: ClientControl | ServerEvent) -> None:
-        if self.conversation_id is None:
-            raise ProtocolError("missing_conversation_id")
         if message.conversation_id != self.conversation_id:
             raise ProtocolError("conversation_mismatch")
         if message.turn_id != self.turn_id:
@@ -242,14 +285,19 @@ class TurnStateMachine:
         self._require_state(TurnState.IDLE)
         self._frame_digests.clear()
         self._highest_contiguous_sequence = -1
+        self._audio_bytes = 0
         self.state = TurnState.RECEIVING
         return self._event("ack", data={"acknowledged_type": "turn_start"})
 
-    def accept_frame(self, sequence: int, digest: str) -> ServerEvent:
+    def accept_frame(self, sequence: int, digest: str, frame_bytes: int) -> ServerEvent:
         self._require_state(TurnState.RECEIVING)
         if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
             raise ProtocolError("invalid_sequence")
         _require_nonempty_string(digest, "digest")
+        if not isinstance(frame_bytes, int) or isinstance(frame_bytes, bool) or frame_bytes < 0:
+            raise ProtocolError("invalid_frame_bytes")
+        if frame_bytes > MAX_FRAME_BYTES:
+            raise ProtocolError("frame_too_large")
 
         existing_digest = self._frame_digests.get(sequence)
         if existing_digest is not None:
@@ -257,7 +305,10 @@ class TurnStateMachine:
                 raise ProtocolError("sequence_conflict")
             return self._event("ack", highest_contiguous_sequence=self._highest_contiguous_sequence)
 
+        if self._audio_bytes + frame_bytes > MAX_TURN_AUDIO_BYTES:
+            raise ProtocolError("turn_audio_limit_exceeded")
         self._frame_digests[sequence] = digest
+        self._audio_bytes += frame_bytes
         while self._highest_contiguous_sequence + 1 in self._frame_digests:
             self._highest_contiguous_sequence += 1
         return self._event("ack", highest_contiguous_sequence=self._highest_contiguous_sequence)
