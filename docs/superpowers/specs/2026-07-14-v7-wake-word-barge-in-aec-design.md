@@ -1,7 +1,7 @@
 # v7 唤醒词打断与 AEC 设计
 
 日期：2026-07-14
-状态：已确认
+状态：已确认（GPT-5.6 审查修订版）
 实施阶段：第二部分
 
 ## 1. 前置条件
@@ -12,7 +12,7 @@
 
 - v6 持久 conversation WebSocket。
 - `turn_cancel / turn_cancelled` 协议。
-- 可取消的当前回答下行句柄。
+- 第一阶段 `playback_session` 已统一拥有 HTTP、解码、jitter、I2S 和共享取消令牌，并提供幂等 `cancel/join`。
 - conversation controller 的状态和剩余追问额度。
 - 回答结束后的追问与会话关闭逻辑。
 
@@ -65,7 +65,7 @@ WakeNet barge-in 只在“云端回答音频正在播放”状态接受事件。
 
 ### 6.1 播放参考
 
-`audio_out` 在完成解码、格式转换和最终音量处理后，将实际写往 I2S 的 16kHz 单声道 PCM 同步复制到有界 reference ring buffer。
+reference tap 位于实际 codec write 调用之前，复制“解码、重采样、声道转换和软件增益之后、提交给 I2S/codec 的同一批数字采样”。当前 ES8311 音量属于 codec 侧增益，不能声称已经反映在 PCM 中；AEC 配置记录当前 codec 音量档位，并靠真机标定吸收扬声器、房间和麦克风链路增益。
 
 reference buffer 必须：
 
@@ -73,20 +73,23 @@ reference buffer 必须：
 - 丢帧时记录计数，不阻塞扬声器播放。
 - 在回答开始、取消和结束时清空，防止上一轮尾音污染下一轮。
 - 使用 PSRAM 优先分配，但控制路径和小块缓冲可留在内部 RAM。
+- 每个 reference block 携带单调递增 sample counter；麦克风块使用同一 I2S 时基对应的 sample counter，禁止只靠任务到达时间猜测对齐。
 
 ### 6.2 麦克风与参考同步
 
-播放期监听任务同时读取麦克风 PCM 和 reference PCM，按 AFE 要求组成麦克风加参考的 `MR` feed。AFE 开启 AEC 和 WakeNet，其他处理项保持最小化，除非真机数据证明必须启用。
+启用 barge-in 的构建从启动起只创建一次 `MR` AFE，`aec_init=true`，不再先创建 `M` 后运行时切换。普通待机继续给同一 AFE 喂麦克风和全零 reference，但只按现有待机规则接受 WakeNet；云端回答开始时清空 AFE 状态和 reference 队列，切入带真实 reference 的播放期监听。其他处理项保持最小化，除非真机数据证明必须启用。
 
-时钟漂移或短时 reference 缺帧不得导致越界或死锁。无法取得有效参考时，该音频块不得直接绕过 AEC 喂给 WakeNet；应丢弃该块并记录降级指标，以避免设备自身回答触发。
+板级新增唯一 `audio_duplex_session` owner，串行管理 ES8311、ES7210 和共享 I2S data interface 的打开、格式配置、开始、停止与关闭。播放任务、录音任务和 WakeNet task 只能申请 session/提交数据，不得各自重配或销毁 codec/I2S 句柄。状态转换必须等待前一 owner 操作完成，避免关闭麦克风时连带破坏仍在静音收尾的扬声器。
+
+播放开始标定一个可配置的 `mic_minus_reference_delay_samples`，以 sample counter 对齐麦克风块和 reference 块；初始值来自有线/声学 loopback 测量，真机矩阵允许按板型配置。音量变化、underrun、seek、取消或 sample counter 跳变时重置 AFE 和对齐器。时钟漂移或短时 reference 缺帧不得导致越界或死锁。无法取得有效参考时，该音频块不得直接绕过 AEC 喂给 WakeNet；应丢弃该块并记录降级指标，以避免设备自身回答触发。
 
 ### 6.3 生命周期
 
-- 云端回答开始实际出声前，创建或复位 AEC/WakeNet 状态。
+- 云端回答开始实际出声前，由 `audio_duplex_session` 复位常驻 MR AFE、sample counter 对齐器和 reference 队列。
 - 回答播放期间持续 feed/fetch。
 - 本地提示音开始前停止接受 barge-in。
-- 回答正常结束、取消或技术错误时停止 feed，关闭麦克风并清空参考。
-- 不重复创建模型；复用已初始化的 WakeNet/AFE资源，降低延迟和内存波动。
+- 回答正常结束、取消或技术错误时退出播放期接受窗口、清空真实 reference，并恢复待机的零 reference feed；不销毁 AFE 模型。
+- 功能关闭的构建继续使用现有 `M` AFE；功能开启的构建始终使用常驻 `MR` AFE，禁止同一次启动中切换 feed shape。
 
 ## 7. 打断状态机
 
@@ -95,8 +98,8 @@ reference buffer 必须：
 当 WakeNet 在云端回答播放期间检测到“小明同学”：
 
 1. 原子设置 cancel 标志，确保只处理第一次检测。
-2. 立即请求 `audio_out` 停止当前 HTTP 流、解码和 I2S 写入。
-3. 清空接收、解码和播放队列。
+2. 立即调用第一阶段 `playback_session_cancel(BARGE_IN)`；该 session 统一停止 HTTP 流、解码、jitter 和 I2S 写入。
+3. `playback_session` owner 清空接收、解码和播放队列；WakeNet task 不直接操作这些资源。
 4. 向服务器发送当前轮 `turn_cancel`；取消确认可异步到达，不阻塞本地静音。
 5. 停止播放期 WakeNet/AEC，清空 reference buffer。
 6. 保留约 150ms 扬声器尾音保护时间。
@@ -127,15 +130,16 @@ reference buffer 必须：
 
 ## 8. 取消接口
 
-板端需要明确的幂等取消接口，而不是由多个任务各自删除资源：
+板端复用第一阶段已经落地的幂等取消接口，而不是在第二阶段新增另一套资源所有权：
 
-- `audio_out_cancel_current_playback(reason)`：请求停止网络读取、解码、队列和 I2S输出。
+- `playback_session_cancel(session_id, reason)`：设置共享 token 并请求 owner 停止网络读取、解码、队列和 I2S 输出。
+- `playback_session_join(session_id, timeout_ms)`：等待 owner 完成清理；重复 join 返回同一终态。
 - `cloud_conversation_cancel_turn(turn_id)`：发送一次 `turn_cancel`。
 - conversation controller 统一决定后续是同会话追问还是新会话。
 
 取消可以从 WakeNet task 发出事件，但资源回收由各自 owner task 完成。不得从 WakeNet 回调直接强制删除音频或 WebSocket task。
 
-HTTP 读取、解码和 jitter task 都必须观察同一个取消信号，并在有界时间内退出。重复取消、取消与自然 EOF 同时发生、取消与网络错误同时发生都必须安全。
+HTTP 读取、解码和 jitter task 都必须观察同一个取消信号。WakeNet 命中至最后一次 I2S 提交目标不超过 200ms；本地 playback owner 的全部任务在 1 秒内退出，服务器取消屏障在 2 秒内返回。重复取消、取消与自然 EOF 同时发生、取消与网络错误同时发生都必须安全；本地静音不等待服务器屏障。
 
 ## 9. 功能开关与降级
 
@@ -159,6 +163,8 @@ HTTP 读取、解码和 jitter task 都必须观察同一个取消信号，并�
 - 复用模型和固定大小缓冲，避免每轮 PSRAM 碎片增长。
 - cancel 到达后所有相关任务必须在有界时间退出，不能留下 codec 句柄、HTTP连接或队列。
 - OTA轮询继续遵守空闲门槛，活跃 conversation 或 barge-in 处理期间不得启动 OTA工作。
+- 开启功能前记录内部 RAM 最小空闲、最大连续块、PSRAM 最小空闲、各任务栈高水位和两核 CPU 占用基线。开启后所有任务栈至少保留 25%，连续 50 次回答和 20 次打断后内存、任务、队列与 codec 句柄回到允许误差内，且不得逐轮单调恶化。
+- reference 队列只覆盖 AEC 所需窗口，满时丢弃最旧块并计数，不得反压扬声器；实现计划根据 AFE frame size 和实测最大调度抖动给出固定字节数。
 
 ## 11. 可观测性
 
@@ -167,11 +173,13 @@ HTTP 读取、解码和 jitter task 都必须观察同一个取消信号，并�
 - barge-in 监听启动/停止原因。
 - reference 写入、丢帧和最大队列深度。
 - AEC feed/fetch 错误数。
+- reference/mic sample counter 偏差、当前延迟配置和对齐重置原因。
 - WakeNet 检测时间。
 - 检测到扬声器静音耗时。
 - HTTP、解码、jitter 和 I2S 各阶段取消耗时。
 - 同会话追问或新会话分支。
 - 播放期间误唤醒测试统计。
+- AEC 前后残余回声能量或等价的 ERLE 指标、漏唤醒率、误唤醒率和播放 underrun 率。
 
 日志中的 URL、设备标识、请求标识和会话标识继续遵守现有脱敏规则。
 
@@ -183,6 +191,9 @@ HTTP 读取、解码和 jitter task 都必须观察同一个取消信号，并�
 - 所有固定本地提示音状态拒绝 barge-in。
 - 首次 WakeNet 事件触发一次取消，重复事件幂等。
 - HTTP读取、解码、jitter和播放队列均响应取消。
+- `audio_duplex_session` 串行化 codec/I2S 生命周期，覆盖播放开始、录音开始、取消和技术错误竞态。
+- 功能开启构建只创建 MR AFE，普通待机用零 reference；功能关闭构建保持 M AFE，运行时不切换 feed shape。
+- sample counter 对齐、配置延迟、reference 缺帧、underrun、音量变化和取消均触发预期重置。
 - `turn_cancel` 正确发送并处理迟到的 `turn_result`、`turn_cancelled` 和 EOF竞态。
 - 有额度时保留 conversation；额度耗尽时创建新 conversation。
 - 被打断轮次标记 `interrupted=true`。
@@ -208,6 +219,8 @@ HTTP 读取、解码和 jitter task 都必须观察同一个取消信号，并�
 - 从 WakeNet 报告命中到扬声器静音目标不超过约 200ms。
 - 连续多次打断无崩溃、看门狗、音频死锁或明显内存增长。
 - AEC/WakeNet 并发不得造成回答持续卡顿、严重 underrun 或网络吞吐回退。
+- 与关闭功能的同音频基线相比，开启后 underrun 率不增加超过 1 个百分点；内部 RAM/PSRAM 和 CPU/栈指标满足第 10 节预算。
+- 声学矩阵记录可复现的误唤醒率、漏唤醒率和 ERLE/残余回声。Demo 放行门槛为连续播放 30 分钟零自唤醒、每个距离/音量组合至少 10 次人工唤醒成功率不低于 90%；客户发布前再根据样机数据收紧。
 
 若 200ms 目标或误唤醒可靠性未达到，功能保持默认关闭，不进入正式发布配置。
 
