@@ -4,6 +4,7 @@
 #include "audio_in.h"
 #include "audio_out.h"
 #include "cloud_client.h"
+#include "prompt_arbiter.h"
 
 #include "esp_err.h"
 #include "esp_app_desc.h"
@@ -24,8 +25,8 @@
 
 static const char *TAG = "esp_idf_demo";
 
-extern const uint8_t boot_sound_embed_start[] asm("_binary_boot_amitabha_1_pcm_start");
-extern const uint8_t boot_sound_embed_end[] asm("_binary_boot_amitabha_1_pcm_end");
+extern const uint8_t boot_sound_embed_start[] asm("_binary_intro_1_pcm_start");
+extern const uint8_t boot_sound_embed_end[] asm("_binary_intro_1_pcm_end");
 static TaskHandle_t s_pipeline_task_handle = NULL;
 static TaskHandle_t s_ota_manifest_task_handle = NULL;
 static int64_t s_last_pipeline_finish_us = 0;
@@ -109,6 +110,11 @@ static void app_set_state(app_state_t *current_state, app_state_t next_state)
              app_state_to_string(*current_state),
              app_state_to_string(next_state));
     *current_state = next_state;
+    const bool conversation_active =
+        next_state != APP_STATE_IDLE &&
+        next_state != APP_STATE_DONE &&
+        next_state != APP_STATE_ERROR;
+    prompt_arbiter_set_conversation_active(conversation_active);
 }
 
 typedef struct {

@@ -204,6 +204,22 @@ esp_err_t WifiCredentialStore::LoadAndMigrate() {
         active_schema_present_ = active_slot >= 0;
         if (active_schema_present_) {
             ret = ReadSlot(active_slot, &credentials_);
+            if (ret != ESP_OK) {
+                const esp_err_t active_error = ret;
+                const int fallback_slot = 1 - active_slot;
+                ret = ReadSlot(fallback_slot, &credentials_);
+                if (ret == ESP_OK) {
+                    ret = SetActiveSlot(fallback_slot);
+                } else {
+                    ret = ReadLegacy(&credentials_);
+                    legacy_credentials_present_ = ret == ESP_OK && !credentials_.empty();
+                    if (legacy_credentials_present_) {
+                        ret = PersistLocked();
+                    } else {
+                        ret = active_error;
+                    }
+                }
+            }
         } else {
             ret = ReadLegacy(&credentials_);
             legacy_credentials_present_ = ret == ESP_OK && !credentials_.empty();
@@ -215,7 +231,9 @@ esp_err_t WifiCredentialStore::LoadAndMigrate() {
     if (ret == ESP_OK) {
         SyncRuntimeList();
         SsidManager::GetInstance().SetChangeCallback(
-            [this](const std::vector<SsidItem>& items) { (void)ReplaceFromRuntime(items); });
+            [this](const std::vector<SsidItem>& items) {
+                return ReplaceFromRuntime(items) == ESP_OK;
+            });
     }
     return ret;
 }
@@ -232,6 +250,7 @@ esp_err_t WifiCredentialStore::Upsert(const std::string& ssid, const std::string
     esp_err_t ret = ESP_OK;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto previous = credentials_;
         auto found = std::find_if(credentials_.begin(), credentials_.end(),
                                   [&ssid](const WifiCredential& item) { return item.ssid == ssid; });
         if (found != credentials_.end()) {
@@ -248,6 +267,9 @@ esp_err_t WifiCredentialStore::Upsert(const std::string& ssid, const std::string
             credentials_.push_back({ssid, password, 0});
         }
         ret = PersistLocked();
+        if (ret != ESP_OK) {
+            credentials_ = previous;
+        }
     }
     if (ret == ESP_OK) {
         SyncRuntimeList();
@@ -259,6 +281,7 @@ esp_err_t WifiCredentialStore::MarkSuccessful(const std::string& ssid) {
     esp_err_t ret = ESP_ERR_NOT_FOUND;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto previous = credentials_;
         auto found = std::find_if(credentials_.begin(), credentials_.end(),
                                   [&ssid](const WifiCredential& item) { return item.ssid == ssid; });
         if (found != credentials_.end()) {
@@ -272,6 +295,9 @@ esp_err_t WifiCredentialStore::MarkSuccessful(const std::string& ssid) {
                                  return lhs.last_success > rhs.last_success;
                              });
             ret = PersistLocked();
+            if (ret != ESP_OK) {
+                credentials_ = previous;
+            }
         }
     }
     if (ret == ESP_OK) {
@@ -307,6 +333,7 @@ esp_err_t WifiCredentialStore::PersistLocked() {
 
 esp_err_t WifiCredentialStore::ReplaceFromRuntime(const std::vector<SsidItem>& items) {
     std::lock_guard<std::mutex> lock(mutex_);
+    const auto previous = credentials_;
     std::vector<WifiCredential> replacement;
     std::set<std::string> seen;
     for (const auto& item : items) {
@@ -327,7 +354,11 @@ esp_err_t WifiCredentialStore::ReplaceFromRuntime(const std::vector<SsidItem>& i
         }
     }
     credentials_ = std::move(replacement);
-    return PersistLocked();
+    const esp_err_t ret = PersistLocked();
+    if (ret != ESP_OK) {
+        credentials_ = previous;
+    }
+    return ret;
 }
 
 void WifiCredentialStore::SyncRuntimeList() {

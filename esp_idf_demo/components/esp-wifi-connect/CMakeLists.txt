@@ -13,6 +13,8 @@ if(${IDF_VER} STRGREATER_EQUAL "v6.0")
             "dns_server.cc"
         INCLUDE_DIRS
             "include"
+        PRIV_INCLUDE_DIRS
+            "../../main"
         EMBED_TXTFILES
             "assets/wifi_configuration.html"
             "assets/wifi_configuration_done.html"
@@ -31,10 +33,11 @@ else()
             "dns_server.cc"
         INCLUDE_DIRS
             "include"
+        PRIV_INCLUDE_DIRS
+            "../../main"
         EMBED_TXTFILES
             "assets/wifi_configuration.html"
             "assets/wifi_configuration_done.html"
         REQUIRES "esp_timer" "esp_http_server" "esp_wifi" "nvs_flash" "json"
     )
 endif()
-

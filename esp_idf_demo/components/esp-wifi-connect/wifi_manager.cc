@@ -23,14 +23,25 @@ WifiManager& WifiManager::GetInstance() {
 WifiManager::WifiManager() = default;
 
 WifiManager::~WifiManager() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (station_active_ && station_) {
+    bool stop_station = false;
+    bool stop_config = false;
+    bool deinit = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_station = station_active_ && station_;
+        stop_config = config_mode_active_ && config_ap_;
+        deinit = initialized_;
+        station_active_ = false;
+        config_mode_active_ = false;
+        initialized_ = false;
+    }
+    if (stop_station) {
         station_->Stop();
     }
-    if (config_mode_active_ && config_ap_) {
+    if (stop_config) {
         config_ap_->Stop();
     }
-    if (initialized_) {
+    if (deinit) {
         esp_wifi_deinit();
     }
 }
@@ -123,10 +134,9 @@ void WifiManager::StartStation() {
     // Auto-stop config AP if active
     if (config_mode_active_) {
         ESP_LOGI(TAG, "Stopping config AP before starting station");
-        config_ap_->Stop();
         config_mode_active_ = false;
-        // Notify outside lock
         lock.unlock();
+        config_ap_->Stop();
         NotifyEvent(WifiEvent::ConfigModeExit);
         lock.lock();
     }
@@ -136,10 +146,14 @@ void WifiManager::StartStation() {
     // Apply configuration
     station_->SetScanIntervalRange(config_.station_scan_min_interval_seconds,
                                    config_.station_scan_max_interval_seconds);
+    station_->SetCandidateTimeout(config_.station_candidate_timeout_ms);
 
     // Setup callbacks
     station_->OnScanBegin([this]() {
         NotifyEvent(WifiEvent::Scanning);
+    });
+    station_->OnNoCandidates([this]() {
+        NotifyEvent(WifiEvent::NoCandidates);
     });
     station_->OnConnect([this](const std::string& ssid) {
         NotifyEvent(WifiEvent::Connecting, ssid);
@@ -151,8 +165,9 @@ void WifiManager::StartStation() {
         NotifyEvent(WifiEvent::Disconnected, std::to_string(reason));
     });
 
-    station_->Start();
     station_active_ = true;
+    lock.unlock();
+    station_->Start();
 }
 
 void WifiManager::StopStation() {
@@ -162,14 +177,12 @@ void WifiManager::StopStation() {
         return;
     }
 
+    station_active_ = false;
+    lock.unlock();
     ESP_LOGI(TAG, "Stopping station");
     station_->Stop();
     ESP_LOGI(TAG, "Station stopped");
-    station_active_ = false;
-
-    lock.unlock();
     NotifyEvent(WifiEvent::Disconnected);
-    lock.lock();
 }
 
 bool WifiManager::IsConnected() const {
@@ -234,9 +247,9 @@ void WifiManager::StartConfigAp() {
     // Auto-stop station if active
     if (station_active_) {
         ESP_LOGI(TAG, "Stopping station before starting config AP");
-        station_->Stop();
         station_active_ = false;
         lock.unlock();
+        station_->Stop();
         NotifyEvent(WifiEvent::Disconnected);
         lock.lock();
     }
@@ -252,12 +265,10 @@ void WifiManager::StartConfigAp() {
         StopConfigAp();
     });
 
-    config_ap_->Start();
     config_mode_active_ = true;
-
     lock.unlock();
+    config_ap_->Start();
     NotifyEvent(WifiEvent::ConfigModeEnter);
-    lock.lock();
 }
 
 void WifiManager::StopConfigAp() {
@@ -267,13 +278,11 @@ void WifiManager::StopConfigAp() {
         return;
     }
 
+    config_mode_active_ = false;
+    lock.unlock();
     ESP_LOGI(TAG, "Stopping config AP");
     config_ap_->Stop();
-    config_mode_active_ = false;
-
-    lock.unlock();
     NotifyEvent(WifiEvent::ConfigModeExit);
-    lock.lock();
 }
 
 bool WifiManager::IsConfigMode() const {

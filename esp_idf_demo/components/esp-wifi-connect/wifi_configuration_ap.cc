@@ -413,12 +413,19 @@ void WifiConfigurationAp::StartWebServer()
                 return ESP_OK;
             }
 
-            this_->Save(ssid_str, password_str);
+            if (!this_->Save(ssid_str, password_str)) {
+                cJSON_Delete(json);
+                httpd_resp_send(req,
+                                "{\"success\":false,\"error\":\"Failed to save credentials\"}",
+                                HTTPD_RESP_USE_STRLEN);
+                return ESP_OK;
+            }
             cJSON_Delete(json);
             // 设置成功响应
             httpd_resp_set_type(req, "application/json");
             httpd_resp_set_hdr(req, "Connection", "close");
             httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
+            this_->ScheduleExit(250);
             return ESP_OK;
         },
         .user_ctx = this
@@ -694,8 +701,8 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
 
     wifi_config_t wifi_config;
     bzero(&wifi_config, sizeof(wifi_config));
-    strlcpy((char *)wifi_config.sta.ssid, ssid.c_str(), 32);
-    strlcpy((char *)wifi_config.sta.password, password.c_str(), 64);
+    memcpy(wifi_config.sta.ssid, ssid.data(), ssid.size());
+    memcpy(wifi_config.sta.password, password.data(), password.size());
     wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wifi_config.sta.failure_retry_cnt = 1;
     
@@ -732,10 +739,23 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     }
 }
 
-void WifiConfigurationAp::Save(const std::string &ssid, const std::string &password)
+bool WifiConfigurationAp::Save(const std::string &ssid, const std::string &password)
 {
     ESP_LOGI(TAG, "Save SSID %s %d", ssid.c_str(), ssid.length());
-    SsidManager::GetInstance().AddSsid(ssid, password);
+    return SsidManager::GetInstance().AddSsid(ssid, password);
+}
+
+void WifiConfigurationAp::ScheduleExit(int delay_ms)
+{
+    (void)delay_ms;
+    xTaskCreate([](void *ctx) {
+        auto *self = static_cast<WifiConfigurationAp *>(ctx);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        if (self->on_exit_requested_) {
+            self->on_exit_requested_();
+        }
+        vTaskDelete(NULL);
+    }, "exit_config_task", 4096, this, 5, NULL);
 }
 
 void WifiConfigurationAp::OnExitRequested(std::function<void()> callback)
@@ -752,8 +772,6 @@ void WifiConfigurationAp::WifiEventHandler(void* arg, esp_event_base_t event_bas
     } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
         wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
         ESP_LOGI(TAG, "Station " MACSTR " left, AID=%d", MAC2STR(event->mac), event->aid);
-    } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
-        xEventGroupSetBits(self->event_group_, WIFI_CONNECTED_BIT);
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupSetBits(self->event_group_, WIFI_FAIL_BIT);
     } else if (event_id == WIFI_EVENT_SCAN_DONE) {
@@ -813,12 +831,16 @@ void WifiConfigurationAp::SmartConfigEventHandler(void *arg, esp_event_base_t ev
             ESP_LOGI(TAG, "Got SmartConfig credentials");
             smartconfig_event_got_ssid_pswd_t *evt = (smartconfig_event_got_ssid_pswd_t *)event_data;
 
-            char ssid[32], password[64];
+            char ssid[33] = {0};
+            char password[65] = {0};
             memcpy(ssid, evt->ssid, sizeof(evt->ssid));
             memcpy(password, evt->password, sizeof(evt->password));
-            ESP_LOGI(TAG, "SmartConfig SSID: %s, Password: %s", ssid, password);
+            ESP_LOGI(TAG, "SmartConfig SSID: %s", ssid);
             // 尝试连接WiFi会失败，故不连接
-            self->Save(ssid, password);
+            if (!self->Save(ssid, password)) {
+                ESP_LOGE(TAG, "SmartConfig credential persistence failed");
+                break;
+            }
             // 延迟退出配网模式
             xTaskCreate([](void *ctx){
                 ESP_LOGI(TAG, "Exiting config mode in 1 second");

@@ -38,6 +38,7 @@ enum class WifiEvent {
     Connecting,        // Connecting to network (call GetSsid() for target)
     Connected,         // Successfully connected
     Disconnected,      // Disconnected from network
+    NoCandidates,      // Scan/attempt pass found no usable saved network
     ConfigModeEnter,   // Entered config AP mode
     ConfigModeExit,    // Exited config AP mode
 };
@@ -50,6 +51,7 @@ struct WifiManagerConfig {
     // Station mode scan interval with exponential backoff
     int station_scan_min_interval_seconds = 10;   // Initial scan interval (fast retry)
     int station_scan_max_interval_seconds = 300;  // Maximum scan interval (5 minutes)
+    int station_candidate_timeout_ms = 3000;
 };
 
 /**

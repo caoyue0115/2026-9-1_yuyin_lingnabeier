@@ -12,17 +12,17 @@ struct SsidItem {
 
 class SsidManager {
 public:
-    using ChangeCallback = std::function<void(const std::vector<SsidItem>&)>;
+    using ChangeCallback = std::function<bool(const std::vector<SsidItem>&)>;
 
     static SsidManager& GetInstance() {
         static SsidManager instance;
         return instance;
     }
 
-    void AddSsid(const std::string& ssid, const std::string& password);
-    void RemoveSsid(int index);
-    void SetDefaultSsid(int index);
-    void Clear();
+    bool AddSsid(const std::string& ssid, const std::string& password);
+    bool RemoveSsid(int index);
+    bool SetDefaultSsid(int index);
+    bool Clear();
     void ReplaceAll(const std::vector<SsidItem>& items);
     void SetChangeCallback(ChangeCallback callback);
     const std::vector<SsidItem>& GetSsidList() const { return ssid_list_; }
@@ -31,7 +31,7 @@ private:
     SsidManager();
     ~SsidManager();
 
-    void NotifyChanged();
+    bool NotifyChanged();
 
     std::vector<SsidItem> ssid_list_;
     ChangeCallback change_callback_;

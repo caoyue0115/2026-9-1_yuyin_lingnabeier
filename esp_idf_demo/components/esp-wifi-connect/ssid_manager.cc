@@ -12,9 +12,14 @@ SsidManager::SsidManager() = default;
 SsidManager::~SsidManager() {
 }
 
-void SsidManager::Clear() {
+bool SsidManager::Clear() {
+    const auto previous = ssid_list_;
     ssid_list_.clear();
-    NotifyChanged();
+    if (!NotifyChanged()) {
+        ssid_list_ = previous;
+        return false;
+    }
+    return true;
 }
 
 void SsidManager::ReplaceAll(const std::vector<SsidItem>& items) {
@@ -28,20 +33,25 @@ void SsidManager::SetChangeCallback(ChangeCallback callback) {
     change_callback_ = std::move(callback);
 }
 
-void SsidManager::NotifyChanged() {
+bool SsidManager::NotifyChanged() {
     if (change_callback_) {
-        change_callback_(ssid_list_);
+        return change_callback_(ssid_list_);
     }
+    return true;
 }
 
-void SsidManager::AddSsid(const std::string& ssid, const std::string& password) {
+bool SsidManager::AddSsid(const std::string& ssid, const std::string& password) {
+    const auto previous = ssid_list_;
     for (auto& item : ssid_list_) {
         ESP_LOGI(TAG, "compare [%s:%d] [%s:%d]", item.ssid.c_str(), item.ssid.size(), ssid.c_str(), ssid.size());
         if (item.ssid == ssid) {
             ESP_LOGW(TAG, "SSID %s already exists, overwrite it", ssid.c_str());
             item.password = password;
-            NotifyChanged();
-            return;
+            if (!NotifyChanged()) {
+                ssid_list_ = previous;
+                return false;
+            }
+            return true;
         }
     }
 
@@ -51,26 +61,40 @@ void SsidManager::AddSsid(const std::string& ssid, const std::string& password) 
     }
     // Add the new ssid to the front of the list
     ssid_list_.insert(ssid_list_.begin(), {ssid, password});
-    NotifyChanged();
+    if (!NotifyChanged()) {
+        ssid_list_ = previous;
+        return false;
+    }
+    return true;
 }
 
-void SsidManager::RemoveSsid(int index) {
-    if (index < 0 || index >= ssid_list_.size()) {
+bool SsidManager::RemoveSsid(int index) {
+    if (index < 0 || static_cast<size_t>(index) >= ssid_list_.size()) {
         ESP_LOGW(TAG, "Invalid index %d", index);
-        return;
+        return false;
     }
+    const auto previous = ssid_list_;
     ssid_list_.erase(ssid_list_.begin() + index);
-    NotifyChanged();
+    if (!NotifyChanged()) {
+        ssid_list_ = previous;
+        return false;
+    }
+    return true;
 }
 
-void SsidManager::SetDefaultSsid(int index) {
-    if (index < 0 || index >= ssid_list_.size()) {
+bool SsidManager::SetDefaultSsid(int index) {
+    if (index < 0 || static_cast<size_t>(index) >= ssid_list_.size()) {
         ESP_LOGW(TAG, "Invalid index %d", index);
-        return;
+        return false;
     }
+    const auto previous = ssid_list_;
     // Move the ssid at index to the front of the list
     auto item = ssid_list_[index];
     ssid_list_.erase(ssid_list_.begin() + index);
     ssid_list_.insert(ssid_list_.begin(), item);
-    NotifyChanged();
+    if (!NotifyChanged()) {
+        ssid_list_ = previous;
+        return false;
+    }
+    return true;
 }

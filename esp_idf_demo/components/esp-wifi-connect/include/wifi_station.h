@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <mutex>
 
 #include <esp_event.h>
 #include <esp_timer.h>
@@ -55,11 +56,14 @@ public:
     void OnConnected(std::function<void(const std::string& ssid)> on_connected);
     void OnDisconnected(std::function<void(int reason)> on_disconnected);
     void OnScanBegin(std::function<void()> on_scan_begin);
+    void OnNoCandidates(std::function<void()> on_no_candidates);
     void SetScanIntervalRange(int min_interval_seconds, int max_interval_seconds);
+    void SetCandidateTimeout(int timeout_ms);
 
 private:
     EventGroupHandle_t event_group_;
     esp_timer_handle_t timer_handle_ = nullptr;
+    esp_timer_handle_t candidate_timer_handle_ = nullptr;
     esp_event_handler_instance_t instance_any_id_ = nullptr;
     esp_event_handler_instance_t instance_got_ip_ = nullptr;
     esp_netif_t* station_netif_ = nullptr;
@@ -69,6 +73,7 @@ private:
     int8_t max_tx_power_;
     uint8_t remember_bssid_;
     int reconnect_count_ = 0;
+    int candidate_timeout_ms_ = 3000;
     
     // Exponential backoff for scan interval
     int scan_min_interval_microseconds_ = 10 * 1000 * 1000;   // Default 10 seconds
@@ -78,11 +83,20 @@ private:
     std::function<void(const std::string& ssid)> on_connected_;
     std::function<void(int reason)> on_disconnected_;
     std::function<void()> on_scan_begin_;
+    std::function<void()> on_no_candidates_;
     std::vector<WifiApRecord> connect_queue_;
     bool was_connected_ = false;  // Track if we were connected before disconnection
+    int64_t rescan_epoch_us_ = 0;
+    size_t rescan_index_ = 0;
+    std::mutex candidate_mutex_;
+    bool candidate_active_ = false;
+    int64_t candidate_deadline_us_ = 0;
 
     void HandleScanResult();
     void StartConnect();
+    void StartScan();
+    void ScheduleNextScan();
+    void HandleCandidateTimeout();
     void UpdateScanInterval();  // Exponential backoff for scan interval
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
     static void IpEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
