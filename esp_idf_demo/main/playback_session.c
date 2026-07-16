@@ -19,6 +19,7 @@ struct playback_session {
     EventGroupHandle_t events;
     TaskHandle_t task;
     volatile bool cancel_requested;
+    bool completion_published;
     int cancel_reason;
     esp_err_t result;
 };
@@ -55,9 +56,9 @@ static void playback_session_owner(void *arg)
         }
     }
     session->result = ret;
-    session->task = NULL;
     xEventGroupSetBits(session->events, PLAYBACK_SESSION_DONE_BIT);
-    vTaskDelete(NULL);
+    __atomic_store_n(&session->completion_published, true, __ATOMIC_RELEASE);
+    vTaskSuspend(NULL);
 }
 
 esp_err_t playback_session_start(const char *url, playback_session_t **out)
@@ -117,7 +118,18 @@ esp_err_t playback_session_join(playback_session_t *session, TickType_t timeout)
     if ((bits & PLAYBACK_SESSION_DONE_BIT) == 0) {
         return ESP_ERR_TIMEOUT;
     }
+    while (!__atomic_load_n(&session->completion_published, __ATOMIC_ACQUIRE)) {
+        taskYIELD();
+    }
     const esp_err_t result = session->result;
+    TaskHandle_t task = session->task;
+    if (task != NULL) {
+        while (eTaskGetState(task) != eSuspended) {
+            taskYIELD();
+        }
+        vTaskDelete(task);
+        session->task = NULL;
+    }
     vEventGroupDelete(session->events);
     free(session);
     return result;

@@ -98,6 +98,21 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertIn('"playback_session.c"', cmake)
         self.assertIn('"cloud_conversation.c"', cmake)
 
+    def test_playback_owner_is_reaped_before_completion_event_is_deleted(self) -> None:
+        playback_c = (ESP_MAIN / "playback_session.c").read_text(encoding="utf-8")
+        owner = playback_c.split("static void playback_session_owner", 1)[1].split(
+            "esp_err_t playback_session_start", 1
+        )[0]
+        join = playback_c.split("esp_err_t playback_session_join", 1)[1]
+
+        self.assertIn("completion_published", playback_c)
+        self.assertIn("xEventGroupSetBits", owner)
+        self.assertIn("__atomic_store_n", owner)
+        self.assertIn("vTaskSuspend(NULL)", owner)
+        self.assertNotIn("vTaskDelete(NULL)", owner)
+        self.assertIn("eTaskGetState(task) != eSuspended", join)
+        self.assertLess(join.index("vTaskDelete(task)"), join.index("vEventGroupDelete"))
+
     def test_v7_four_turn_controller_is_integrated(self) -> None:
         header = (ESP_MAIN / "conversation_controller.h").read_text(encoding="utf-8")
         source = (ESP_MAIN / "conversation_controller.c").read_text(encoding="utf-8")
