@@ -2,8 +2,8 @@
 
 #include "config.h"
 
-#include "ssid_manager.h"
 #include "wifi_manager.h"
+#include "wifi_credential_store.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -42,6 +42,7 @@ static void app_network_handle_wifi_event(WifiEvent event, const std::string &da
         break;
     case WifiEvent::Connected:
         app_network_store_ssid(data);
+        (void)WifiCredentialStore::GetInstance().MarkSuccessful(data);
         ESP_LOGI(TAG,
                  "wifi_connected ssid=%s ip=%s rssi=%d channel=%d",
                  data.c_str(),
@@ -98,6 +99,12 @@ static esp_err_t app_network_ensure_initialized(void)
         return ESP_FAIL;
     }
 
+    esp_err_t credential_ret = WifiCredentialStore::GetInstance().LoadAndMigrate();
+    if (credential_ret != ESP_OK) {
+        ESP_LOGE(TAG, "wifi_credential_load_failed err=%s", esp_err_to_name(credential_ret));
+        return credential_ret;
+    }
+
     wifi.SetEventCallback([](WifiEvent event, const std::string &data) {
         app_network_handle_wifi_event(event, data);
     });
@@ -114,15 +121,18 @@ static void app_network_seed_build_time_credentials(void)
     s_build_credentials_seeded = true;
 
     if (DEMO_WIFI_SSID[0] != '\0' && DEMO_WIFI_PASSWORD[0] != '\0') {
-        SsidManager::GetInstance().AddSsid(DEMO_WIFI_SSID, DEMO_WIFI_PASSWORD);
+        auto &credential_store = WifiCredentialStore::GetInstance();
+        if (!credential_store.CanSeedBuildCredentials()) {
+            return;
+        }
+        (void)credential_store.Upsert(DEMO_WIFI_SSID, DEMO_WIFI_PASSWORD);
         ESP_LOGI(TAG, "wifi_build_credentials_seeded ssid=%s", DEMO_WIFI_SSID);
     }
 }
 
 static bool app_network_has_saved_credentials(void)
 {
-    const auto &ssid_list = SsidManager::GetInstance().GetSsidList();
-    return !ssid_list.empty();
+    return !WifiCredentialStore::GetInstance().List().empty();
 }
 
 static void app_network_apply_power_save_policy(void)

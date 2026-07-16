@@ -445,8 +445,8 @@ class EspAssetTests(unittest.TestCase):
         network_source = (ESP_DIR / "main" / "app_network.cc").read_text(encoding="utf-8")
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
 
-        self.assertIn("78/esp-wifi-connect", manifest)
-        self.assertIn("3.1.4", manifest)
+        self.assertNotIn("78/esp-wifi-connect", manifest)
+        self.assertTrue((ESP_DIR / "components" / "esp-wifi-connect").is_dir())
         self.assertIn('"app_network.cc"', cmake)
         self.assertTrue((ESP_DIR / "main" / "app_network.h").exists())
 
@@ -462,7 +462,8 @@ class EspAssetTests(unittest.TestCase):
 
         self.assertIn('extern "C"', network_header)
         self.assertIn("WifiManager::GetInstance()", network_source)
-        self.assertIn("SsidManager::GetInstance()", network_source)
+        self.assertIn("WifiCredentialStore::GetInstance()", network_source)
+        self.assertNotIn("SsidManager::GetInstance()", network_source)
         self.assertIn("StartStation()", network_source)
         self.assertIn("StartConfigAp()", network_source)
         self.assertIn('ssid_prefix = "Miaoban"', network_source)
@@ -477,6 +478,33 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("app_network_is_connected()", main_source)
         self.assertNotIn("DEMO_WIFI_SSID is empty", main_source)
         self.assertNotIn("Wi-Fi initialization failed; stopping demo", main_source)
+
+    def test_wifi_credentials_are_versioned_bounded_and_owned_by_the_app(self) -> None:
+        component = ESP_DIR / "components" / "esp-wifi-connect"
+        upstream = (component / "UPSTREAM.md").read_text(encoding="utf-8")
+        manifest = (ESP_DIR / "main" / "idf_component.yml").read_text(encoding="utf-8")
+        header = (ESP_DIR / "main" / "wifi_credential_store.h").read_text(encoding="utf-8")
+        source = (ESP_DIR / "main" / "wifi_credential_store.cc").read_text(encoding="utf-8")
+        manager = (component / "ssid_manager.cc").read_text(encoding="utf-8")
+
+        self.assertIn("78/esp-wifi-connect", upstream)
+        self.assertIn("3.1.4", upstream)
+        self.assertIn("096f3db8146eebc784d5b7dda61af361e405bf9f72771561c78779daedbdbfb7", upstream)
+        self.assertNotIn("78/esp-wifi-connect", manifest)
+        self.assertIn("MAX_WIFI_CREDENTIALS = 5", header)
+        for symbol in ("LoadAndMigrate", "List", "Upsert", "MarkSuccessful"):
+            self.assertIn(symbol, header)
+            self.assertIn(symbol, source)
+
+        self.assertIn('nvs_open("wifi", NVS_READONLY', source)
+        self.assertNotIn('nvs_open("wifi", NVS_READWRITE', source)
+        self.assertIn("WriteSlot", source)
+        self.assertIn("ReadSlot", source)
+        self.assertIn("SetActiveSlot", source)
+        self.assertLess(source.index("WriteSlot(inactive_slot"), source.index("ReadSlot(inactive_slot"))
+        self.assertLess(source.index("ReadSlot(inactive_slot"), source.index("SetActiveSlot(inactive_slot"))
+        self.assertNotIn("nvs_open", manager)
+        self.assertIn("SetChangeCallback", manager)
 
     def test_wifi_board_lite_raises_event_task_stack_for_esp_wifi_connect_callbacks(self) -> None:
         sdkconfig_defaults = (ESP_DIR / "sdkconfig.defaults.vocat_lowcost_16m8m").read_text(encoding="utf-8")

@@ -1,22 +1,6 @@
 dependencies:
-  78/esp-wifi-connect:
-    component_hash: 096f3db8146eebc784d5b7dda61af361e405bf9f72771561c78779daedbdbfb7
-    dependencies:
-    - matches:
-      - if: idf_version >=6.0
-      name: espressif/cjson
-      registry_url: https://components.espressif.com
-      require: private
-      version: ^1.7.19
-    - name: idf
-      require: private
-      version: '>=5.3'
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 3.1.4
   espressif/button:
-    component_hash: d0afa32f0e50d60bc0c6fc23f7eea98adc6b02cfe70b590bc52c23c506745287
+    component_hash: ad64de1d1b8aa139564810a8519b2f1ac275a560a512479ee94c1b6983469d4b
     dependencies:
     - name: espressif/cmake_utilities
       registry_url: https://components.espressif.com
@@ -28,7 +12,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 4.1.6
+    version: 4.2.0
   espressif/cjson:
     component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469
     dependencies:
@@ -50,7 +34,7 @@ dependencies:
       type: service
     version: 0.5.3
   espressif/dl_fft:
-    component_hash: ced3cf28cc70452b7859c06f4e5059215167254a2047e34c893d6f501ccd6ea2
+    component_hash: a955ca29581de2177ddf25759273bd83f082b3c805e735fe6ee105858643989b
     dependencies:
     - name: idf
       require: private
@@ -58,7 +42,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 0.4.0
+    version: 0.6.0
   espressif/esp-dsp:
     component_hash: 12e44db246517a627bc0fe2b255b8335410c0215c98bfba2df5a8e3edea839ef
     dependencies:
@@ -102,7 +86,7 @@ dependencies:
       type: service
     version: 2.4.1
   espressif/esp_codec_dev:
-    component_hash: 896c67360ae1f8dedaf8a53dfe48c015317fa455f061a5165307892296990028
+    component_hash: df70f10af8d7b922add7b9d07372c9c97ab356e58d72b7a892050227c2d44348
     dependencies:
     - name: idf
       require: private
@@ -110,7 +94,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.5.10
+    version: 1.5.11
   espressif/esp_lcd_st77916:
     component_hash: c0a565af3ea85a9d9f1e79b0e4d0829378db319bc4dab4939eca44361b3c5a1b
     dependencies:
@@ -249,12 +233,11 @@ dependencies:
       type: service
     version: 9.5.0
 direct_dependencies:
-- 78/esp-wifi-connect
 - espressif/esp-sr
 - espressif/esp_audio_codec
 - espressif/esp_vocat
 - espressif/esp_websocket_client
 - idf
-manifest_hash: 15ef3063d67ccafa63bf508d0e902118bab7fbc81364a2dd526552339dead937
+manifest_hash: 27bb613e17493e2e7dcc1c837ad7a67f0a3a8f2d3758a432cd8c4c303273a286
 target: esp32s3
 version: 2.0.0
