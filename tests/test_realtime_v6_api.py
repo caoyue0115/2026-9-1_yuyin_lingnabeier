@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from concurrent.futures import Future
 
 import pytest
 from fastapi.testclient import TestClient
@@ -72,6 +73,61 @@ def test_websocket_accepts_four_cancelled_turns_then_rejects_fifth() -> None:
             error = websocket.receive_json()
             assert error["type"] == "error"
             assert error["code"] == "turn_limit_exceeded"
+
+
+def test_websocket_allows_one_asr_empty_retry_with_same_turn_index() -> None:
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v6/realtime/conversation/opus-stream",
+            headers={"x-device-id": "board-1"},
+        ) as websocket:
+            websocket.send_json(_conversation_start())
+            conversation_id = websocket.receive_json()["conversation_id"]
+
+            for turn_id in ("turn-0", "turn-0-retry"):
+                control = {
+                    "conversation_id": conversation_id,
+                    "turn_id": turn_id,
+                    "turn_index": 0,
+                }
+                websocket.send_json({"type": "turn_start", **control})
+                assert websocket.receive_json()["type"] == "ack"
+                websocket.send_json({"type": "turn_end", **control})
+                complete = websocket.receive_json()
+                assert complete["type"] == "turn_complete"
+                assert complete["outcome"] == "asr_empty"
+
+            websocket.send_json(
+                {
+                    "type": "turn_start",
+                    "conversation_id": conversation_id,
+                    "turn_id": "turn-0-retry-2",
+                    "turn_index": 0,
+                }
+            )
+            error = websocket.receive_json()
+            assert error["type"] == "error"
+            assert error["code"] == "turn_index_conflict"
+
+
+def test_websocket_disconnect_removes_registry_session() -> None:
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v6/realtime/conversation/opus-stream",
+            headers={"x-device-id": "board-1"},
+        ) as websocket:
+            websocket.send_json(_conversation_start())
+            conversation_id = websocket.receive_json()["conversation_id"]
+            websocket.send_json(
+                {
+                    "type": "conversation_end",
+                    "conversation_id": conversation_id,
+                    "reason": "normal",
+                }
+            )
+            assert websocket.receive_json()["type"] == "conversation_done"
+
+        assert realtime_v6.conversation_registry.get(conversation_id) is None
 
 
 def test_malformed_and_late_controls_are_rejected_without_mutating_turn() -> None:
@@ -193,3 +249,31 @@ def test_two_missing_pong_intervals_close_with_keepalive_timeout() -> None:
     assert [item["type"] for item in websocket.sent] == ["ping"]
     assert websocket.closed is not None
     assert websocket.closed[1] == "keepalive_timeout"
+
+
+def test_turn_result_is_sent_before_streaming_tts_worker_finishes(monkeypatch) -> None:
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_json(self, payload: dict) -> None:
+            self.sent.append(payload)
+
+    session = realtime_v6.conversation_registry.create(device_id="board-1")
+    turn = session.start_turn("turn-0", 0)
+    turn.state_machine.on_turn_end()
+    websocket = FakeWebSocket()
+    socket = realtime_v6.ConversationSocket(websocket, session, device_id="board-1")
+    worker: Future = Future()
+    monkeypatch.setattr(socket, "_transcribe_turn", lambda _turn_id: "question")
+    monkeypatch.setattr(session, "process_turn", lambda _turn_id, _question: worker)
+
+    async def run_until_result() -> None:
+        task = asyncio.create_task(socket._finish_turn("turn-0"))
+        await asyncio.sleep(0.02)
+        assert any(event["type"] == "turn_result" for event in websocket.sent)
+        assert not worker.done()
+        worker.set_result(None)
+        await task
+
+    asyncio.run(run_until_result())

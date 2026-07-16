@@ -293,10 +293,14 @@ class ConversationLimits:
         self._started_at = monotonic() if started_at is None else _validate_timestamp(started_at)
         self._last_activity_at = self._started_at
         self._turn_ids: set[str] = set()
-        self._turn_indices: set[int] = set()
+        self._turn_indices: dict[int, int] = {}
 
     @property
     def turn_count(self) -> int:
+        return len(self._turn_indices)
+
+    @property
+    def attempt_count(self) -> int:
         return len(self._turn_ids)
 
     def now(self) -> float:
@@ -311,18 +315,29 @@ class ConversationLimits:
         self.check_deadline(now)
         self._last_activity_at = now
 
-    def start_turn(self, turn_id: str, turn_index: int, *, now: float | None = None) -> None:
+    def start_turn(
+        self,
+        turn_id: str,
+        turn_index: int,
+        *,
+        now: float | None = None,
+        allow_index_retry: bool = False,
+    ) -> None:
         self.note_activity(self._monotonic() if now is None else now)
         turn_id = _require_nonempty_string(turn_id, "turn_id")
         if turn_id in self._turn_ids:
             raise ProtocolError("turn_id_reused")
-        if len(self._turn_ids) >= MAX_TURNS:
+        if len(self._turn_indices) >= MAX_TURNS and turn_index not in self._turn_indices:
             raise ProtocolError("turn_limit_exceeded")
         turn_index = _validate_turn_index(turn_index)
-        if turn_index in self._turn_indices or turn_index != len(self._turn_ids):
+        attempts = self._turn_indices.get(turn_index, 0)
+        if attempts:
+            if not allow_index_retry or attempts >= 2:
+                raise ProtocolError("turn_index_conflict")
+        elif turn_index != len(self._turn_indices):
             raise ProtocolError("turn_index_conflict")
         self._turn_ids.add(turn_id)
-        self._turn_indices.add(turn_index)
+        self._turn_indices[turn_index] = attempts + 1
 
 
 class TurnStateMachine:
@@ -336,6 +351,7 @@ class TurnStateMachine:
         conversation_id: str | None = None,
         limits: ConversationLimits | None = None,
         monotonic: Callable[[], float] | None = None,
+        allow_index_retry: bool = False,
     ) -> None:
         self.turn_id = _require_nonempty_string(turn_id, "turn_id")
         self.turn_index = _validate_turn_index(turn_index)
@@ -344,6 +360,7 @@ class TurnStateMachine:
         )
         self._limits = limits
         self._monotonic = monotonic or (limits.now if limits is not None else default_monotonic)
+        self._allow_index_retry = allow_index_retry
         self.state = TurnState.IDLE
         self._frame_digests: dict[int, str] = {}
         self._highest_contiguous_sequence = -1
@@ -526,7 +543,12 @@ class TurnStateMachine:
             return
         now = self._monotonic()
         if start_turn:
-            self._limits.start_turn(self.turn_id, self.turn_index, now=now)
+            self._limits.start_turn(
+                self.turn_id,
+                self.turn_index,
+                now=now,
+                allow_index_retry=self._allow_index_retry,
+            )
         else:
             self._limits.note_activity(now)
 

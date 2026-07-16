@@ -142,6 +142,45 @@ def test_session_enforces_task1_turn_order_and_limit() -> None:
         session.start_turn("t4", 4)
 
 
+def test_session_allows_one_new_turn_id_after_asr_empty_at_same_index() -> None:
+    session = ConversationSession.for_test()
+    empty_turn = session.start_turn("t0", 0)
+    empty_turn.state_machine.on_turn_end()
+    empty_turn.state_machine.on_asr_empty()
+    session.complete_asr_empty("t0")
+
+    retry = session.start_turn("t0-retry", 0)
+
+    assert retry.turn_index == 0
+    assert session.turn_count == 1
+    retry.state_machine.on_turn_end()
+    retry.state_machine.on_asr_empty()
+    session.complete_asr_empty("t0-retry")
+    with pytest.raises(ProtocolError, match="turn_index_conflict"):
+        session.start_turn("t0-retry-2", 0)
+
+
+def test_session_rejects_same_index_retry_unless_previous_attempt_was_asr_empty() -> None:
+    session = ConversationSession.for_test()
+    turn = session.start_turn("t0", 0)
+    session.commit_turn(turn.turn_id, question="q", answer="a")
+
+    with pytest.raises(ProtocolError, match="turn_index_conflict"):
+        session.start_turn("t0-retry", 0)
+
+
+def test_technical_error_turn_is_terminal_during_session_cleanup() -> None:
+    session = ConversationSession.for_test()
+    turn = session.start_turn("t0", 0)
+    turn.state_machine.on_turn_end()
+    turn.state_machine.on_technical_error()
+
+    session.complete_technical_error("t0")
+    session.close()
+
+    assert turn.status == "technical_error"
+
+
 def test_cancel_closes_provider_and_joins_worker_within_two_seconds() -> None:
     worker_started = threading.Event()
     worker_stopped = threading.Event()

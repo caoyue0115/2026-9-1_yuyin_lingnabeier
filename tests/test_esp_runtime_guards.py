@@ -98,6 +98,43 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertIn('"playback_session.c"', cmake)
         self.assertIn('"cloud_conversation.c"', cmake)
 
+    def test_v7_four_turn_controller_is_integrated(self) -> None:
+        header = (ESP_MAIN / "conversation_controller.h").read_text(encoding="utf-8")
+        source = (ESP_MAIN / "conversation_controller.c").read_text(encoding="utf-8")
+        main_c = (ESP_MAIN / "main.c").read_text(encoding="utf-8")
+        config = (ESP_MAIN / "config.h").read_text(encoding="utf-8")
+        cmake = (ESP_MAIN / "CMakeLists.txt").read_text(encoding="utf-8")
+
+        for state in (
+            "CONVERSATION_STATE_IDLE",
+            "CONVERSATION_STATE_PROMPTING",
+            "CONVERSATION_STATE_RECORDING",
+            "CONVERSATION_STATE_WAITING_RESULT",
+            "CONVERSATION_STATE_PLAYING",
+            "CONVERSATION_STATE_FOLLOWUP_WINDOW",
+            "CONVERSATION_STATE_REPROMPT",
+            "CONVERSATION_STATE_ENDING",
+            "CONVERSATION_STATE_FAILED",
+        ):
+            self.assertIn(state, header)
+        self.assertIn("conversation_controller_handle", header)
+        self.assertIn("CONVERSATION_FOLLOWUP_START_TIMEOUT_MS", config)
+        self.assertIn("CONVERSATION_SPEECH_TAIL_MS", config)
+        self.assertIn("CONVERSATION_FINAL_DONE_DELAY_MS", config)
+        self.assertIn("#if DEMO_V6_CONVERSATION_ENABLED", config)
+        self.assertIn("#define DEMO_WAIT_FOR_SPEECH_TIMEOUT_MS 3000", config)
+        self.assertIn("conversation_controller_handle", main_c)
+        self.assertIn("cloud_conversation_open", main_c)
+        self.assertIn("cloud_conversation_send_pcm", main_c)
+        self.assertIn("playback_session_start", main_c)
+        self.assertIn("PROMPT_CONVERSATION_DONE", main_c)
+        self.assertIn("prompt_arbiter_wait_key(key, 15000)", main_c)
+        self.assertIn("playback_session_join(playback, portMAX_DELAY)", main_c)
+        self.assertIn("CONVERSATION_EVENT_PLAYBACK_DONE", main_c)
+        self.assertIn("playback_done_ms", main_c)
+        self.assertIn('"conversation_controller.c"', cmake)
+        self.assertNotIn("vTaskDelay", source)
+
 
 if __name__ == "__main__":
     unittest.main()

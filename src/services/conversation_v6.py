@@ -13,6 +13,7 @@ from src.models.conversation_v6 import (
     MAX_TURNS,
     ProtocolError,
     ServerEvent,
+    TurnState,
     TurnStateMachine,
     TurnTransition,
     build_turn_event,
@@ -142,10 +143,19 @@ class ConversationSession:
                 if existing.turn_index != turn_index:
                     raise ProtocolError("turn_index_mismatch")
                 return existing
-            if self._limits.turn_count >= MAX_TURNS:
-                raise ProtocolError("turn_limit_exceeded")
-            if any(turn.status not in {"committed", "cancelled"} for turn in self._turns.values()):
+            if any(
+                turn.status not in {"committed", "cancelled", "asr_empty", "technical_error"}
+                for turn in self._turns.values()
+            ):
                 raise RuntimeError("active_turn_exists")
+            same_index = [turn for turn in self._turns.values() if turn.turn_index == turn_index]
+            allow_index_retry = False
+            if same_index:
+                if len(same_index) != 1 or same_index[0].status != "asr_empty":
+                    raise ProtocolError("turn_index_conflict")
+                allow_index_retry = True
+            elif self._limits.turn_count >= MAX_TURNS:
+                raise ProtocolError("turn_limit_exceeded")
             cancel_event = threading.Event()
             audio = BoundedAudioQueue(self._max_audio_queue_bytes, cancel_event)
             state_machine = TurnStateMachine(
@@ -153,6 +163,7 @@ class ConversationSession:
                 turn_index,
                 conversation_id=self.conversation_id,
                 limits=self._limits,
+                allow_index_retry=allow_index_retry,
             )
             state_machine.on_turn_start()
             turn = ConversationTurn(turn_id, turn_index, cancel_event, audio, state_machine)
@@ -160,6 +171,22 @@ class ConversationSession:
             if self._worker is not None:
                 turn.future = self._executor.submit(self._worker, turn)
             return turn
+
+    def complete_asr_empty(self, turn_id: str) -> None:
+        turn = self._require_turn(turn_id)
+        with self._lock:
+            if turn.state_machine.state is not TurnState.COMPLETED:
+                raise ProtocolError("invalid_state")
+            turn.status = "asr_empty"
+            turn.audio.finish()
+
+    def complete_technical_error(self, turn_id: str) -> None:
+        turn = self._require_turn(turn_id)
+        with self._lock:
+            if turn.state_machine.state is not TurnState.COMPLETED:
+                raise ProtocolError("invalid_state")
+            turn.status = "technical_error"
+            turn.audio.revoke()
 
     def process_turn(self, turn_id: str, question: str) -> Future[Any]:
         turn = self._require_turn(turn_id)
@@ -266,7 +293,7 @@ class ConversationSession:
             active_ids = [
                 turn_id
                 for turn_id, turn in self._turns.items()
-                if turn.status not in {"committed", "cancelled"}
+                if turn.status not in {"committed", "cancelled", "asr_empty", "technical_error"}
             ]
         for turn_id in active_ids:
             self.cancel_turn(turn_id)

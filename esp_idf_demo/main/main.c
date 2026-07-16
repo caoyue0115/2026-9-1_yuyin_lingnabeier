@@ -5,6 +5,9 @@
 #include "audio_out.h"
 #include "cloud_client.h"
 #include "prompt_arbiter.h"
+#include "cloud_conversation.h"
+#include "conversation_controller.h"
+#include "playback_session.h"
 
 #include "esp_err.h"
 #include "esp_app_desc.h"
@@ -12,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_random.h"
 #include "esp_spiffs.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -413,6 +417,233 @@ static esp_err_t app_v5_opus_uplink_pcm_sink(const uint8_t *pcm,
     return cloud_client_opus_uplink_send_pcm((cloud_opus_uplink_t *)user_ctx, pcm, pcm_bytes);
 }
 
+typedef struct {
+    cloud_conversation_t *conversation;
+    volatile bool done;
+    esp_err_t result;
+} app_v6_open_task_t;
+
+static void app_v6_open_task(void *arg)
+{
+    app_v6_open_task_t *task = (app_v6_open_task_t *)arg;
+    task->result = cloud_conversation_open(&task->conversation);
+    task->done = true;
+    vTaskDelete(NULL);
+}
+
+static esp_err_t app_v6_pcm_sink(const uint8_t *pcm, size_t pcm_bytes, void *user_ctx)
+{
+    return cloud_conversation_send_pcm((cloud_conversation_t *)user_ctx, pcm, pcm_bytes);
+}
+
+static esp_err_t app_v6_play_prompt(prompt_id_t prompt, const char *key)
+{
+    esp_err_t ret = prompt_arbiter_submit(prompt, key);
+    if (ret == ESP_OK) {
+        ret = prompt_arbiter_wait_key(key, 15000);
+    }
+    return ret;
+}
+
+static esp_err_t run_v6_conversation(app_state_t *state)
+{
+    if (!app_network_is_connected()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    conversation_controller_t controller;
+    conversation_controller_init(&controller);
+    (void)conversation_controller_handle(&controller, CONVERSATION_EVENT_BEGIN,
+                                         esp_timer_get_time() / 1000);
+
+    app_v6_open_task_t open_task = {0};
+    cloud_conversation_t *conversation = NULL;
+    if (xTaskCreate(app_v6_open_task,
+                    "v6_open",
+                    V5_OPUS_UPLINK_WS_TASK_STACK_SIZE,
+                    &open_task,
+                    DEMO_PIPELINE_TASK_PRIORITY,
+                    NULL) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    app_set_state(state, APP_STATE_PLAYING_PROMPT);
+    esp_err_t ret = app_v6_play_prompt(PROMPT_SPEAK, "conversation:speak:0");
+    while (!open_task.done) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    conversation = open_task.conversation;
+    if (ret != ESP_OK || !open_task.done || open_task.result != ESP_OK) {
+        ret = ret != ESP_OK ? ret : (open_task.done ? open_task.result : ESP_ERR_TIMEOUT);
+        if (conversation != NULL) {
+            (void)cloud_conversation_close(conversation, "prompt_or_open_failed");
+        }
+        goto technical_failure;
+    }
+    (void)conversation_controller_handle(&controller, CONVERSATION_EVENT_PROMPT_DONE,
+                                         esp_timer_get_time() / 1000);
+
+    while (true) {
+        uint8_t *speech_prefix = NULL;
+        size_t speech_prefix_bytes = 0;
+        audio_in_wait_metrics_t wait_metrics = {0};
+        app_set_state(state, APP_STATE_WAITING_SPEECH);
+        ret = audio_in_wait_for_speech_start(&speech_prefix,
+                                             &speech_prefix_bytes,
+                                             &wait_metrics);
+        if (ret == DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT) {
+            conversation_transition_t timeout = conversation_controller_handle(
+                &controller, CONVERSATION_EVENT_SPEECH_TIMEOUT,
+                esp_timer_get_time() / 1000);
+            audio_in_deinit();
+            free(speech_prefix);
+            if (timeout.action == CONVERSATION_ACTION_PLAY_REPROMPT) {
+                app_set_state(state, APP_STATE_PLAYING_PROMPT);
+                ret = app_v6_play_prompt(PROMPT_REPROMPT, "conversation:reprompt");
+                if (ret != ESP_OK) {
+                    goto technical_close;
+                }
+                (void)conversation_controller_handle(&controller,
+                                                     CONVERSATION_EVENT_PROMPT_DONE,
+                                                     esp_timer_get_time() / 1000);
+                continue;
+            }
+            ret = app_v6_play_prompt(PROMPT_CONVERSATION_DONE, "conversation:done");
+            (void)conversation_controller_handle(&controller,
+                                                 CONVERSATION_EVENT_PROMPT_DONE,
+                                                 esp_timer_get_time() / 1000);
+            (void)cloud_conversation_close(conversation, "normal_silence");
+            app_cleanup_pipeline_resources();
+            app_set_state(state, APP_STATE_IDLE);
+            return ret;
+        }
+        if (ret != ESP_OK) {
+            free(speech_prefix);
+            goto technical_close;
+        }
+        if (controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW) {
+            (void)conversation_controller_handle(&controller,
+                                                 CONVERSATION_EVENT_SPEECH_STARTED,
+                                                 esp_timer_get_time() / 1000);
+        }
+
+        char turn_id[64];
+        snprintf(turn_id, sizeof(turn_id), "turn-%u-%04x-%08lx",
+                 (unsigned)controller.turn_index,
+                 (unsigned)(controller.attempt_serial + 1),
+                 (unsigned long)esp_random());
+        ret = cloud_conversation_start_turn(conversation, controller.turn_index, turn_id);
+        if (ret != ESP_OK) {
+            free(speech_prefix);
+            goto technical_close;
+        }
+
+        app_set_state(state, APP_STATE_RECORDING);
+        audio_in_record_metrics_t record_metrics = {0};
+        ret = audio_in_stream_after_speech_start(speech_prefix,
+                                                 speech_prefix_bytes,
+                                                 app_v6_pcm_sink,
+                                                 conversation,
+                                                 &record_metrics);
+        free(speech_prefix);
+        audio_in_deinit();
+        if (ret != ESP_OK) {
+            (void)cloud_conversation_cancel_turn(conversation, turn_id);
+            goto technical_close;
+        }
+        (void)conversation_controller_handle(&controller,
+                                             CONVERSATION_EVENT_RECORDING_DONE,
+                                             esp_timer_get_time() / 1000);
+
+        app_set_state(state, APP_STATE_POSTING_SESSION);
+        cloud_realtime_session_t result = {0};
+        ret = cloud_conversation_finish_turn(conversation, &result);
+        if (ret != ESP_OK) {
+            goto technical_close;
+        }
+        if (strcmp(result.status, "asr_empty") == 0) {
+            conversation_transition_t empty = conversation_controller_handle(
+                &controller, CONVERSATION_EVENT_ASR_EMPTY,
+                esp_timer_get_time() / 1000);
+            if (empty.action == CONVERSATION_ACTION_PLAY_REPROMPT) {
+                app_set_state(state, APP_STATE_PLAYING_PROMPT);
+                ret = app_v6_play_prompt(PROMPT_REPROMPT, "conversation:reprompt");
+                if (ret != ESP_OK) {
+                    goto technical_close;
+                }
+                (void)conversation_controller_handle(&controller,
+                                                     CONVERSATION_EVENT_PROMPT_DONE,
+                                                     esp_timer_get_time() / 1000);
+                continue;
+            }
+            ret = app_v6_play_prompt(PROMPT_CONVERSATION_DONE, "conversation:done");
+            (void)cloud_conversation_close(conversation, "asr_empty");
+            app_cleanup_pipeline_resources();
+            app_set_state(state, APP_STATE_IDLE);
+            return ret;
+        }
+
+        conversation_transition_t ready = conversation_controller_handle(
+            &controller, CONVERSATION_EVENT_TURN_RESULT,
+            esp_timer_get_time() / 1000);
+        if (ready.action != CONVERSATION_ACTION_PLAY_ANSWER ||
+            result.audio_stream_url[0] == '\0') {
+            ret = DEMO_CLOUD_ERR_INVALID_RESPONSE;
+            goto technical_close;
+        }
+        app_set_state(state, APP_STATE_PLAYING);
+        playback_session_t *playback = NULL;
+        ret = playback_session_start(result.audio_stream_url, &playback);
+        if (ret == ESP_OK) {
+            ret = playback_session_join(playback,
+                                        pdMS_TO_TICKS(DEMO_REALTIME_SESSION_TIMEOUT_MS));
+            if (ret == ESP_ERR_TIMEOUT) {
+                (void)playback_session_cancel(playback, ESP_ERR_TIMEOUT);
+                ret = playback_session_join(playback, portMAX_DELAY);
+            }
+        }
+        if (ret != ESP_OK) {
+            goto technical_close;
+        }
+        const int64_t playback_done_ms = esp_timer_get_time() / 1000;
+        ret = cloud_conversation_complete_playback(conversation, turn_id);
+        if (ret != ESP_OK) {
+            goto technical_close;
+        }
+        conversation_transition_t played = conversation_controller_handle(
+            &controller, CONVERSATION_EVENT_PLAYBACK_DONE,
+            playback_done_ms);
+        if (played.state == CONVERSATION_STATE_ENDING) {
+            const int64_t now_ms = esp_timer_get_time() / 1000;
+            if (played.deadline_ms > now_ms) {
+                vTaskDelay(pdMS_TO_TICKS((uint32_t)(played.deadline_ms - now_ms)));
+            }
+            (void)conversation_controller_handle(&controller,
+                                                 CONVERSATION_EVENT_TIMER,
+                                                 esp_timer_get_time() / 1000);
+            ret = app_v6_play_prompt(PROMPT_CONVERSATION_DONE, "conversation:done");
+            (void)conversation_controller_handle(&controller,
+                                                 CONVERSATION_EVENT_PROMPT_DONE,
+                                                 esp_timer_get_time() / 1000);
+            (void)cloud_conversation_close(conversation, "followup_limit");
+            app_cleanup_pipeline_resources();
+            app_set_state(state, APP_STATE_IDLE);
+            return ret;
+        }
+    }
+
+technical_close:
+    (void)conversation_controller_handle(&controller,
+                                         CONVERSATION_EVENT_TECHNICAL_ERROR,
+                                         esp_timer_get_time() / 1000);
+    (void)cloud_conversation_close(conversation, "technical_error");
+technical_failure:
+    (void)app_v6_play_prompt(PROMPT_TECHNICAL_ERROR, "conversation:technical_error");
+    app_cleanup_pipeline_resources();
+    app_set_state(state, APP_STATE_ERROR);
+    app_set_state(state, APP_STATE_IDLE);
+    return ret;
+}
+
 static void app_log_v5_uplink_metrics(const cloud_opus_uplink_metrics_t *metrics,
                                       int64_t pipeline_start_us)
 {
@@ -521,7 +752,7 @@ static esp_err_t app_validate_runtime_config(void)
     return ESP_OK;
 }
 
-static esp_err_t run_trigger_pipeline(app_state_t *state)
+static esp_err_t __attribute__((unused)) run_trigger_pipeline(app_state_t *state)
 {
     esp_err_t ret = ESP_OK;
     int64_t pipeline_start_us = esp_timer_get_time();
@@ -1071,7 +1302,11 @@ static void app_pipeline_task(void *arg)
                  (unsigned)task_args->event.y);
     }
 
+#if DEMO_V6_CONVERSATION_ENABLED
+    (void)run_v6_conversation(&s_app_state);
+#else
     (void)run_trigger_pipeline(&s_app_state);
+#endif
 
     free(task_args);
     s_pipeline_task_handle = NULL;

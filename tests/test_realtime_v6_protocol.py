@@ -413,6 +413,18 @@ def test_conversation_limits_reject_reused_turn_ids_and_conflicting_indices() ->
         limits.start_turn("turn-2", 2, now=0.0)
 
 
+def test_conversation_limits_allow_one_explicit_retry_without_consuming_logical_turn() -> None:
+    limits = ConversationLimits(started_at=0.0)
+    limits.start_turn("turn-0", 0, now=0.0)
+
+    limits.start_turn("turn-0-retry", 0, now=0.0, allow_index_retry=True)
+
+    assert limits.turn_count == 1
+    assert limits.attempt_count == 2
+    with pytest.raises(ProtocolError, match="^turn_index_conflict$"):
+        limits.start_turn("turn-0-retry-2", 0, now=0.0, allow_index_retry=True)
+
+
 def test_conversation_deadline_expires_while_idle_and_active() -> None:
     idle_limits = ConversationLimits(started_at=0.0)
     with pytest.raises(ProtocolError, match="^connection_time_exceeded$"):

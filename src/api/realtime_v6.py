@@ -71,6 +71,14 @@ class ConversationRegistry:
         with self._lock:
             return self._sessions.get(conversation_id)
 
+    def remove(self, conversation_id: str) -> None:
+        with self._lock:
+            self._sessions.pop(conversation_id, None)
+            self._devices.pop(conversation_id, None)
+            grant_keys = [key for key in self._grants if key[0] == conversation_id]
+            for key in grant_keys:
+                self._grants.pop(key, None)
+
     def device_id(self, conversation_id: str) -> str:
         with self._lock:
             return self._devices.get(conversation_id, "")
@@ -220,7 +228,14 @@ class ConversationSocket:
             raise ProtocolError("invalid_control")
         if payload.get("type") == "pong":
             return False
-        if payload.get("type") == "turn_start" and self.session.turn_count >= MAX_TURNS:
+        requested_index = payload.get("turn_index")
+        if (
+            payload.get("type") == "turn_start"
+            and self.session.turn_count >= MAX_TURNS
+            and isinstance(requested_index, int)
+            and not isinstance(requested_index, bool)
+            and requested_index >= MAX_TURNS
+        ):
             raise ProtocolError("turn_limit_exceeded")
         control = parse_client_control(payload)
         if control.type == "conversation_start":
@@ -294,6 +309,7 @@ class ConversationSocket:
                 return
             if not question:
                 transition = turn.state_machine.on_asr_empty()
+                self.session.complete_asr_empty(turn.turn_id)
                 await self._send(build_turn_event(
                     transition,
                     conversation_id=self.session.conversation_id,
@@ -309,9 +325,6 @@ class ConversationSocket:
                 str(transition.data["text"]),
             ))
             future: Future[Any] = self.session.process_turn(turn.turn_id, question)
-            await asyncio.wrap_future(future)
-            if turn.cancel_event.is_set():
-                return
             token = conversation_registry.issue_audio_token(
                 self.session.conversation_id,
                 turn.turn_id,
@@ -332,6 +345,7 @@ class ConversationSocket:
                 session_id=f"{self.session.conversation_id}:{turn.turn_id}",
                 audio_stream_url=audio_url,
             ))
+            await asyncio.wrap_future(future)
         except asyncio.CancelledError:
             raise
         except ProtocolError as exc:
@@ -341,6 +355,7 @@ class ConversationSocket:
             if not turn.cancel_event.is_set():
                 try:
                     transition = turn.state_machine.on_technical_error()
+                    self.session.complete_technical_error(turn.turn_id)
                     await self._send(turn_complete_event(
                         self.session.conversation_id,
                         turn.turn_id,
@@ -425,7 +440,10 @@ async def conversation_opus_stream(
 ) -> None:
     await websocket.accept()
     session = conversation_registry.create(device_id=x_device_id)
-    await ConversationSocket(websocket, session, device_id=x_device_id).run()
+    try:
+        await ConversationSocket(websocket, session, device_id=x_device_id).run()
+    finally:
+        conversation_registry.remove(session.conversation_id)
 
 
 @router.get("/api/v6/realtime/conversations/{conversation_id}/turns/{turn_id}/audio")

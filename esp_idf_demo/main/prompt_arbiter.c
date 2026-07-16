@@ -4,6 +4,7 @@
 #include "config.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -36,6 +37,8 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t s_owner_task;
 static bool s_conversation_active;
 static bool s_network_connected;
+static bool s_playing;
+static char s_playing_key[PROMPT_DEDUPE_KEY_BYTES];
 
 static bool prompt_arbiter_is_network_prompt(prompt_id_t id)
 {
@@ -80,12 +83,16 @@ static esp_err_t prompt_arbiter_play(prompt_id_t id)
                                        DEMO_AUDIO_CHANNELS,
                                        DEMO_AUDIO_BITS_PER_SAMPLE,
                                        DEMO_RECORD_RETRY_PROMPT_MAX_BYTES);
-    case PROMPT_TECHNICAL_ERROR:
-        return audio_out_play_pcm_file(DEMO_RECORD_RETRY_ERROR_PROMPT_PATH,
+    case PROMPT_REPROMPT:
+        return audio_out_play_pcm_file(DEMO_RECORD_RETRY_REARM_PROMPT_PATH,
                                        DEMO_AUDIO_SAMPLE_RATE,
                                        DEMO_AUDIO_CHANNELS,
                                        DEMO_AUDIO_BITS_PER_SAMPLE,
                                        DEMO_RECORD_RETRY_PROMPT_MAX_BYTES);
+    case PROMPT_TECHNICAL_ERROR:
+        start = prompt_conversation_done_start;
+        end = prompt_conversation_done_end;
+        break;
     default:
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -124,6 +131,8 @@ static bool prompt_arbiter_take_next(prompt_entry_t *out)
     if (selected >= 0) {
         *out = s_entries[selected];
         s_entries[selected].used = false;
+        s_playing = true;
+        snprintf(s_playing_key, sizeof(s_playing_key), "%s", out->dedupe_key);
     }
     taskEXIT_CRITICAL(&s_lock);
     return selected >= 0;
@@ -149,6 +158,10 @@ static void prompt_arbiter_owner_task(void *arg)
                     }
                 }
             }
+            if (!relevant || deferred) {
+                s_playing = false;
+                s_playing_key[0] = '\0';
+            }
             taskEXIT_CRITICAL(&s_lock);
             if (!relevant) {
                 continue;
@@ -159,7 +172,60 @@ static void prompt_arbiter_owner_task(void *arg)
             ESP_LOGI(TAG, "prompt_start id=%d key=%s", (int)entry.id, entry.dedupe_key);
             const esp_err_t ret = prompt_arbiter_play(entry.id);
             ESP_LOGI(TAG, "prompt_done id=%d err=%s", (int)entry.id, esp_err_to_name(ret));
+            taskENTER_CRITICAL(&s_lock);
+            s_playing = false;
+            s_playing_key[0] = '\0';
+            taskEXIT_CRITICAL(&s_lock);
         }
+    }
+}
+
+esp_err_t prompt_arbiter_wait_key(const char *dedupe_key, int timeout_ms)
+{
+    if (dedupe_key == NULL || dedupe_key[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const int64_t deadline_us = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+    while (true) {
+        bool pending = false;
+        taskENTER_CRITICAL(&s_lock);
+        pending = s_playing &&
+                  strncmp(s_playing_key, dedupe_key, PROMPT_DEDUPE_KEY_BYTES) == 0;
+        for (int index = 0; index < PROMPT_ARBITER_CAPACITY && !pending; ++index) {
+            pending = s_entries[index].used &&
+                      strncmp(s_entries[index].dedupe_key,
+                              dedupe_key,
+                              PROMPT_DEDUPE_KEY_BYTES) == 0;
+        }
+        taskEXIT_CRITICAL(&s_lock);
+        if (!pending) {
+            return ESP_OK;
+        }
+        if (esp_timer_get_time() >= deadline_us) {
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+esp_err_t prompt_arbiter_wait_idle(int timeout_ms)
+{
+    const int64_t deadline_us = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+    while (true) {
+        bool busy = false;
+        taskENTER_CRITICAL(&s_lock);
+        busy = s_playing;
+        for (int index = 0; index < PROMPT_ARBITER_CAPACITY && !busy; ++index) {
+            busy = s_entries[index].used;
+        }
+        taskEXIT_CRITICAL(&s_lock);
+        if (!busy) {
+            return ESP_OK;
+        }
+        if (esp_timer_get_time() >= deadline_us) {
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -184,6 +250,11 @@ esp_err_t prompt_arbiter_submit(prompt_id_t id, const char *dedupe_key)
     }
     int free_index = -1;
     taskENTER_CRITICAL(&s_lock);
+    if (s_playing &&
+        strncmp(s_playing_key, dedupe_key, PROMPT_DEDUPE_KEY_BYTES) == 0) {
+        taskEXIT_CRITICAL(&s_lock);
+        return ESP_OK;
+    }
     for (int index = 0; index < PROMPT_ARBITER_CAPACITY; ++index) {
         if (s_entries[index].used &&
             strncmp(s_entries[index].dedupe_key, dedupe_key, PROMPT_DEDUPE_KEY_BYTES) == 0) {

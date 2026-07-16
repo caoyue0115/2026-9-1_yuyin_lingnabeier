@@ -540,11 +540,19 @@ class EspAssetTests(unittest.TestCase):
             "PROMPT_NETWORK_REQUIRED = 50",
             "PROMPT_TECHNICAL_ERROR = 60",
             "prompt_arbiter_submit",
+            "prompt_arbiter_wait_key",
             "prompt_arbiter_set_conversation_active",
         ):
             self.assertIn(declaration, prompt_header)
         self.assertIn("prompt_arbiter_owner_task", prompt_source)
+        self.assertIn("s_playing_key", prompt_source)
         self.assertIn("prompt_arbiter_network_prompt_is_relevant", prompt_source)
+        self.assertIn(
+            "case PROMPT_TECHNICAL_ERROR:\n"
+            "        start = prompt_conversation_done_start;\n"
+            "        end = prompt_conversation_done_end;",
+            prompt_source,
+        )
         for asset in (
             "network_required_1.pcm",
             "conversation_done_1.pcm",
