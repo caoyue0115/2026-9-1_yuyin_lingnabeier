@@ -19,9 +19,20 @@ def validate_artifacts(
     *,
     app_size_limit: int = DEFAULT_APP_SIZE_LIMIT,
 ) -> dict[str, Any]:
-    app_path = Path(build_dir) / "esp_idf_demo.bin"
+    build_dir = Path(build_dir)
+    app_path = build_dir / "esp_idf_demo.bin"
     if not app_path.is_file():
         raise GateError("app_artifact_missing")
+    compiled_config_path = build_dir / "config" / "sdkconfig.h"
+    if not compiled_config_path.is_file():
+        raise GateError("compiled_sdkconfig_missing")
+    compiled_config = compiled_config_path.read_text(encoding="utf-8")
+    required_profile_defines = (
+        "#define CONFIG_DEMO_TARGET_PROFILE_VOCAT_LOWCOST_16M8M 1",
+        "#define CONFIG_DEMO_AUDIO_PCB_ESP_VOCAT_V1_0 1",
+    )
+    if not all(item in compiled_config for item in required_profile_defines):
+        raise GateError("compiled_n16r8_profile_missing")
     payload = app_path.read_bytes()
     app_bytes = len(payload)
     if app_bytes >= app_size_limit:
@@ -30,6 +41,7 @@ def validate_artifacts(
         "app_bytes": app_bytes,
         "app_remaining_bytes": app_size_limit - app_bytes,
         "app_sha256": hashlib.sha256(payload).hexdigest(),
+        "compiled_profile": "vocat_lowcost_16m8m_audio_v1_0",
     }
 
 

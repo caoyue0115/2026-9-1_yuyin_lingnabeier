@@ -139,7 +139,14 @@ class ConversationRegistry:
         return StreamingResponse(
             iter(turn.audio),
             media_type="application/octet-stream",
-            headers={"X-Audio-Format": "pcm", "Cache-Control": "no-store"},
+            headers={
+                "X-Audio-Format": "pcm",
+                "X-Audio-Sample-Rate": "16000",
+                "X-Audio-Sample-Width": "16",
+                "X-Audio-Channels": "1",
+                "X-Audio-Endian": "little",
+                "Cache-Control": "no-store",
+            },
         )
 
     def reset(self) -> None:

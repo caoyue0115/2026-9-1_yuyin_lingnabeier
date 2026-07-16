@@ -1384,7 +1384,6 @@ static volatile bool s_ota_rollback_validation_pending = false;
 static volatile bool s_ota_rollback_business_ready = false;
 static volatile bool s_ota_credential_migration_ready = false;
 static volatile bool s_ota_audio_ready = false;
-static volatile bool s_ota_post_reboot_report_done = false;
 static TaskHandle_t s_ota_rollback_validation_task_handle = NULL;
 static TaskHandle_t s_ota_rollback_timeout_task_handle = NULL;
 static app_ota_p3c_pending_t s_ota_rollback_pending = {0};
@@ -2146,9 +2145,6 @@ static void app_ota_post_reboot_confirm_task(void *arg)
 
     const esp_app_desc_t *app_desc = esp_app_get_description();
     app_ota_post_reboot_confirm_if_pending(app_desc != NULL ? app_desc->version : "");
-#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
-    s_ota_post_reboot_report_done = true;
-#endif
     vTaskDelete(NULL);
 }
 
@@ -2158,7 +2154,7 @@ static void app_ota_rollback_note_business_ready(const char *app_version)
     (void)app_version;
     if (!s_ota_rollback_validation_pending || s_ota_rollback_business_ready ||
         !s_ota_credential_migration_ready || !s_ota_audio_ready ||
-        !s_ota_post_reboot_report_done || !app_network_is_connected()) {
+        !app_network_is_connected()) {
         return;
     }
     s_ota_rollback_business_ready = true;

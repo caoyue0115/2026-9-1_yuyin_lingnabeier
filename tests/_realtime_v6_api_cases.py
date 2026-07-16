@@ -219,6 +219,33 @@ def test_audio_token_is_bound_to_device_conversation_turn_and_expiry() -> None:
         assert expired.status_code == 410
 
 
+def test_audio_stream_declares_exact_pcm_format() -> None:
+    session = realtime_v6.conversation_registry.create(device_id="board-1")
+    turn = session.start_turn("turn-0", 0)
+    turn.audio.put(b"\x01\x00\x02\x00")
+    turn.audio.finish()
+    token = realtime_v6.conversation_registry.issue_audio_token(
+        session.conversation_id,
+        "turn-0",
+        device_id="board-1",
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/v6/realtime/conversations/{session.conversation_id}/turns/turn-0/audio",
+            params={"token": token},
+            headers={"x-device-id": "board-1"},
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"\x01\x00\x02\x00"
+    assert response.headers["x-audio-format"] == "pcm"
+    assert response.headers["x-audio-sample-rate"] == "16000"
+    assert response.headers["x-audio-sample-width"] == "16"
+    assert response.headers["x-audio-channels"] == "1"
+    assert response.headers["x-audio-endian"] == "little"
+
+
 def test_two_missing_pong_intervals_close_with_keepalive_timeout() -> None:
     class FakeWebSocket:
         def __init__(self) -> None:

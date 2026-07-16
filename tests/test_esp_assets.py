@@ -976,7 +976,10 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("s_ota_audio_ready", main_source)
         self.assertIn("audio_in_probe()", main_source)
         self.assertIn("app_network_is_connected()", main_source)
-        self.assertIn("s_ota_post_reboot_report_done", main_source)
+        business_ready = main_source.split(
+            "static void app_ota_rollback_note_business_ready", 1
+        )[1].split("static void app_ota_rollback_validation_task", 1)[0]
+        self.assertNotIn("s_ota_post_reboot_report_done", business_ready)
         self.assertLess(
             runtime.index("s_ota_credential_migration_ready = true"),
             runtime.index("s_ota_audio_ready = true"),
