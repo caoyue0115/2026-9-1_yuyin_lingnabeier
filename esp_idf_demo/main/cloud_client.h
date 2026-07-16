@@ -38,6 +38,8 @@
 #define DEMO_CLOUD_ERR_BASE 0x7000
 #endif
 
+#define DEMO_CLOUD_ERR_AUDIO_CANCELLED (DEMO_CLOUD_ERR_BASE + 5)
+
 #ifndef DEMO_CLOUD_ERR_INVALID_RESPONSE
 #define DEMO_CLOUD_ERR_INVALID_RESPONSE (DEMO_CLOUD_ERR_BASE + 1)
 #endif
@@ -197,6 +199,12 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
                                              cloud_realtime_audio_chunk_callback_t callback,
                                              void *user_ctx,
                                              cloud_realtime_audio_metrics_t *metrics);
+esp_err_t cloud_client_stream_realtime_audio_cancellable(
+    const char *audio_stream_url,
+    cloud_realtime_audio_chunk_callback_t callback,
+    void *user_ctx,
+    cloud_realtime_audio_metrics_t *metrics,
+    volatile bool *cancel_requested);
 
 esp_err_t cloud_client_fetch_ota_manifest(const char *board,
                                           const char *hw_rev,
