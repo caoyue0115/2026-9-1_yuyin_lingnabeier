@@ -129,6 +129,10 @@ class ConversationSession:
         kwargs.setdefault("conversation_id", "conversation-test")
         return cls(**kwargs)
 
+    @property
+    def turn_count(self) -> int:
+        return self._limits.turn_count
+
     def start_turn(self, turn_id: str, turn_index: int) -> ConversationTurn:
         if not isinstance(turn_id, str) or not turn_id:
             raise ValueError("missing_turn_id")
