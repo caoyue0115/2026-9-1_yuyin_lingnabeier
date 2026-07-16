@@ -131,6 +131,13 @@ static void audio_in_close_locked(void)
     }
 }
 
+esp_err_t audio_in_probe(void)
+{
+    esp_err_t ret = audio_in_open_locked();
+    audio_in_close_locked();
+    return ret;
+}
+
 static uint8_t *audio_in_alloc_record_buffer(void)
 {
     audio_in_log_heap("before_record_alloc");

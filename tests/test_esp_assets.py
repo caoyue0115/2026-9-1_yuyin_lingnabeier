@@ -963,6 +963,45 @@ class EspAssetTests(unittest.TestCase):
         mark_valid_pos = main_source.index("esp_ota_mark_app_valid_cancel_rollback")
         self.assertLess(mark_valid_pos, timeout_pos)
 
+    def test_ota_pending_watchdog_starts_before_blocking_network_startup(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        runtime = main_source.rsplit("static void app_runtime_task(void *arg)", 1)[1]
+        prepare_pos = runtime.index("app_ota_rollback_prepare_before_network()")
+        network_pos = runtime.index("app_network_start()")
+
+        self.assertLess(prepare_pos, network_pos)
+        self.assertIn("app_ota_p3c_load_pending", main_source)
+        self.assertIn("xTaskCreate(app_ota_rollback_validation_timeout_task", main_source)
+        self.assertIn("s_ota_credential_migration_ready", main_source)
+        self.assertIn("s_ota_audio_ready", main_source)
+        self.assertIn("audio_in_probe()", main_source)
+        self.assertIn("app_network_is_connected()", main_source)
+        self.assertIn("s_ota_post_reboot_report_done", main_source)
+        self.assertLess(
+            runtime.index("s_ota_credential_migration_ready = true"),
+            runtime.index("s_ota_audio_ready = true"),
+        )
+
+    def test_ota_validation_report_failure_cannot_rearm_local_rollback(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        validation = main_source.rsplit(
+            "static void app_ota_rollback_validation_task(void *arg)", 1
+        )[1].split("static void app_ota_rollback_validation_timeout_task", 1)[0]
+
+        mark_pos = validation.index("esp_ota_mark_app_valid_cancel_rollback()")
+        clear_local_pos = validation.index("s_ota_rollback_validation_pending = false")
+        clear_pending_pos = validation.index("app_ota_p3c_clear_pending()")
+        report_pos = validation.index("app_submit_ota_app_validated_report")
+        self.assertLess(mark_pos, clear_local_pos)
+        self.assertLess(clear_local_pos, report_pos)
+        self.assertLess(clear_pending_pos, report_pos)
+
+        timeout = main_source.rsplit(
+            "static void app_ota_rollback_validation_timeout_task(void *arg)", 1
+        )[1].split("#endif", 1)[0]
+        self.assertIn("if (s_ota_rollback_validation_pending)", timeout)
+        self.assertNotIn("!s_ota_rollback_business_ready", timeout)
+
     def test_ota_p3d_persists_breadcrumb_and_reports_rollback_recovered(self) -> None:
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
         cloud_header = (ESP_DIR / "main" / "cloud_client.h").read_text(encoding="utf-8")

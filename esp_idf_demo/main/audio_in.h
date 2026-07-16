@@ -26,6 +26,8 @@ typedef esp_err_t (*audio_in_pcm_chunk_callback_t)(const uint8_t *pcm,
                                                    size_t pcm_bytes,
                                                    void *user_ctx);
 
+esp_err_t audio_in_probe(void);
+
 // Opens the mic, waits for real speech start, and returns a small speech prefix buffer
 // that should be prepended to the formal recording buffer. The caller owns the returned
 // prefix buffer and must free() it. On timeout no audio is retained.

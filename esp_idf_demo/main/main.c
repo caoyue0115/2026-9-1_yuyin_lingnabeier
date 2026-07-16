@@ -22,6 +22,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
+#include "nvs_flash.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -1381,6 +1382,9 @@ typedef struct {
 #if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
 static volatile bool s_ota_rollback_validation_pending = false;
 static volatile bool s_ota_rollback_business_ready = false;
+static volatile bool s_ota_credential_migration_ready = false;
+static volatile bool s_ota_audio_ready = false;
+static volatile bool s_ota_post_reboot_report_done = false;
 static TaskHandle_t s_ota_rollback_validation_task_handle = NULL;
 static TaskHandle_t s_ota_rollback_timeout_task_handle = NULL;
 static app_ota_p3c_pending_t s_ota_rollback_pending = {0};
@@ -1529,6 +1533,70 @@ static esp_err_t app_ota_p3c_load_pending(app_ota_p3c_pending_t *pending)
     pending->pending = true;
     return ESP_OK;
 }
+
+#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+static esp_err_t app_ota_p3c_store_last_stage(const char *last_stage);
+
+static void app_ota_rollback_arm_pending(const app_ota_p3c_pending_t *pending)
+{
+    if (pending == NULL || !pending->pending) {
+        return;
+    }
+    s_ota_rollback_pending = *pending;
+    s_ota_rollback_validation_pending = true;
+    s_ota_rollback_business_ready = false;
+    if (s_ota_rollback_timeout_task_handle != NULL) {
+        return;
+    }
+    BaseType_t timeout_ok = xTaskCreate(app_ota_rollback_validation_timeout_task,
+                                        "ota_valid_timeout",
+                                        DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE,
+                                        NULL,
+                                        tskIDLE_PRIORITY + 1,
+                                        &s_ota_rollback_timeout_task_handle);
+    if (timeout_ok != pdPASS) {
+        s_ota_rollback_timeout_task_handle = NULL;
+        ESP_LOGE(TAG,
+                 "stage=ota_app_validation_timeout event=task_start_failed release_id=%s",
+                 pending->release_id);
+        (void)app_ota_p3c_store_last_stage("app_validation_watchdog_failed");
+        esp_restart();
+        return;
+    }
+    (void)app_ota_p3c_store_last_stage("app_validation_waiting");
+}
+
+static void app_ota_rollback_prepare_before_network(void)
+{
+    esp_err_t ret = nvs_flash_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "stage=ota_app_validation event=nvs_init_failed err=%s",
+                 esp_err_to_name(ret));
+        esp_restart();
+        return;
+    }
+
+    app_ota_p3c_pending_t pending = {0};
+    ret = app_ota_p3c_load_pending(&pending);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        return;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "stage=ota_app_validation event=pending_read_failed err=%s",
+                 esp_err_to_name(ret));
+        esp_restart();
+        return;
+    }
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const bool running_pending = running != NULL &&
+                                 running->address == pending.partition_address &&
+                                 strcmp(running->label, pending.partition_label) == 0;
+    if (running_pending) {
+        app_ota_rollback_arm_pending(&pending);
+    }
+}
+#endif
 
 static esp_err_t app_ota_p3c_store_last_stage(const char *last_stage)
 {
@@ -2034,23 +2102,6 @@ static void app_ota_post_reboot_confirm_if_pending(const char *app_version)
 #if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
         if (ok) {
             (void)app_ota_p3c_store_last_stage("post_reboot_confirm_reported");
-            s_ota_rollback_pending = pending;
-            s_ota_rollback_validation_pending = true;
-            s_ota_rollback_business_ready = false;
-            BaseType_t timeout_ok = xTaskCreate(app_ota_rollback_validation_timeout_task,
-                                                "ota_valid_timeout",
-                                                DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE,
-                                                NULL,
-                                                tskIDLE_PRIORITY + 1,
-                                                &s_ota_rollback_timeout_task_handle);
-            if (timeout_ok != pdPASS) {
-                s_ota_rollback_timeout_task_handle = NULL;
-                ESP_LOGW(TAG,
-                         "stage=ota_app_validation_timeout event=task_start_failed release_id=%s",
-                         pending.release_id);
-            } else {
-                (void)app_ota_p3c_store_last_stage("app_validation_waiting");
-            }
         } else {
             int recovered_http_status = 0;
             esp_err_t recovered_ret =
@@ -2095,6 +2146,9 @@ static void app_ota_post_reboot_confirm_task(void *arg)
 
     const esp_app_desc_t *app_desc = esp_app_get_description();
     app_ota_post_reboot_confirm_if_pending(app_desc != NULL ? app_desc->version : "");
+#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+    s_ota_post_reboot_report_done = true;
+#endif
     vTaskDelete(NULL);
 }
 
@@ -2102,7 +2156,9 @@ static void app_ota_post_reboot_confirm_task(void *arg)
 static void app_ota_rollback_note_business_ready(const char *app_version)
 {
     (void)app_version;
-    if (!s_ota_rollback_validation_pending || s_ota_rollback_business_ready) {
+    if (!s_ota_rollback_validation_pending || s_ota_rollback_business_ready ||
+        !s_ota_credential_migration_ready || !s_ota_audio_ready ||
+        !s_ota_post_reboot_report_done || !app_network_is_connected()) {
         return;
     }
     s_ota_rollback_business_ready = true;
@@ -2133,6 +2189,11 @@ static void app_ota_rollback_validation_task(void *arg)
     const char *app_version = app_desc != NULL ? app_desc->version : "";
 
     esp_err_t ret = esp_ota_mark_app_valid_cancel_rollback();
+    if (ret == ESP_OK) {
+        s_ota_rollback_validation_pending = false;
+        (void)app_ota_p3c_store_last_stage("app_validation_local_done");
+        (void)app_ota_p3c_clear_pending();
+    }
     int report_http_status = 0;
     esp_err_t report_ret = app_submit_ota_app_validated_report(&s_ota_rollback_pending,
                                                                app_version,
@@ -2167,8 +2228,12 @@ static void app_ota_rollback_validation_task(void *arg)
     if (ret == ESP_OK && report_ret == ESP_OK) {
         (void)app_ota_p3c_store_last_stage("app_validation_done");
         (void)app_ota_p3c_clear_pending();
-        s_ota_rollback_validation_pending = false;
+    } else if (ret == ESP_OK) {
+        (void)app_ota_p3c_store_last_stage("app_validation_report_pending");
     } else {
+        s_ota_rollback_business_ready = false;
+    }
+    if (ret == ESP_OK) {
         s_ota_rollback_business_ready = false;
     }
     s_ota_rollback_validation_task_handle = NULL;
@@ -2179,7 +2244,7 @@ static void app_ota_rollback_validation_timeout_task(void *arg)
 {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(DEMO_OTA_ROLLBACK_VALIDATION_TIMEOUT_MS));
-    if (s_ota_rollback_validation_pending && !s_ota_rollback_business_ready) {
+    if (s_ota_rollback_validation_pending) {
         ESP_LOGW(TAG,
                  "stage=ota_app_validation event=timeout release_id=%s timeout_ms=%d",
                  s_ota_rollback_pending.release_id,
@@ -2514,12 +2579,18 @@ static void app_runtime_task(void *arg)
         return;
     }
 
+#if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+    app_ota_rollback_prepare_before_network();
+#endif
     if (app_network_start() != ESP_OK) {
         app_set_state(&s_app_state, APP_STATE_ERROR);
         ESP_LOGE(TAG, "Network initialization failed; stopping demo");
         vTaskDelete(NULL);
         return;
     }
+#if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+    s_ota_credential_migration_ready = true;
+#endif
     ESP_LOGI(TAG, "network_ready ssid=%s", app_network_get_ssid());
 #if DEMO_OTA_BOOT_SWITCH_ENABLED
     (void)app_ota_p3c_store_last_stage("wifi_connected");
@@ -2540,12 +2611,25 @@ static void app_runtime_task(void *arg)
 #if DEMO_OTA_BOOT_SWITCH_ENABLED
     (void)app_ota_p3c_store_last_stage("trigger_init_start");
 #endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
+#if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+    esp_err_t audio_probe_ret = audio_in_probe();
+    if (audio_probe_ret != ESP_OK) {
+        app_set_state(&s_app_state, APP_STATE_ERROR);
+        ESP_LOGE(TAG, "Audio initialization probe failed; stopping demo: %s",
+                 esp_err_to_name(audio_probe_ret));
+        vTaskDelete(NULL);
+        return;
+    }
+#endif
     if (trigger_input_init(&trigger) != ESP_OK) {
         app_set_state(&s_app_state, APP_STATE_ERROR);
         ESP_LOGE(TAG, "Trigger initialization failed; stopping demo");
         vTaskDelete(NULL);
         return;
     }
+#if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+    s_ota_audio_ready = true;
+#endif
 #if DEMO_OTA_BOOT_SWITCH_ENABLED
     (void)app_ota_p3c_store_last_stage("trigger_init_done");
 #endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
