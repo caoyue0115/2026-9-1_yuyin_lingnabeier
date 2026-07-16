@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from src.models.conversation_v6 import ServerEvent
+from src.models.conversation_v6 import ProtocolError, ServerEvent
 from src.services import conversation_v6 as conversation_service
 from src.services.conversation_v6 import ConversationSession, TurnRunResult
 from src.settings import Settings
@@ -66,6 +66,36 @@ def test_cancel_wakes_a_producer_blocked_on_capacity() -> None:
     assert audio.byte_count == 0
 
 
+def test_shared_cancel_event_wakes_a_producer_blocked_on_capacity() -> None:
+    cancel_event = threading.Event()
+    audio = BoundedAudioQueue(max_bytes=4, cancel_event=cancel_event)
+    audio.put(b"1234")
+    producer_finished = threading.Event()
+    error: list[BaseException] = []
+
+    def produce() -> None:
+        try:
+            audio.put(b"5")
+        except BaseException as exc:
+            error.append(exc)
+        finally:
+            producer_finished.set()
+
+    producer = threading.Thread(target=produce)
+    producer.start()
+    assert not producer_finished.wait(0.05)
+
+    cancel_event.set()
+
+    awakened = producer_finished.wait(0.5)
+    if not awakened:
+        audio.revoke()
+    assert awakened
+    producer.join(timeout=0.5)
+    assert len(error) == 1
+    assert isinstance(error[0], TurnCancelled)
+
+
 def test_cancel_is_a_barrier_and_revokes_audio() -> None:
     session = ConversationSession.for_test(max_audio_queue_bytes=8)
     turn = session.start_turn("t1", 0)
@@ -87,6 +117,29 @@ def test_cancel_is_idempotent_and_emits_one_terminal_event() -> None:
     assert first is second
     assert turn.join(timeout=0.1)
     assert [event.type for event in session.event_log] == ["turn_cancelled"]
+
+
+def test_reused_turn_id_must_keep_its_original_index() -> None:
+    session = ConversationSession.for_test()
+    original = session.start_turn("t1", 0)
+
+    assert session.start_turn("t1", 0) is original
+    with pytest.raises(ProtocolError, match="turn_index_mismatch"):
+        session.start_turn("t1", 1)
+
+
+def test_session_enforces_task1_turn_order_and_limit() -> None:
+    session = ConversationSession.for_test()
+
+    with pytest.raises(ProtocolError, match="turn_index_conflict"):
+        session.start_turn("t1", 1)
+
+    for index in range(4):
+        turn = session.start_turn(f"t{index}", index)
+        session.commit_turn(turn.turn_id, question="q", answer="a")
+
+    with pytest.raises(ProtocolError, match="turn_limit_exceeded"):
+        session.start_turn("t4", 4)
 
 
 def test_cancel_closes_provider_and_joins_worker_within_two_seconds() -> None:
@@ -181,7 +234,7 @@ def test_context_uses_only_three_committed_turns_and_marks_partial_answer() -> N
 def test_cancelled_partial_answer_is_committed_as_interrupted_context(monkeypatch) -> None:
     worker_started = threading.Event()
 
-    def cancelled_run(question, history, cancel_event, audio_queue):
+    def cancelled_run(question, history, cancel_event, audio_queue, **kwargs):
         worker_started.set()
         cancel_event.wait()
         raise TurnCancelled("partial")
@@ -301,6 +354,41 @@ def test_run_turn_bounds_answer_while_consuming_llm_chunks(monkeypatch) -> None:
     assert len(result.answer) == 4096
 
 
+def test_run_turn_applies_session_answer_limit_before_tts(monkeypatch) -> None:
+    cancel_event = threading.Event()
+    audio = BoundedAudioQueue(max_bytes=16, cancel_event=cancel_event)
+    synthesized: list[tuple[list[str], str]] = []
+    monkeypatch.setattr(
+        conversation_service,
+        "retrieve_references",
+        lambda question, top_k: ([{"source_title": "s", "snippet": "x"}], 1.0),
+    )
+    monkeypatch.setattr(
+        conversation_service,
+        "stream_answer_text",
+        lambda question, refs: iter(["answer-long"]),
+    )
+    monkeypatch.setattr(conversation_service, "realtime_tts_health", lambda: False)
+
+    def synthesize(segments, answer):
+        synthesized.append((list(segments), answer))
+        yield b"audio"
+
+    monkeypatch.setattr(conversation_service, "_stream_answer_audio", synthesize)
+
+    result = conversation_service.run_turn(
+        "question",
+        [],
+        cancel_event,
+        audio,
+        answer_chars=6,
+    )
+
+    assert result.answer == "answer"
+    assert result.answer_truncated
+    assert synthesized == [(["answer"], "answer")]
+
+
 def test_run_turn_checks_cancel_before_requesting_each_llm_chunk(monkeypatch) -> None:
     cancel_event = threading.Event()
     audio = BoundedAudioQueue(max_bytes=16, cancel_event=cancel_event)
@@ -407,7 +495,7 @@ def test_owned_worker_preserves_question_and_answer_truncation_status(monkeypatc
     monkeypatch.setattr(
         conversation_service,
         "run_turn",
-        lambda question, history, cancel_event, audio_queue: TurnRunResult(
+        lambda question, history, cancel_event, audio_queue, **kwargs: TurnRunResult(
             answer="answer-", answer_truncated=True
         ),
     )

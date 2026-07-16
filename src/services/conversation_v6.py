@@ -9,6 +9,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.models.conversation_v6 import (
+    ConversationLimits,
+    MAX_TURNS,
+    ProtocolError,
     ServerEvent,
     TurnStateMachine,
     TurnTransition,
@@ -114,6 +117,7 @@ class ConversationSession:
         self._worker = worker
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="conversation-v6")
         self._turns: dict[str, ConversationTurn] = {}
+        self._limits = ConversationLimits()
         self._context: list[dict[str, Any]] = []
         self._lock = threading.RLock()
         self.event_log: list[ServerEvent] = []
@@ -131,7 +135,11 @@ class ConversationSession:
         with self._lock:
             existing = self._turns.get(turn_id)
             if existing is not None:
+                if existing.turn_index != turn_index:
+                    raise ProtocolError("turn_index_mismatch")
                 return existing
+            if self._limits.turn_count >= MAX_TURNS:
+                raise ProtocolError("turn_limit_exceeded")
             if any(turn.status not in {"committed", "cancelled"} for turn in self._turns.values()):
                 raise RuntimeError("active_turn_exists")
             cancel_event = threading.Event()
@@ -140,6 +148,7 @@ class ConversationSession:
                 turn_id,
                 turn_index,
                 conversation_id=self.conversation_id,
+                limits=self._limits,
             )
             state_machine.on_turn_start()
             turn = ConversationTurn(turn_id, turn_index, cancel_event, audio, state_machine)
@@ -265,7 +274,13 @@ class ConversationSession:
         history: list[dict[str, Any]],
     ) -> TurnRunResult:
         try:
-            result = run_turn(turn.question, history, turn.cancel_event, turn.audio)
+            result = run_turn(
+                turn.question,
+                history,
+                turn.cancel_event,
+                turn.audio,
+                answer_chars=self._answer_chars,
+            )
         except TurnCancelled as exc:
             turn.answer, turn.answer_truncated = _truncate_text(
                 exc.partial_answer, self._answer_chars
@@ -330,6 +345,8 @@ def run_turn(
     history: list[Mapping[str, Any]],
     cancel_event: threading.Event,
     audio_queue: BoundedAudioQueue,
+    *,
+    answer_chars: int | None = None,
 ) -> TurnRunResult:
     """Adapt the v5 retrieval, LLM, and TTS providers to an owned v6 turn."""
     answer_parts: list[str] = []
@@ -338,7 +355,9 @@ def run_turn(
     _check_cancel(cancel_event, answer_parts)
     threshold = settings.min_top_score if is_buddhist_question(question) else settings.min_top_score_no_keyword
     if not references or top_score < threshold:
-        answer = "Unable to answer from the available references."
+        answer = "佛说不可曰"
+        limit = settings.conversation_v6_answer_chars if answer_chars is None else answer_chars
+        answer, answer_truncated = _truncate_text(answer, limit)
         checked_segments = _cancel_checked_segments([answer], cancel_event, [answer])
         audio_stream = _stream_answer_audio(checked_segments, answer)  # type: ignore[arg-type]
         _register_close_hook(audio_queue, audio_stream)
@@ -348,13 +367,16 @@ def run_turn(
             exc.partial_answer = answer
             raise
         audio_queue.finish()
-        return TurnRunResult(answer=answer)
+        return TurnRunResult(answer=answer, answer_truncated=answer_truncated)
 
     llm_question = _question_with_history(question, history[-3:])
     llm_stream = stream_answer_text(llm_question, references)
     _register_close_hook(audio_queue, llm_stream)
     llm_iterator = iter(llm_stream)
-    assembly = {"chars": 0, "pending": "", "truncated": False}
+    limit = settings.conversation_v6_answer_chars if answer_chars is None else answer_chars
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise ValueError("text_limit_must_be_nonnegative")
+    assembly = {"chars": 0, "pending": "", "truncated": False, "limit": limit}
     segments = _iter_llm_segments(llm_iterator, cancel_event, answer_parts, assembly)
     try:
         if realtime_tts_health():
@@ -398,7 +420,7 @@ def _iter_llm_segments(
             if not chunk:
                 continue
             answer_chars = int(assembly["chars"])
-            remaining_chars = settings.conversation_v6_answer_chars - answer_chars
+            remaining_chars = int(assembly["limit"]) - answer_chars
             if remaining_chars <= 0:
                 assembly["truncated"] = True
                 break

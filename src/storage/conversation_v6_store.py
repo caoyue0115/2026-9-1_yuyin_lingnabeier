@@ -60,7 +60,9 @@ class BoundedAudioQueue:
             if len(chunk) > self._max_bytes:
                 raise ValueError("audio_chunk_exceeds_queue_capacity")
             while self._byte_count + len(chunk) > self._max_bytes:
-                self._condition.wait()
+                # threading.Event cannot notify a separate Condition, so use a
+                # short bounded wait to observe direct cancellation promptly.
+                self._condition.wait(timeout=0.05)
                 self._raise_if_cancelled()
             self._raise_if_cancelled()
             if self._finished:
