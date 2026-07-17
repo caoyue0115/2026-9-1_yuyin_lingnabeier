@@ -14,6 +14,17 @@ SKILL_DIR = ROOT / ".agents" / "skills" / "religion-v6-n16r8-ota-release"
 
 
 class RepoOtaSkillTests(unittest.TestCase):
+    def test_skill_requires_an_explicit_user_ota_request(self) -> None:
+        skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        frontmatter = skill.split("---", 2)[1].lower()
+        body = skill.split("---", 2)[2].lower()
+
+        self.assertIn("only when the user explicitly requests", frontmatter)
+        self.assertIn("do not use for ordinary", frontmatter)
+        self.assertIn("## activation gate", body)
+        self.assertIn("do not infer ota intent", body)
+        self.assertIn("prior ota authorization does not carry forward", body)
+
     def test_skill_uses_only_current_v1_0_release_sources(self) -> None:
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
 
