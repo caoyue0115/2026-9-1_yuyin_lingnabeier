@@ -1,6 +1,6 @@
 ---
 name: religion-v6-n16r8-ota-release
-description: Use when preparing, enabling, validating, disabling, or rolling back the authorized ESP-VoCat V1.0 ESP32-S3 N16R8 single-device OTA canary in this repository.
+description: Use only when the user explicitly requests an OTA operation for the authorized ESP-VoCat V1.0 ESP32-S3 N16R8 single-device canary. Do not use for ordinary firmware, build, flash, server, network, audio, or debugging tasks.
 ---
 
 # V6 N16R8 OTA Release
@@ -8,6 +8,12 @@ description: Use when preparing, enabling, validating, disabling, or rolling bac
 ## Core Principle
 
 Treat OTA as a gated single-device release, not as a normal firmware upload. Keep repository defaults inert and inject release-only values only into an isolated temporary build copy.
+
+## Activation Gate
+
+Activate this skill only when the current user request explicitly asks for OTA, over-the-air upgrade, OTA release, OTA validation, OTA disablement, or OTA rollback. Do not infer OTA intent from the board profile, firmware version, server work, previous OTA discussions, or availability of OTA tooling. Prior OTA authorization does not carry forward to later requests.
+
+For compile, flash, serial-log, server, Wi-Fi, audio, firmware, or debugging work without explicit OTA wording, do not use this skill. Follow the repository's ordinary workflow instead.
 
 ## Read First
 
