@@ -554,11 +554,6 @@ static size_t audio_jitter_level_locked(void)
     return s_audio_out_state.jitter_total_in - s_audio_out_state.jitter_total_out;
 }
 
-static bool audio_jitter_tail_within_tolerance_locked(void)
-{
-    return audio_jitter_level_locked() <= DEMO_REALTIME_AUDIO_CLOSE_TAIL_TOLERANCE_BYTES;
-}
-
 static void audio_jitter_update_level_stats_locked(size_t level)
 {
     if (!s_audio_out_state.jitter_playback_started) {
@@ -618,16 +613,18 @@ static void audio_stream_task(void *arg)
 
         size_t item_size = 0;
         const int64_t receive_start_us = esp_timer_get_time();
-        uint8_t *item = (uint8_t *)xRingbufferReceive(s_audio_out_state.jitter_ringbuf,
-                                                      &item_size,
-                                                      pdMS_TO_TICKS(20));
+        uint8_t *item = (uint8_t *)xRingbufferReceiveUpTo(
+            s_audio_out_state.jitter_ringbuf,
+            &item_size,
+            pdMS_TO_TICKS(20),
+            DEMO_REALTIME_AUDIO_JITTER_READ_BYTES);
         if (item == NULL) {
             const int64_t receive_elapsed_us = esp_timer_get_time() - receive_start_us;
             esp_err_t lock_ret = audio_out_lock();
             bool should_exit = false;
             if (lock_ret == ESP_OK) {
                 should_exit = !s_audio_out_state.stream_task_started &&
-                              audio_jitter_level_locked() == 0;
+                              audio_jitter_level_locked() <= scratch_len;
                 if (!should_exit && s_audio_out_state.jitter_playback_started) {
                     s_audio_out_state.jitter_underrun_count++;
                     s_audio_out_state.jitter_underrun_us += receive_elapsed_us;
@@ -730,7 +727,6 @@ done:
         underrun_us = s_audio_out_state.jitter_underrun_us;
         prebuffer_wait_us = s_audio_out_state.jitter_prebuffer_wait_us;
         task_result = s_audio_out_state.stream_task_result;
-        s_audio_out_state.stream_task_done = true;
         audio_out_unlock();
     }
     ESP_LOGI(TAG,
@@ -745,7 +741,11 @@ done:
              esp_err_to_name(task_result));
     audio_out_log_stack_watermark("audio_stream_stack", 4096);
     audio_out_log_heap_snapshot("audio_stream_task_exit");
-    vTaskDelete(NULL);
+    if (audio_out_lock() == ESP_OK) {
+        s_audio_out_state.stream_task_done = true;
+        audio_out_unlock();
+    }
+    vTaskSuspend(NULL);
 }
 
 esp_err_t audio_out_open_pcm_stream(uint32_t sample_rate,
@@ -906,7 +906,7 @@ esp_err_t audio_out_write_pcm_chunk_buffered(const uint8_t *pcm_bytes,
     if (xRingbufferSend(s_audio_out_state.jitter_ringbuf,
                         (void *)pcm_bytes,
                         pcm_bytes_size,
-                        pdMS_TO_TICKS(DEMO_AUDIO_PLAY_WRITE_TIMEOUT_MS)) != pdTRUE) {
+                        portMAX_DELAY) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
 
@@ -938,6 +938,7 @@ esp_err_t audio_out_close_pcm_stream_with_metrics(audio_out_jitter_metrics_t *me
         audio_out_unlock();
         TickType_t last_log_tick = 0;
         const int64_t wait_start_us = esp_timer_get_time();
+        bool timeout_logged = false;
         while (true) {
             ret = audio_out_lock();
             if (ret != ESP_OK) {
@@ -950,38 +951,24 @@ esp_err_t audio_out_close_pcm_stream_with_metrics(audio_out_jitter_metrics_t *me
             const uint32_t underrun_count = s_audio_out_state.jitter_underrun_count;
             const int64_t underrun_us = s_audio_out_state.jitter_underrun_us;
             const bool playback_started = s_audio_out_state.jitter_playback_started;
-            const bool tail_within_tolerance =
-                playback_started && audio_jitter_tail_within_tolerance_locked();
             TaskHandle_t stream_task = s_audio_out_state.stream_task;
             audio_out_unlock();
             if (stream_task_done) {
-                break;
-            }
-            if (tail_within_tolerance) {
-                ESP_LOGW(TAG,
-                         "Realtime jitter close accepting tail remainder total_in=%u total_out=%u level=%u tolerance=%u",
-                         (unsigned)total_in,
-                         (unsigned)total_out,
-                         (unsigned)level,
-                         (unsigned)DEMO_REALTIME_AUDIO_CLOSE_TAIL_TOLERANCE_BYTES);
-                ret = audio_out_lock();
-                if (ret != ESP_OK) {
-                    return ret;
-                }
-                s_audio_out_state.stream_task_result = ESP_OK;
                 if (stream_task != NULL) {
+                    while (eTaskGetState(stream_task) != eSuspended) {
+                        taskYIELD();
+                    }
                     vTaskDelete(stream_task);
                 }
-                s_audio_out_state.stream_task = NULL;
-                s_audio_out_state.stream_task_done = true;
-                audio_out_unlock();
                 break;
             }
             const int64_t wait_elapsed_us = esp_timer_get_time() - wait_start_us;
             if (DEMO_REALTIME_AUDIO_CLOSE_WAIT_TIMEOUT_MS > 0 &&
+                !timeout_logged &&
                 wait_elapsed_us >= ((int64_t)DEMO_REALTIME_AUDIO_CLOSE_WAIT_TIMEOUT_MS * 1000)) {
+                timeout_logged = true;
                 ESP_LOGE(TAG,
-                         "Realtime jitter close timeout forcing task delete total_in=%u total_out=%u level=%u playback_started=%d underrun_count=%u underrun_ms=%.1f wait_ms=%.1f",
+                         "Realtime jitter close timeout; continuing safe wait total_in=%u total_out=%u level=%u playback_started=%d underrun_count=%u underrun_ms=%.1f wait_ms=%.1f",
                          (unsigned)total_in,
                          (unsigned)total_out,
                          (unsigned)level,
@@ -989,18 +976,6 @@ esp_err_t audio_out_close_pcm_stream_with_metrics(audio_out_jitter_metrics_t *me
                          (unsigned)underrun_count,
                          (double)underrun_us / 1000.0,
                          (double)wait_elapsed_us / 1000.0);
-                if (stream_task != NULL) {
-                    vTaskDelete(stream_task);
-                }
-                ret = audio_out_lock();
-                if (ret != ESP_OK) {
-                    return ret;
-                }
-                s_audio_out_state.stream_task = NULL;
-                s_audio_out_state.stream_task_done = true;
-                s_audio_out_state.stream_task_result = ESP_ERR_TIMEOUT;
-                audio_out_unlock();
-                break;
             }
             const TickType_t log_interval_ticks =
                 pdMS_TO_TICKS(DEMO_REALTIME_AUDIO_CLOSE_WAIT_LOG_MS);

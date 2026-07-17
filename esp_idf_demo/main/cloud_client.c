@@ -3030,6 +3030,15 @@ esp_err_t cloud_client_stream_realtime_audio_cancellable(
     free(frame_state);
     free(audio_headers);
     cloud_log_heap_snapshot("stream_cleanup_after");
+    ESP_LOGI(TAG,
+             "Realtime audio stream finished stream_result=%s decode_result=%s playback_result=%s format=%s chunks=%u packets=%u audio_bytes=%u",
+             esp_err_to_name(stream_result),
+             esp_err_to_name(runtime.decode_result),
+             esp_err_to_name(runtime.playback_result),
+             audio_format == CLOUD_AUDIO_FORMAT_OPUS ? "opus" : "pcm",
+             metrics != NULL ? (unsigned)metrics->chunk_count : 0,
+             metrics != NULL ? (unsigned)metrics->packet_count : 0,
+             metrics != NULL ? (unsigned)metrics->total_audio_bytes : 0);
 
     if (stream_result == DEMO_CLOUD_ERR_AUDIO_CANCELLED) {
         return stream_result;

@@ -536,6 +536,7 @@ class EspAssetTests(unittest.TestCase):
             "PROMPT_BOOT_BELL = 10",
             "PROMPT_NETWORK_CONNECTED = 20",
             "PROMPT_CONVERSATION_DONE = 30",
+            "PROMPT_FOLLOWUP_CUE = 35",
             "PROMPT_SPEAK = 40",
             "PROMPT_NETWORK_REQUIRED = 50",
             "PROMPT_TECHNICAL_ERROR = 60",
@@ -556,6 +557,7 @@ class EspAssetTests(unittest.TestCase):
         for asset in (
             "network_required_1.pcm",
             "conversation_done_1.pcm",
+            "followup_bell_1.pcm",
             "intro_1.pcm",
             "boot_amitabha_1.pcm",
         ):
@@ -566,6 +568,7 @@ class EspAssetTests(unittest.TestCase):
             "intro_1.pcm": (48_000, "b9cbe3581350a0a168b57d3c2b6c887099ae11c4b070fb741368cc5eb78cb424"),
             "network_required_1.pcm": (61_440, "672cf8483a72cb39b60fbe385725ff1a06b81d63ae0da7e818b3821268c53cd8"),
             "conversation_done_1.pcm": (46_080, "135a2c19a79f4cb9b89b7d962e439a4609ca2be275195ce45f19edbd4973aef0"),
+            "followup_bell_1.pcm": (27_200, "88d1d0bbad225cf5c0fea00cff23dc037172f717cc6a95d9c579b4f23de2d8fb"),
         }
         for name, (size, digest) in expected.items():
             payload = (ESP_DIR / "spiffs" / name).read_bytes()
@@ -574,6 +577,8 @@ class EspAssetTests(unittest.TestCase):
             self.assertEqual(0, len(payload) % 2)
             self.assertNotEqual(b"RIFF", payload[:4])
             self.assertEqual(digest, hashlib.sha256(payload).hexdigest())
+            if name == "followup_bell_1.pcm":
+                self.assertEqual(bytes(3_200), payload[-3_200:])
 
     def test_v7_wifi_review_regressions_are_guarded(self) -> None:
         component = ESP_DIR / "components" / "esp-wifi-connect"

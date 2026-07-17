@@ -28,7 +28,13 @@ from src.models.conversation_v6 import (
     turn_result_event,
 )
 from src.providers.asr import transcribe_wav_result
-from src.providers.opus import OpusError, decode_framed_opus_to_pcm
+from src.providers.opus import (
+    OpusError,
+    decode_framed_opus_to_pcm,
+    encode_pcm_stream_to_framed_opus,
+    opus_available,
+    pack_framed_v1_packets,
+)
 from src.services.conversation_v6 import ConversationSession
 from src.settings import settings
 from src.storage.files import save_pcm_as_wav
@@ -118,6 +124,7 @@ class ConversationRegistry:
         token: str,
         *,
         device_id: str,
+        accepted_formats: str | None = None,
     ) -> StreamingResponse:
         with self._lock:
             session = self._sessions.get(conversation_id)
@@ -136,17 +143,52 @@ class ConversationRegistry:
         if status == 410:
             raise HTTPException(status_code=410, detail="audio_revoked")
         turn = session._require_turn(turn_id)
+        requested_formats = {
+            part.strip().lower()
+            for part in (accepted_formats or "").split(",")
+            if part.strip()
+        }
+        body = iter(turn.audio)
+        headers = {"Cache-Control": "no-store"}
+        if (
+            settings.realtime_audio_enable_opus
+            and "opus" in requested_formats
+            and opus_available()
+        ):
+            body = pack_framed_v1_packets(
+                encode_pcm_stream_to_framed_opus(
+                    body,
+                    sample_rate=settings.realtime_audio_opus_sample_rate,
+                    channels=settings.realtime_audio_opus_channels,
+                    frame_duration_ms=settings.realtime_audio_opus_frame_duration_ms,
+                    bitrate=settings.realtime_audio_opus_bitrate,
+                )
+            )
+            headers.update(
+                {
+                    "X-Audio-Format": "opus",
+                    "X-Audio-Packetization": "framed-v1",
+                    "X-Opus-Sample-Rate": str(settings.realtime_audio_opus_sample_rate),
+                    "X-Opus-Channels": str(settings.realtime_audio_opus_channels),
+                    "X-Opus-Frame-Duration-Ms": str(
+                        settings.realtime_audio_opus_frame_duration_ms
+                    ),
+                }
+            )
+        else:
+            headers.update(
+                {
+                    "X-Audio-Format": "pcm",
+                    "X-Audio-Sample-Rate": "16000",
+                    "X-Audio-Sample-Width": "16",
+                    "X-Audio-Channels": "1",
+                    "X-Audio-Endian": "little",
+                }
+            )
         return StreamingResponse(
-            iter(turn.audio),
+            body,
             media_type="application/octet-stream",
-            headers={
-                "X-Audio-Format": "pcm",
-                "X-Audio-Sample-Rate": "16000",
-                "X-Audio-Sample-Width": "16",
-                "X-Audio-Channels": "1",
-                "X-Audio-Endian": "little",
-                "Cache-Control": "no-store",
-            },
+            headers=headers,
         )
 
     def reset(self) -> None:
@@ -459,10 +501,12 @@ def conversation_audio(
     turn_id: str,
     token: str,
     x_device_id: str = Header(default=""),
+    x_accept_audio_format: str | None = Header(default=None),
 ) -> StreamingResponse:
     return conversation_registry.open_audio(
         conversation_id,
         turn_id,
         token,
         device_id=x_device_id,
+        accepted_formats=x_accept_audio_format,
     )

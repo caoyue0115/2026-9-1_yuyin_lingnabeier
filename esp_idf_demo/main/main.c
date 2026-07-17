@@ -488,8 +488,13 @@ static esp_err_t run_v6_conversation(app_state_t *state)
         size_t speech_prefix_bytes = 0;
         audio_in_wait_metrics_t wait_metrics = {0};
         app_set_state(state, APP_STATE_WAITING_SPEECH);
+        const uint32_t start_threshold =
+            controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW
+                ? DEMO_FOLLOWUP_VAD_START_THRESHOLD
+                : DEMO_RECORD_VAD_START_THRESHOLD;
         ret = audio_in_wait_for_speech_start(&speech_prefix,
                                              &speech_prefix_bytes,
+                                             start_threshold,
                                              &wait_metrics);
         if (ret == DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT) {
             conversation_transition_t timeout = conversation_controller_handle(
@@ -507,6 +512,18 @@ static esp_err_t run_v6_conversation(app_state_t *state)
                                                      CONVERSATION_EVENT_PROMPT_DONE,
                                                      esp_timer_get_time() / 1000);
                 continue;
+            }
+            if (timeout.action != CONVERSATION_ACTION_PLAY_DONE) {
+                const int64_t now_ms = esp_timer_get_time() / 1000;
+                if (timeout.deadline_ms > now_ms) {
+                    vTaskDelay(pdMS_TO_TICKS((uint32_t)(timeout.deadline_ms - now_ms)));
+                }
+                timeout = conversation_controller_handle(
+                    &controller, CONVERSATION_EVENT_TIMER,
+                    esp_timer_get_time() / 1000);
+                if (timeout.action != CONVERSATION_ACTION_PLAY_DONE) {
+                    goto technical_close;
+                }
             }
             ret = app_v6_play_prompt(PROMPT_CONVERSATION_DONE, "conversation:done");
             (void)conversation_controller_handle(&controller,
@@ -595,11 +612,9 @@ static esp_err_t run_v6_conversation(app_state_t *state)
         playback_session_t *playback = NULL;
         ret = playback_session_start(result.audio_stream_url, &playback);
         if (ret == ESP_OK) {
-            ret = playback_session_join(playback,
-                                        pdMS_TO_TICKS(DEMO_REALTIME_SESSION_TIMEOUT_MS));
-            if (ret == ESP_ERR_TIMEOUT) {
-                (void)playback_session_cancel(playback, ESP_ERR_TIMEOUT);
-                ret = playback_session_join(playback, portMAX_DELAY);
+            esp_err_t join_ret = playback_session_join(playback, portMAX_DELAY, &ret);
+            if (join_ret != ESP_OK) {
+                ret = join_ret;
             }
         }
         if (ret != ESP_OK) {
@@ -613,6 +628,25 @@ static esp_err_t run_v6_conversation(app_state_t *state)
         conversation_transition_t played = conversation_controller_handle(
             &controller, CONVERSATION_EVENT_PLAYBACK_DONE,
             playback_done_ms);
+        if (played.action == CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE) {
+            char followup_cue_key[64];
+            snprintf(followup_cue_key,
+                     sizeof(followup_cue_key),
+                     "conversation:followup-cue:%u",
+                     (unsigned)(played.turn_index + 1));
+            app_set_state(state, APP_STATE_PLAYING_PROMPT);
+            ret = app_v6_play_prompt(PROMPT_FOLLOWUP_CUE, followup_cue_key);
+            if (ret != ESP_OK) {
+                goto technical_close;
+            }
+            conversation_transition_t cue_done = conversation_controller_handle(
+                &controller, CONVERSATION_EVENT_PROMPT_DONE,
+                esp_timer_get_time() / 1000);
+            if (cue_done.action != CONVERSATION_ACTION_LISTEN_FOLLOWUP) {
+                goto technical_close;
+            }
+            continue;
+        }
         if (played.state == CONVERSATION_STATE_ENDING) {
             const int64_t now_ms = esp_timer_get_time() / 1000;
             if (played.deadline_ms > now_ms) {
@@ -823,7 +857,10 @@ static esp_err_t __attribute__((unused)) run_trigger_pipeline(app_state_t *state
         app_log_stage_start("waiting_speech");
         stage_start_us = esp_timer_get_time();
         for (int attempt = 0; attempt <= DEMO_MIC_INIT_RETRY_COUNT; ++attempt) {
-            ret = audio_in_wait_for_speech_start(&speech_prefix, &speech_prefix_bytes, &wait_metrics);
+            ret = audio_in_wait_for_speech_start(&speech_prefix,
+                                                 &speech_prefix_bytes,
+                                                 DEMO_RECORD_VAD_START_THRESHOLD,
+                                                 &wait_metrics);
             if (ret == ESP_OK || ret == DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT) {
                 break;
             }

@@ -20,6 +20,8 @@ extern const uint8_t prompt_network_required_start[] asm("_binary_network_requir
 extern const uint8_t prompt_network_required_end[] asm("_binary_network_required_1_pcm_end");
 extern const uint8_t prompt_conversation_done_start[] asm("_binary_conversation_done_1_pcm_start");
 extern const uint8_t prompt_conversation_done_end[] asm("_binary_conversation_done_1_pcm_end");
+extern const uint8_t prompt_followup_bell_start[] asm("_binary_followup_bell_1_pcm_start");
+extern const uint8_t prompt_followup_bell_end[] asm("_binary_followup_bell_1_pcm_end");
 
 static const char *TAG = "prompt_arbiter";
 
@@ -76,6 +78,10 @@ static esp_err_t prompt_arbiter_play(prompt_id_t id)
     case PROMPT_CONVERSATION_DONE:
         start = prompt_conversation_done_start;
         end = prompt_conversation_done_end;
+        break;
+    case PROMPT_FOLLOWUP_CUE:
+        start = prompt_followup_bell_start;
+        end = prompt_followup_bell_end;
         break;
     case PROMPT_SPEAK:
         return audio_out_play_pcm_file(DEMO_RECORD_PROMPT_PATH,

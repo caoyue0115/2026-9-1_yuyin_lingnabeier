@@ -6,6 +6,7 @@
 
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "esp_log.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -13,6 +14,8 @@
 #include <string.h>
 
 #define PLAYBACK_SESSION_DONE_BIT BIT0
+
+static const char *TAG = "playback_session";
 
 struct playback_session {
     char url[DEMO_CLOUD_AUDIO_URL_MAX_LEN];
@@ -44,16 +47,22 @@ static void playback_session_owner(void *arg)
                                               DEMO_AUDIO_BITS_PER_SAMPLE);
     if (ret == ESP_OK) {
         cloud_realtime_audio_metrics_t metrics = {0};
-        ret = cloud_client_stream_realtime_audio_cancellable(
+        const esp_err_t stream_ret = cloud_client_stream_realtime_audio_cancellable(
             session->url,
             playback_session_pcm_sink,
             session,
             &metrics,
             &session->cancel_requested);
         const esp_err_t close_ret = audio_out_close_pcm_stream();
+        ret = stream_ret;
         if (ret == ESP_OK) {
             ret = close_ret;
         }
+        ESP_LOGI(TAG,
+                 "playback_owner_complete stream_result=%s close_result=%s final_result=%s",
+                 esp_err_to_name(stream_ret),
+                 esp_err_to_name(close_ret),
+                 esp_err_to_name(ret));
     }
     session->result = ret;
     xEventGroupSetBits(session->events, PLAYBACK_SESSION_DONE_BIT);
@@ -105,9 +114,11 @@ esp_err_t playback_session_cancel(playback_session_t *session, int reason)
     return ESP_OK;
 }
 
-esp_err_t playback_session_join(playback_session_t *session, TickType_t timeout)
+esp_err_t playback_session_join(playback_session_t *session,
+                                TickType_t timeout,
+                                esp_err_t *playback_result)
 {
-    if (session == NULL) {
+    if (session == NULL || playback_result == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     const EventBits_t bits = xEventGroupWaitBits(session->events,
@@ -132,5 +143,6 @@ esp_err_t playback_session_join(playback_session_t *session, TickType_t timeout)
     }
     vEventGroupDelete(session->events);
     free(session);
-    return result;
+    *playback_result = result;
+    return ESP_OK;
 }

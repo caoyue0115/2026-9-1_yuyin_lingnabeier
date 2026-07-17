@@ -33,6 +33,7 @@ esp_err_t audio_in_probe(void);
 // prefix buffer and must free() it. On timeout no audio is retained.
 esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
                                          size_t *out_speech_prefix_bytes,
+                                         uint32_t start_threshold,
                                          audio_in_wait_metrics_t *out_metrics);
 
 // Continues capture from an already-open microphone after speech start was detected.

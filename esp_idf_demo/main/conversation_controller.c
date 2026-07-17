@@ -97,6 +97,13 @@ conversation_transition_t conversation_controller_handle(conversation_controller
                 controller->deadline_ms = now_ms + CONVERSATION_FINAL_DONE_DELAY_MS;
                 return make_transition(controller, CONVERSATION_ACTION_NONE);
             }
+            controller->state = CONVERSATION_STATE_FOLLOWUP_CUE;
+            controller->deadline_ms = 0;
+            return make_transition(controller, CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE);
+        }
+        break;
+    case CONVERSATION_STATE_FOLLOWUP_CUE:
+        if (event == CONVERSATION_EVENT_PROMPT_DONE) {
             controller->state = CONVERSATION_STATE_FOLLOWUP_WINDOW;
             controller->deadline_ms = now_ms + CONVERSATION_FOLLOWUP_START_TIMEOUT_MS;
             return make_transition(controller, CONVERSATION_ACTION_LISTEN_FOLLOWUP);
@@ -113,8 +120,9 @@ conversation_transition_t conversation_controller_handle(conversation_controller
         if (event == CONVERSATION_EVENT_SPEECH_TIMEOUT ||
             (event == CONVERSATION_EVENT_TIMER && now_ms >= controller->deadline_ms)) {
             controller->state = CONVERSATION_STATE_ENDING;
-            controller->done_prompt_issued = true;
-            return make_transition(controller, CONVERSATION_ACTION_PLAY_DONE);
+            controller->done_prompt_issued = false;
+            controller->deadline_ms = now_ms + CONVERSATION_FINAL_DONE_DELAY_MS;
+            return make_transition(controller, CONVERSATION_ACTION_NONE);
         }
         break;
     case CONVERSATION_STATE_ENDING:

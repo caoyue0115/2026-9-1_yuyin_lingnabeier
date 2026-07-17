@@ -246,6 +246,43 @@ def test_audio_stream_declares_exact_pcm_format() -> None:
     assert response.headers["x-audio-endian"] == "little"
 
 
+def test_audio_stream_returns_framed_opus_when_requested_and_enabled(monkeypatch) -> None:
+    session = realtime_v6.conversation_registry.create(device_id="board-1")
+    turn = session.start_turn("turn-0", 0)
+    turn.audio.put(b"\x01\x00\x02\x00")
+    turn.audio.finish()
+    token = realtime_v6.conversation_registry.issue_audio_token(
+        session.conversation_id,
+        "turn-0",
+        device_id="board-1",
+    )
+    monkeypatch.setattr(realtime_v6.settings, "realtime_audio_enable_opus", True)
+    monkeypatch.setattr(realtime_v6, "opus_available", lambda: True)
+    monkeypatch.setattr(
+        realtime_v6,
+        "encode_pcm_stream_to_framed_opus",
+        lambda chunks, **_kwargs: iter([b"\x00\x01x"]),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/v6/realtime/conversations/{session.conversation_id}/turns/turn-0/audio",
+            params={"token": token},
+            headers={
+                "x-device-id": "board-1",
+                "x-accept-audio-format": "opus,pcm",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"\x00\x00\x00\x00\x00\x00\x00\x03\x00\x01x"
+    assert response.headers["x-audio-format"] == "opus"
+    assert response.headers["x-audio-packetization"] == "framed-v1"
+    assert response.headers["x-opus-sample-rate"] == "16000"
+    assert response.headers["x-opus-channels"] == "1"
+    assert response.headers["x-opus-frame-duration-ms"] == "60"
+
+
 def test_two_missing_pong_intervals_close_with_keepalive_timeout() -> None:
     class FakeWebSocket:
         def __init__(self) -> None:

@@ -196,16 +196,21 @@ static void v6_ws_event(void *handler_args,
     }
     if (event_id == WEBSOCKET_EVENT_DISCONNECTED || event_id == WEBSOCKET_EVENT_CLOSED) {
         conversation->disconnected = true;
+        ESP_LOGW(TAG, "v6 websocket disconnected event_id=%ld", (long)event_id);
         return;
     }
     if (event_id == WEBSOCKET_EVENT_ERROR) {
         conversation->error_received = true;
+        ESP_LOGE(TAG, "v6 websocket error");
         return;
     }
     if (event_id != WEBSOCKET_EVENT_DATA || event_data == NULL) {
         return;
     }
     esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
+    if (data->op_code != 0x01 && data->op_code != 0x00) {
+        return;
+    }
     if (data->data_ptr == NULL || data->data_len <= 0 || data->payload_len <= 0) {
         return;
     }
@@ -511,11 +516,28 @@ esp_err_t cloud_conversation_complete_playback(cloud_conversation_t *conversatio
                                  conversation->conversation_id, conversation->turn_id,
                                  (unsigned)conversation->turn_index);
     conversation->playback_complete = false;
-    if (written <= 0 || (size_t)written >= sizeof(json) ||
-        v6_send_text(conversation, json) != written) {
+    ESP_LOGI(TAG,
+             "v6 playback_complete send connected=%d disconnected=%d error_received=%d",
+             esp_websocket_client_is_connected(conversation->client) ? 1 : 0,
+             conversation->disconnected ? 1 : 0,
+             conversation->error_received ? 1 : 0);
+    const int sent = written > 0 && (size_t)written < sizeof(json)
+                         ? v6_send_text(conversation, json)
+                         : -1;
+    if (sent != written) {
+        ESP_LOGE(TAG, "v6 playback_complete send failed written=%d sent=%d",
+                 written, sent);
         return ESP_FAIL;
     }
-    return v6_wait_flag(conversation, &conversation->playback_complete, V6_WAIT_MS);
+    const esp_err_t ret =
+        v6_wait_flag(conversation, &conversation->playback_complete, V6_WAIT_MS);
+    ESP_LOGI(TAG,
+             "v6 playback_complete wait result=%s ack=%d disconnected=%d error_received=%d",
+             esp_err_to_name(ret),
+             conversation->playback_complete ? 1 : 0,
+             conversation->disconnected ? 1 : 0,
+             conversation->error_received ? 1 : 0);
+    return ret;
 }
 
 esp_err_t cloud_conversation_cancel_turn(cloud_conversation_t *conversation, const char *turn_id)
