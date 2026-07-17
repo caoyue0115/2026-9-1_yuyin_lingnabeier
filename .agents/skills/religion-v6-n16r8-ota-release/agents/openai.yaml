@@ -1,0 +1,4 @@
+interface:
+  display_name: "Religion V6 N16R8 OTA Release"
+  short_description: "Prepare and validate single-device ESP-VoCat OTA canaries"
+  default_prompt: "Use $religion-v6-n16r8-ota-release to prepare and validate an ESP-VoCat V1.0 N16R8 OTA canary."
