@@ -211,6 +211,9 @@ class ConversationSession:
     def consume_turn_budget(self, turn_id: str) -> bool:
         return self.turn_budget.consume(turn_id)
 
+    def check_deadline(self) -> None:
+        self._limits.check_deadline(self._limits.now())
+
     def cancel_turn(self, turn_id: str) -> ServerEvent:
         turn = self._require_turn(turn_id)
         with turn._cancel_condition:
@@ -295,9 +298,18 @@ class ConversationSession:
                 for turn_id, turn in self._turns.items()
                 if turn.status not in {"committed", "cancelled", "asr_empty", "technical_error"}
             ]
-        for turn_id in active_ids:
-            self.cancel_turn(turn_id)
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        first_error: BaseException | None = None
+        try:
+            for turn_id in active_ids:
+                try:
+                    self.cancel_turn(turn_id)
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+        finally:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        if first_error is not None:
+            raise first_error
 
     def _run_owned_turn(
         self,

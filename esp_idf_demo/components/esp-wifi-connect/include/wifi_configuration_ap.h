@@ -18,7 +18,7 @@
 
 /**
  * WifiConfigurationAp - WiFi configuration access point
- * 
+ *
  * Creates a WiFi hotspot with a captive portal for configuring WiFi credentials.
  * Note: WiFi driver must be initialized before using this class.
  */
@@ -83,7 +83,7 @@ private:
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
     static void IpEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 #if !CONFIG_IDF_TARGET_ESP32P4
-    static void SmartConfigEventHandler(void* arg, esp_event_base_t event_base, 
+    static void SmartConfigEventHandler(void* arg, esp_event_base_t event_base,
                                       int32_t event_id, void* event_data);
     esp_event_handler_instance_t sc_event_instance_ = nullptr;
 #endif

@@ -172,7 +172,7 @@
 <body>
     <!-- Toast notification -->
     <div class="toast" id="toast"></div>
-    
+
     <!-- Loading overlay -->
     <div class="loading-overlay" id="loadingOverlay">
         <div class="loading-content">
@@ -180,7 +180,7 @@
             <div class="loading-text" data-lang="connecting">Connecting...</div>
         </div>
     </div>
-    
+
     <!-- Language switcher -->
     <div class="language-switch">
         <select id="language" onchange="changeLanguage()">
@@ -224,7 +224,7 @@
             <option value="zh-TW">繁體中文</option>
         </select>
     </div>
-    
+
     <!-- Tabs -->
     <div class="tabs">
         <div class="tab active" onclick="switchTab('wifi')" data-lang="wifi_tab">Wi-Fi Config</div>
@@ -240,7 +240,7 @@
                 <li><span>SSID</span></li>
             </ul>
         </div>
-        
+
         <!-- New Wi-Fi Connection -->
         <div>
             <h3 data-lang="new_wifi">New Wi-Fi</h3>
@@ -268,7 +268,7 @@
             <div>
                 <h3 data-lang="advanced_tab">Advanced</h3>
                 <p class="error" style="color: red; text-align: center;" id="advanced_error"></p>
-                
+
                 <!-- OTA URL -->
                 <p>
                     <label for="ota_url" data-lang="ota_url">Custom OTA URL:</label>
@@ -1094,7 +1094,7 @@
         };
 
         // ========== Helper Functions ==========
-        
+
         /**
          * Get supported language code from browser language
          */
@@ -1117,42 +1117,42 @@
          */
         function changeLanguage() {
             const lang = document.getElementById('language').value;
-            
+
             // Check if language is valid
             if (!translations[lang]) {
                 console.warn(`Unsupported language: ${lang}, defaulting to English`);
                 document.getElementById('language').value = 'en-US';
                 return changeLanguage();
             }
-            
+
             // Set page title
             document.title = translations[lang].title;
-            
+
             // Update text content
             document.querySelectorAll('[data-lang]').forEach(element => {
                 const key = element.getAttribute('data-lang');
                 element.textContent = translations[lang][key];
             });
-            
+
             // Update input values
             document.querySelectorAll('[data-lang-value]').forEach(element => {
                 const key = element.getAttribute('data-lang-value');
                 element.value = translations[lang][key];
             });
-            
+
             // Update AP list text based on 5G support
             const apList = document.getElementById('ap_list');
             if (apList.firstChild) {
                 const selectText = support5G ? translations[lang].select_wifi_5g : translations[lang].select_wifi;
                 apList.firstChild.textContent = selectText;
             }
-            
+
             // Save language preference
             localStorage.setItem('preferred_language', lang);
         }
 
         // ========== Wi-Fi List Management ==========
-        
+
         /**
          * Render saved Wi-Fi list
          */
@@ -1160,11 +1160,11 @@
             const savedListContainer = document.getElementById('saved_list_container');
             const savedList = document.getElementById('saved_list');
             savedList.innerHTML = '';
-            
+
             data.forEach((ssid, index) => {
                 const li = document.createElement('li');
                 let html = `<span>${ssid}</span>`;
-                
+
                 // Only add priority and delete buttons after the first item
                 if (index > 0) {
                     html += ` <span>
@@ -1174,11 +1174,11 @@
                 } else {
                     html += ` <span><button type="button" onclick="deleteItem(this, ${index})">❌</button></span>`;
                 }
-                
+
                 li.innerHTML = html;
                 savedList.appendChild(li);
             });
-            
+
             // Show/hide container based on whether there are saved networks
             savedListContainer.style.display = data.length > 0 ? 'block' : 'none';
         }
@@ -1242,31 +1242,31 @@
                 .then(data => {
                     // Update global 5G support status
                     support5G = data.support_5g;
-                    
+
                     // Use select_wifi_5g if 5G is supported, otherwise use select_wifi
                     const selectText = support5G ? translations[lang].select_wifi_5g : translations[lang].select_wifi;
                     apList.innerHTML = '<p>' + selectText + '</p>';
-                    
+
                     // Iterate through available APs
                     data.aps.forEach(ap => {
                         const link = document.createElement('a');
                         link.href = '#';
                         link.textContent = ap.ssid + ' (' + ap.rssi + ' dBm)';
-                        
+
                         // Add lock icon for secured networks
                         if (ap.authmode === 0) {
                             link.textContent += ' 🌐';
                         } else {
                             link.textContent += ' 🔒';
                         }
-                        
+
                         link.addEventListener('click', () => {
                             ssid.value = ap.ssid;
                         });
-                        
+
                         apList.appendChild(link);
                     });
-                    
+
                     // Refresh AP list every 5 seconds
                     setTimeout(loadAPList, 5000);
                 })
@@ -1278,7 +1278,7 @@
         }
 
         // ========== Form Submission ==========
-        
+
         /**
          * Submit Wi-Fi connection form
          */
@@ -1361,7 +1361,7 @@
         }
 
         // ========== UI Functions ==========
-        
+
         /**
          * Switch between tabs
          */
@@ -1370,15 +1370,15 @@
             document.querySelectorAll('.tab-content').forEach(content => {
                 content.classList.remove('active');
             });
-            
+
             // Remove active class from all tabs
             document.querySelectorAll('.tab').forEach(tab => {
                 tab.classList.remove('active');
             });
-            
+
             // Show selected tab content
             document.getElementById(tabName + '-tab').classList.add('active');
-            
+
             // Activate selected tab
             document.querySelector(`.tab[onclick="switchTab('${tabName}')"]`).classList.add('active');
         }
@@ -1402,7 +1402,7 @@
             try {
                 const response = await fetch('/advanced/config');
                 const data = await response.json();
-                
+
                 if (data.ota_url) {
                     document.getElementById('ota_url').value = data.ota_url;
                 }
@@ -1428,7 +1428,7 @@
         }
 
         // ========== Initialization ==========
-        
+
         /**
          * Initialize page on DOM load
          */
@@ -1436,15 +1436,15 @@
             // Get language setting from URL parameters
             const urlParams = new URLSearchParams(window.location.search);
             const langParam = urlParams.get('lang');
-            
+
             // Get browser language
             const browserLang = navigator.language || navigator.userLanguage;
-            
+
             // Priority: URL parameter > local storage > browser language setting
-            const savedLang = langParam || 
-                             localStorage.getItem('preferred_language') || 
+            const savedLang = langParam ||
+                             localStorage.getItem('preferred_language') ||
                              getSupportedLanguage(browserLang);
-            
+
             document.getElementById('language').value = savedLang;
             changeLanguage();
             loadSavedList();

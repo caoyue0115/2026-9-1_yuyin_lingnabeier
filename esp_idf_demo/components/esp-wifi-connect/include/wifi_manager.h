@@ -1,19 +1,19 @@
 /*
  * WiFi Manager - Unified WiFi connection management
- * 
+ *
  * Thread Safety:
  * - All public methods are thread-safe (protected by internal mutex)
  * - Event callback is invoked from WiFi event task
- * 
+ *
  * Usage:
  *   auto& wifi = WifiManager::GetInstance();
- *   
+ *
  *   EventGroupHandle_t events = xEventGroupCreate();
  *   wifi.SetEventCallback([events](WifiEvent e) {
  *       if (e == WifiEvent::Connected) xEventGroupSetBits(events, BIT0);
  *       if (e == WifiEvent::ConfigModeExit) xEventGroupSetBits(events, BIT1);
  *   });
- *   
+ *
  *   wifi.Initialize(config);
  *   wifi.StartStation();
  *   xEventGroupWaitBits(events, BIT0 | BIT1, pdTRUE, pdFALSE, portMAX_DELAY);
@@ -47,7 +47,7 @@ enum class WifiEvent {
 struct WifiManagerConfig {
     std::string ssid_prefix = "ESP32";    // AP mode SSID prefix
     std::string language = "zh-CN";       // Web UI language
-    
+
     // Station mode scan interval with exponential backoff
     int station_scan_min_interval_seconds = 10;   // Initial scan interval (fast retry)
     int station_scan_max_interval_seconds = 300;  // Maximum scan interval (5 minutes)
@@ -62,15 +62,15 @@ public:
     static WifiManager& GetInstance();
 
     // ==================== Lifecycle ====================
-    
+
     bool Initialize(const WifiManagerConfig& config = WifiManagerConfig{});
     bool IsInitialized() const;
 
     // ==================== Station Mode ====================
-    
+
     void StartStation();   // Non-blocking, auto-stops config AP if active
     void StopStation();    // Non-blocking
-    
+
     bool IsConnected() const;
     std::string GetSsid() const;
     std::string GetIpAddress() const;
@@ -79,20 +79,20 @@ public:
     std::string GetMacAddress() const;
 
     // ==================== Config AP Mode ====================
-    
+
     void StartConfigAp();  // Non-blocking, auto-stops station if active
     void StopConfigAp();   // Non-blocking
-    
+
     bool IsConfigMode() const;
     std::string GetApSsid() const;
     std::string GetApWebUrl() const;
 
     // ==================== Power ====================
-    
+
     void SetPowerSaveLevel(WifiPowerSaveLevel level);
 
     // ==================== Event ====================
-    
+
     void SetEventCallback(std::function<void(WifiEvent, const std::string&)> callback);
 
     const WifiManagerConfig& GetConfig() const { return config_; }

@@ -612,7 +612,15 @@ static esp_err_t run_v6_conversation(app_state_t *state)
         playback_session_t *playback = NULL;
         ret = playback_session_start(result.audio_stream_url, &playback);
         if (ret == ESP_OK) {
-            esp_err_t join_ret = playback_session_join(playback, portMAX_DELAY, &ret);
+            esp_err_t join_ret = playback_session_join(&playback,
+                                                       pdMS_TO_TICKS(DEMO_REALTIME_AUDIO_TASK_JOIN_TIMEOUT_MS),
+                                                       &ret);
+            if (join_ret == ESP_ERR_TIMEOUT && playback != NULL) {
+                (void)playback_session_cancel(playback, ESP_ERR_TIMEOUT);
+                join_ret = playback_session_join(&playback,
+                                                 pdMS_TO_TICKS(DEMO_REALTIME_AUDIO_CLOSE_WAIT_TIMEOUT_MS),
+                                                 &ret);
+            }
             if (join_ret != ESP_OK) {
                 ret = join_ret;
             }

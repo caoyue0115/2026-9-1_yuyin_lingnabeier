@@ -71,8 +71,19 @@ class EspRuntimeGuardTests(unittest.TestCase):
         )[1].split("esp_err_t audio_out_close_pcm_stream_with_metrics", 1)[0]
 
         self.assertIn("xRingbufferSend", buffered_write)
-        self.assertIn("portMAX_DELAY", buffered_write)
-        self.assertNotIn("DEMO_AUDIO_PLAY_WRITE_TIMEOUT_MS", buffered_write)
+        self.assertIn("DEMO_AUDIO_PLAY_WRITE_TIMEOUT_MS", buffered_write)
+        self.assertIn("last_progress_us", buffered_write)
+        self.assertNotIn("portMAX_DELAY", buffered_write)
+
+    def test_audio_close_timeout_is_progress_based_and_returns(self) -> None:
+        audio_out_c = (ESP_MAIN / "audio_out.c").read_text(encoding="utf-8")
+        close = audio_out_c.split(
+            "esp_err_t audio_out_close_pcm_stream_with_metrics", 1
+        )[1].split("esp_err_t audio_out_close_pcm_stream(void)", 1)[0]
+
+        self.assertIn("last_progress_us", close)
+        self.assertIn("return ESP_ERR_TIMEOUT;", close)
+        self.assertNotIn("continuing safe wait", close)
 
     def test_audio_jitter_reader_releases_small_chunks_frequently(self) -> None:
         audio_out_c = (ESP_MAIN / "audio_out.c").read_text(encoding="utf-8")
@@ -100,7 +111,7 @@ class EspRuntimeGuardTests(unittest.TestCase):
             "typedef struct playback_session playback_session_t;",
             "playback_session_start(const char *url, playback_session_t **out)",
             "playback_session_cancel(playback_session_t *session, int reason)",
-            "playback_session_join(playback_session_t *session,\n                                TickType_t timeout,\n                                esp_err_t *playback_result)",
+            "playback_session_join(playback_session_t **session,\n                                TickType_t inactivity_timeout,\n                                esp_err_t *playback_result)",
         ):
             self.assertIn(declaration, playback_h)
         self.assertIn("volatile bool cancel_requested", playback_c)
@@ -158,9 +169,45 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertIn("*playback_result = result", join)
         self.assertIn("return ESP_OK;", join)
         self.assertIn("esp_err_t join_ret = playback_session_join", main_c)
-        self.assertIn("playback_session_join(playback, portMAX_DELAY, &ret)", playback_block)
+        self.assertIn("last_progress_us", join)
+        self.assertIn("playback_session_join(&playback,", playback_block)
+        self.assertIn(
+            "pdMS_TO_TICKS(DEMO_REALTIME_AUDIO_TASK_JOIN_TIMEOUT_MS)",
+            playback_block,
+        )
         self.assertNotIn("DEMO_REALTIME_SESSION_TIMEOUT_MS", playback_block)
-        self.assertNotIn("playback_session_cancel(playback, ESP_ERR_TIMEOUT)", playback_block)
+        self.assertIn("playback_session_cancel(playback, ESP_ERR_TIMEOUT)", playback_block)
+
+    def test_cloud_conversation_publishes_callback_state_atomically(self) -> None:
+        conversation_c = (ESP_MAIN / "cloud_conversation.c").read_text(encoding="utf-8")
+
+        self.assertIn("__atomic_store_n(flag, true, __ATOMIC_RELEASE)", conversation_c)
+        self.assertIn("__atomic_load_n(flag, __ATOMIC_ACQUIRE)", conversation_c)
+        self.assertNotIn("volatile bool connected", conversation_c)
+
+    def test_realtime_audio_log_does_not_include_bearer_url(self) -> None:
+        cloud_c = (ESP_MAIN / "cloud_client.c").read_text(encoding="utf-8")
+        stream = cloud_c.split(
+            "esp_err_t cloud_client_stream_realtime_audio_cancellable", 1
+        )[1]
+
+        log_setup = stream.split("esp_http_client_set_header", 1)[1].split(
+            "cloud_log_heap_snapshot", 1
+        )[0]
+        self.assertNotIn("url=%s", log_setup)
+        self.assertNotIn("audio_stream_url,", log_setup)
+
+    def test_prompt_wait_propagates_playback_result(self) -> None:
+        arbiter_c = (ESP_MAIN / "prompt_arbiter.c").read_text(encoding="utf-8")
+        owner = arbiter_c.split("static void prompt_arbiter_owner_task", 1)[1].split(
+            "esp_err_t prompt_arbiter_wait_key", 1
+        )[0]
+        wait_key = arbiter_c.split("esp_err_t prompt_arbiter_wait_key", 1)[1].split(
+            "esp_err_t prompt_arbiter_wait_idle", 1
+        )[0]
+
+        self.assertIn("s_last_result = ret", owner)
+        self.assertIn("completed ? completed_result : ESP_OK", wait_key)
 
     def test_followup_window_plays_bell_before_full_listening_window(self) -> None:
         main_c = (ESP_MAIN / "main.c").read_text(encoding="utf-8")
@@ -241,7 +288,7 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertIn("playback_session_start", main_c)
         self.assertIn("PROMPT_CONVERSATION_DONE", main_c)
         self.assertIn("prompt_arbiter_wait_key(key, 15000)", main_c)
-        self.assertIn("playback_session_join(playback, portMAX_DELAY, &ret)", main_c)
+        self.assertIn("playback_session_join(&playback,", main_c)
         self.assertIn("CONVERSATION_EVENT_PLAYBACK_DONE", main_c)
         self.assertIn("playback_done_ms", main_c)
         self.assertIn('"conversation_controller.c"', cmake)

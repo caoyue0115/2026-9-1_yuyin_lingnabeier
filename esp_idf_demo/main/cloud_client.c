@@ -26,6 +26,12 @@
 
 static const char *TAG = "cloud_client";
 
+static bool cloud_cancel_requested(const volatile bool *flag)
+{
+    return flag != NULL &&
+           __atomic_load_n((const bool *)flag, __ATOMIC_ACQUIRE);
+}
+
 typedef struct {
     char *data;
     size_t len;
@@ -1281,7 +1287,7 @@ static void cloud_decode_task(void *arg)
         if (packet == NULL) {
             continue;
         }
-        if (runtime->cancel_requested != NULL && *runtime->cancel_requested &&
+        if (cloud_cancel_requested(runtime->cancel_requested) &&
             packet->type == CLOUD_STREAM_PACKET) {
             cloud_encoded_packet_free(packet);
             runtime->decode_result = cloud_forward_terminal_packet(
@@ -1397,7 +1403,7 @@ static void cloud_playback_task(void *arg)
         if (packet == NULL) {
             continue;
         }
-        if (runtime->cancel_requested != NULL && *runtime->cancel_requested &&
+        if (cloud_cancel_requested(runtime->cancel_requested) &&
             packet->type == CLOUD_STREAM_PACKET) {
             cloud_pcm_packet_free(packet);
             runtime->playback_result = DEMO_CLOUD_ERR_AUDIO_CANCELLED;
@@ -2721,8 +2727,7 @@ esp_err_t cloud_client_stream_realtime_audio_cancellable(
     esp_http_client_set_header(client, "X-Accept-Audio-Format", DEMO_REALTIME_AUDIO_ACCEPT_FORMATS);
     esp_http_client_set_header(client, "X-Device-Id", DEMO_DEVICE_ID);
     ESP_LOGI(TAG,
-             "Opening realtime audio stream url=%s accept_audio_format=%s",
-             audio_stream_url,
+             "Opening realtime audio stream accept_audio_format=%s",
              DEMO_REALTIME_AUDIO_ACCEPT_FORMATS);
     cloud_log_heap_snapshot("stream_open_before");
 
@@ -2861,12 +2866,12 @@ esp_err_t cloud_client_stream_realtime_audio_cancellable(
     int64_t last_chunk_us = 0;
     esp_err_t stream_result = ESP_OK;
     while (true) {
-        if (cancel_requested != NULL && *cancel_requested) {
+        if (cloud_cancel_requested(cancel_requested)) {
             stream_result = DEMO_CLOUD_ERR_AUDIO_CANCELLED;
             break;
         }
         int read_len = esp_http_client_read(client, (char *)chunk, DEMO_REALTIME_AUDIO_HTTP_READ_CHUNK_BYTES);
-        if (cancel_requested != NULL && *cancel_requested) {
+        if (cloud_cancel_requested(cancel_requested)) {
             stream_result = DEMO_CLOUD_ERR_AUDIO_CANCELLED;
             break;
         }

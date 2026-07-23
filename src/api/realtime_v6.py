@@ -259,14 +259,21 @@ class ConversationSocket:
                         should_close = await self._handle_text(message["text"])
                         if should_close:
                             return
-                except (ProtocolError, OpusError, ValueError, RuntimeError) as exc:
-                    await self._send_error(_error_code(exc))
+                except (ProtocolError, OpusError, ValueError, RuntimeError, KeyError) as exc:
+                    code = _error_code(exc)
+                    await self._send_error(code)
+                    if code in {"sequence_conflict", "connection_time_exceeded"}:
+                        await self.websocket.close(code=1002, reason=code)
+                        return
         except KeepaliveTimeout:
             return
         finally:
             for task in tuple(self._tasks):
                 task.cancel()
-            self.session.close()
+            try:
+                self.session.close()
+            except Exception:
+                pass
 
     async def _handle_text(self, text: str) -> bool:
         try:
@@ -275,6 +282,7 @@ class ConversationSocket:
             raise ProtocolError("invalid_control_json") from exc
         if not isinstance(payload, dict):
             raise ProtocolError("invalid_control")
+        self.session.check_deadline()
         if payload.get("type") == "pong":
             return False
         requested_index = payload.get("turn_index")
@@ -478,6 +486,8 @@ def _parse_binary_frames(body: bytes) -> list[tuple[int, bytes]]:
 def _error_code(exc: BaseException) -> str:
     if isinstance(exc, ProtocolError):
         return exc.code
+    if isinstance(exc, KeyError) and exc.args:
+        return str(exc.args[0])
     value = str(exc).strip()
     return value or "protocol_error"
 

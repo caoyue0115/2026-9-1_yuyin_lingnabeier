@@ -57,7 +57,7 @@ void WifiStation::AddAuth(const std::string &&ssid, const std::string &&password
 
 void WifiStation::Stop() {
     ESP_LOGI(TAG, "Stopping WiFi station");
-    
+
     // Unregister event handlers FIRST to prevent scan done from triggering connect
     if (instance_any_id_ != nullptr) {
         esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id_);
@@ -93,7 +93,7 @@ void WifiStation::Stop() {
         esp_netif_destroy_default_wifi(station_netif_);
         station_netif_ = nullptr;
     }
-    
+
     // Reset was_connected_ flag to prevent stale state from affecting subsequent sessions
     was_connected_ = false;
     connect_queue_.clear();
@@ -102,7 +102,7 @@ void WifiStation::Stop() {
 
     // Clear connected bit
     xEventGroupClearBits(event_group_, WIFI_EVENT_CONNECTED);
-    
+
     // Set stopped event AFTER cleanup is complete to unblock WaitForConnected
     // This ensures no race condition with subsequent WiFi operations
     xEventGroupSetBits(event_group_, WIFI_EVENT_STOPPED);
@@ -131,11 +131,11 @@ void WifiStation::OnDisconnected(std::function<void(int reason)> on_disconnected
 void WifiStation::Start() {
     // Note: esp_netif_init() and esp_wifi_init() should be called once before calling this method
     // WiFi driver is initialized by WifiManager::Initialize() and kept alive
-    
+
     // Clear stopped event bit so WaitForConnected works properly
     // Clear scan done bit so Stop() can wait for scan to complete
     xEventGroupClearBits(event_group_, WIFI_EVENT_STOPPED | WIFI_EVENT_SCAN_DONE_BIT);
-    
+
     // Create the default WiFi station interface
     station_netif_ = esp_netif_create_default_wifi_sta();
 
@@ -187,7 +187,7 @@ void WifiStation::Start() {
 
 bool WifiStation::WaitForConnected(int timeout_ms) {
     // Wait for either connected or stopped event
-    auto bits = xEventGroupWaitBits(event_group_, WIFI_EVENT_CONNECTED | WIFI_EVENT_STOPPED, 
+    auto bits = xEventGroupWaitBits(event_group_, WIFI_EVENT_CONNECTED | WIFI_EVENT_STOPPED,
                                     pdFALSE, pdFALSE, timeout_ms / portTICK_PERIOD_MS);
     // Return true only if connected (not if stopped)
     return (bits & WIFI_EVENT_CONNECTED) != 0;
@@ -352,7 +352,7 @@ int8_t WifiStation::GetRssi() {
     if (!IsConnected()) {
         return 0;  // Return 0 if not connected
     }
-    
+
     // Get station info
     wifi_ap_record_t ap_info;
     esp_err_t err = esp_wifi_sta_get_ap_info(&ap_info);
@@ -368,7 +368,7 @@ uint8_t WifiStation::GetChannel() {
     if (!IsConnected()) {
         return 0;  // Return 0 if not connected
     }
-    
+
     // Get station info
     wifi_ap_record_t ap_info;
     esp_err_t err = esp_wifi_sta_get_ap_info(&ap_info);
@@ -442,7 +442,7 @@ void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32
             }
         }
         xEventGroupClearBits(this_->event_group_, WIFI_EVENT_CONNECTED);
-        
+
         // Notify disconnected callback only once when transitioning from connected to disconnected
         bool was_connected = this_->was_connected_;
         this_->was_connected_ = false;
@@ -458,7 +458,7 @@ void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32
             this_->StartScan();
             return;
         }
-        
+
         if (this_->reconnect_count_ < MAX_RECONNECT_COUNT) {
             esp_wifi_connect();
             this_->reconnect_count_++;
@@ -470,7 +470,7 @@ void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32
             this_->StartConnect();
             return;
         }
-        
+
         ESP_LOGI(TAG, "No more saved AP candidates in this pass");
         if (this_->on_no_candidates_) {
             this_->on_no_candidates_();
@@ -495,7 +495,7 @@ void WifiStation::IpEventHandler(void* arg, esp_event_base_t event_base, int32_t
         }
     }
     ESP_LOGI(TAG, "Got IP: %s", this_->ip_address_.c_str());
-    
+
     xEventGroupSetBits(this_->event_group_, WIFI_EVENT_CONNECTED);
     this_->was_connected_ = true;  // Mark as connected for disconnect notification
     if (this_->on_connected_) {
@@ -503,7 +503,7 @@ void WifiStation::IpEventHandler(void* arg, esp_event_base_t event_base, int32_t
     }
     this_->connect_queue_.clear();
     this_->reconnect_count_ = 0;
-    
+
     // Reset scan interval to minimum for fast reconnect if disconnected later
     this_->scan_current_interval_microseconds_ = this_->scan_min_interval_microseconds_;
     this_->rescan_epoch_us_ = 0;

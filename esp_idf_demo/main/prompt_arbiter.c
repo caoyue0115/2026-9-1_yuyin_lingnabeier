@@ -41,6 +41,9 @@ static bool s_conversation_active;
 static bool s_network_connected;
 static bool s_playing;
 static char s_playing_key[PROMPT_DEDUPE_KEY_BYTES];
+static bool s_last_result_valid;
+static char s_last_result_key[PROMPT_DEDUPE_KEY_BYTES];
+static esp_err_t s_last_result;
 
 static bool prompt_arbiter_is_network_prompt(prompt_id_t id)
 {
@@ -179,6 +182,12 @@ static void prompt_arbiter_owner_task(void *arg)
             const esp_err_t ret = prompt_arbiter_play(entry.id);
             ESP_LOGI(TAG, "prompt_done id=%d err=%s", (int)entry.id, esp_err_to_name(ret));
             taskENTER_CRITICAL(&s_lock);
+            s_last_result = ret;
+            s_last_result_valid = true;
+            snprintf(s_last_result_key,
+                     sizeof(s_last_result_key),
+                     "%s",
+                     entry.dedupe_key);
             s_playing = false;
             s_playing_key[0] = '\0';
             taskEXIT_CRITICAL(&s_lock);
@@ -194,6 +203,8 @@ esp_err_t prompt_arbiter_wait_key(const char *dedupe_key, int timeout_ms)
     const int64_t deadline_us = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
     while (true) {
         bool pending = false;
+        bool completed = false;
+        esp_err_t completed_result = ESP_OK;
         taskENTER_CRITICAL(&s_lock);
         pending = s_playing &&
                   strncmp(s_playing_key, dedupe_key, PROMPT_DEDUPE_KEY_BYTES) == 0;
@@ -203,9 +214,16 @@ esp_err_t prompt_arbiter_wait_key(const char *dedupe_key, int timeout_ms)
                               dedupe_key,
                               PROMPT_DEDUPE_KEY_BYTES) == 0;
         }
+        completed = s_last_result_valid &&
+                    strncmp(s_last_result_key,
+                            dedupe_key,
+                            PROMPT_DEDUPE_KEY_BYTES) == 0;
+        if (completed) {
+            completed_result = s_last_result;
+        }
         taskEXIT_CRITICAL(&s_lock);
         if (!pending) {
-            return ESP_OK;
+            return completed ? completed_result : ESP_OK;
         }
         if (esp_timer_get_time() >= deadline_us) {
             return ESP_ERR_TIMEOUT;

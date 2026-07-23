@@ -44,16 +44,31 @@ struct cloud_conversation {
     char rx_json[V6_JSON_BYTES];
     size_t rx_json_len;
     cloud_realtime_session_t result;
-    volatile bool connected;
-    volatile bool disconnected;
-    volatile bool ready;
-    volatile bool turn_started;
-    volatile bool turn_terminal;
-    volatile bool turn_cancelled;
-    volatile bool playback_complete;
-    volatile bool conversation_done;
-    volatile bool error_received;
+    bool connected;
+    bool disconnected;
+    bool ready;
+    bool turn_started;
+    bool turn_terminal;
+    bool turn_cancelled;
+    bool playback_complete;
+    bool conversation_done;
+    bool error_received;
 };
+
+static void v6_flag_set(bool *flag)
+{
+    __atomic_store_n(flag, true, __ATOMIC_RELEASE);
+}
+
+static void v6_flag_clear(bool *flag)
+{
+    __atomic_store_n(flag, false, __ATOMIC_RELEASE);
+}
+
+static bool v6_flag_get(const bool *flag)
+{
+    return __atomic_load_n(flag, __ATOMIC_ACQUIRE);
+}
 
 static void v6_write_be32(uint8_t *data, uint32_t value)
 {
@@ -103,12 +118,12 @@ static void v6_handle_json(cloud_conversation_t *conversation, const char *json)
 {
     cJSON *root = cJSON_Parse(json);
     if (root == NULL) {
-        conversation->error_received = true;
+        v6_flag_set(&conversation->error_received);
         return;
     }
     const char *type = v6_json_string(root, "type");
     if (type == NULL) {
-        conversation->error_received = true;
+        v6_flag_set(&conversation->error_received);
     } else if (strcmp(type, "ping") == 0) {
         char pong[160];
         snprintf(pong, sizeof(pong),
@@ -122,22 +137,22 @@ static void v6_handle_json(cloud_conversation_t *conversation, const char *json)
             strcmp(client_id, conversation->client_conversation_id) == 0) {
             snprintf(conversation->conversation_id,
                      sizeof(conversation->conversation_id), "%s", conversation_id);
-            conversation->ready = true;
+            v6_flag_set(&conversation->ready);
         } else {
-            conversation->error_received = true;
+            v6_flag_set(&conversation->error_received);
         }
     } else if (strcmp(type, "error") == 0) {
-        conversation->error_received = true;
+        v6_flag_set(&conversation->error_received);
     } else if (strcmp(type, "conversation_done") == 0) {
         const char *id = v6_json_string(root, "conversation_id");
         if (id != NULL && strcmp(id, conversation->conversation_id) == 0) {
-            conversation->conversation_done = true;
+            v6_flag_set(&conversation->conversation_done);
         }
     } else if (v6_event_matches_turn(conversation, root)) {
         if (strcmp(type, "ack") == 0) {
             const char *acknowledged = v6_json_string(root, "acknowledged_type");
             if (acknowledged != NULL && strcmp(acknowledged, "turn_start") == 0) {
-                conversation->turn_started = true;
+                v6_flag_set(&conversation->turn_started);
             }
         } else if (strcmp(type, "turn_result") == 0) {
             const char *session_id = v6_json_string(root, "session_id");
@@ -159,23 +174,23 @@ static void v6_handle_json(cloud_conversation_t *conversation, const char *json)
                 }
                 snprintf(conversation->result.status,
                          sizeof(conversation->result.status), "%s", "done");
-                conversation->turn_terminal = true;
+                v6_flag_set(&conversation->turn_terminal);
             }
         } else if (strcmp(type, "turn_complete") == 0) {
             const char *outcome = v6_json_string(root, "outcome");
-            conversation->playback_complete = true;
+            v6_flag_set(&conversation->playback_complete);
             if (conversation->result.audio_stream_url[0] == '\0') {
                 snprintf(conversation->result.status,
                          sizeof(conversation->result.status), "%s",
                          outcome != NULL ? outcome : "completed");
-                conversation->turn_terminal = true;
+                v6_flag_set(&conversation->turn_terminal);
             }
         } else if (strcmp(type, "turn_cancelled") == 0) {
-            conversation->turn_cancelled = true;
-            conversation->turn_terminal = true;
+            v6_flag_set(&conversation->turn_cancelled);
+            v6_flag_set(&conversation->turn_terminal);
         }
     } else {
-        conversation->error_received = true;
+        v6_flag_set(&conversation->error_received);
     }
     cJSON_Delete(root);
 }
@@ -191,16 +206,16 @@ static void v6_ws_event(void *handler_args,
         return;
     }
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
-        conversation->connected = true;
+        v6_flag_set(&conversation->connected);
         return;
     }
     if (event_id == WEBSOCKET_EVENT_DISCONNECTED || event_id == WEBSOCKET_EVENT_CLOSED) {
-        conversation->disconnected = true;
+        v6_flag_set(&conversation->disconnected);
         ESP_LOGW(TAG, "v6 websocket disconnected event_id=%ld", (long)event_id);
         return;
     }
     if (event_id == WEBSOCKET_EVENT_ERROR) {
-        conversation->error_received = true;
+        v6_flag_set(&conversation->error_received);
         ESP_LOGE(TAG, "v6 websocket error");
         return;
     }
@@ -219,7 +234,7 @@ static void v6_ws_event(void *handler_args,
     }
     if (conversation->rx_json_len + (size_t)data->data_len >= sizeof(conversation->rx_json)) {
         conversation->rx_json_len = 0;
-        conversation->error_received = true;
+        v6_flag_set(&conversation->error_received);
         return;
     }
     memcpy(conversation->rx_json + conversation->rx_json_len,
@@ -233,18 +248,23 @@ static void v6_ws_event(void *handler_args,
 }
 
 static esp_err_t v6_wait_flag(cloud_conversation_t *conversation,
-                              volatile bool *flag,
+                              bool *flag,
                               int timeout_ms)
 {
     const int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
-    while (!*flag && !conversation->error_received && !conversation->disconnected &&
+    while (!v6_flag_get(flag) &&
+           !v6_flag_get(&conversation->error_received) &&
+           !v6_flag_get(&conversation->disconnected) &&
            esp_timer_get_time() < deadline) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    if (*flag) {
+    if (v6_flag_get(flag)) {
         return ESP_OK;
     }
-    return conversation->error_received || conversation->disconnected ? ESP_FAIL : ESP_ERR_TIMEOUT;
+    return v6_flag_get(&conversation->error_received) ||
+                   v6_flag_get(&conversation->disconnected)
+               ? ESP_FAIL
+               : ESP_ERR_TIMEOUT;
 }
 
 static esp_err_t v6_build_ws_url(char *out, size_t out_size)
@@ -430,10 +450,10 @@ esp_err_t cloud_conversation_start_turn(cloud_conversation_t *conversation,
     conversation->turn_index = turn_index;
     conversation->sequence = 0;
     conversation->pcm_frame_len = 0;
-    conversation->turn_started = false;
-    conversation->turn_terminal = false;
-    conversation->turn_cancelled = false;
-    conversation->playback_complete = false;
+    v6_flag_clear(&conversation->turn_started);
+    v6_flag_clear(&conversation->turn_terminal);
+    v6_flag_clear(&conversation->turn_cancelled);
+    v6_flag_clear(&conversation->playback_complete);
     memset(&conversation->result, 0, sizeof(conversation->result));
     char json[256];
     const int written = snprintf(json, sizeof(json),
@@ -451,7 +471,8 @@ esp_err_t cloud_conversation_send_pcm(cloud_conversation_t *conversation,
                                       const uint8_t *pcm,
                                       size_t pcm_bytes)
 {
-    if (conversation == NULL || pcm == NULL || pcm_bytes == 0 || !conversation->turn_started) {
+    if (conversation == NULL || pcm == NULL || pcm_bytes == 0 ||
+        !v6_flag_get(&conversation->turn_started)) {
         return ESP_ERR_INVALID_ARG;
     }
     size_t offset = 0;
@@ -474,7 +495,8 @@ esp_err_t cloud_conversation_send_pcm(cloud_conversation_t *conversation,
 esp_err_t cloud_conversation_finish_turn(cloud_conversation_t *conversation,
                                          cloud_realtime_session_t *result)
 {
-    if (conversation == NULL || result == NULL || !conversation->turn_started) {
+    if (conversation == NULL || result == NULL ||
+        !v6_flag_get(&conversation->turn_started)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (conversation->pcm_frame_len > 0) {
@@ -515,12 +537,12 @@ esp_err_t cloud_conversation_complete_playback(cloud_conversation_t *conversatio
                                  "\"turn_index\":%u}",
                                  conversation->conversation_id, conversation->turn_id,
                                  (unsigned)conversation->turn_index);
-    conversation->playback_complete = false;
+    v6_flag_clear(&conversation->playback_complete);
     ESP_LOGI(TAG,
              "v6 playback_complete send connected=%d disconnected=%d error_received=%d",
              esp_websocket_client_is_connected(conversation->client) ? 1 : 0,
-             conversation->disconnected ? 1 : 0,
-             conversation->error_received ? 1 : 0);
+             v6_flag_get(&conversation->disconnected) ? 1 : 0,
+             v6_flag_get(&conversation->error_received) ? 1 : 0);
     const int sent = written > 0 && (size_t)written < sizeof(json)
                          ? v6_send_text(conversation, json)
                          : -1;
@@ -534,9 +556,9 @@ esp_err_t cloud_conversation_complete_playback(cloud_conversation_t *conversatio
     ESP_LOGI(TAG,
              "v6 playback_complete wait result=%s ack=%d disconnected=%d error_received=%d",
              esp_err_to_name(ret),
-             conversation->playback_complete ? 1 : 0,
-             conversation->disconnected ? 1 : 0,
-             conversation->error_received ? 1 : 0);
+             v6_flag_get(&conversation->playback_complete) ? 1 : 0,
+             v6_flag_get(&conversation->disconnected) ? 1 : 0,
+             v6_flag_get(&conversation->error_received) ? 1 : 0);
     return ret;
 }
 

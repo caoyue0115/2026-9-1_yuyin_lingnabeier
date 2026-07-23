@@ -7,9 +7,11 @@ from concurrent.futures import Future
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from src.app import app
 from src.api import realtime_v6
+from src.models.conversation_v6 import ConversationLimits, MAX_CONNECTION_SECONDS, ProtocolError
 
 
 @pytest.fixture(autouse=True)
@@ -170,6 +172,70 @@ def test_binary_without_receiving_turn_is_rejected() -> None:
             error = websocket.receive_json()
             assert error["type"] == "error"
             assert error["code"] == "no_receiving_turn"
+
+
+def test_unknown_turn_returns_stable_error() -> None:
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v6/realtime/conversation/opus-stream",
+            headers={"x-device-id": "board-1"},
+        ) as websocket:
+            websocket.send_json(_conversation_start())
+            conversation_id = websocket.receive_json()["conversation_id"]
+            websocket.send_json(
+                {
+                    "type": "turn_cancel",
+                    "conversation_id": conversation_id,
+                    "turn_id": "missing",
+                    "turn_index": 0,
+                }
+            )
+
+            error = websocket.receive_json()
+
+            assert error["type"] == "error"
+            assert error["code"] == "turn_not_found"
+
+
+def test_sequence_conflict_sends_error_then_closes_socket() -> None:
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v6/realtime/conversation/opus-stream",
+            headers={"x-device-id": "board-1"},
+        ) as websocket:
+            websocket.send_json(_conversation_start())
+            conversation_id = websocket.receive_json()["conversation_id"]
+            websocket.send_json(
+                {
+                    "type": "turn_start",
+                    "conversation_id": conversation_id,
+                    "turn_id": "turn-0",
+                    "turn_index": 0,
+                }
+            )
+            assert websocket.receive_json()["type"] == "ack"
+            websocket.send_bytes(b"\x00\x00\x00\x00\x00\x00\x00\x01a")
+            assert websocket.receive_json()["type"] == "ack"
+            websocket.send_bytes(b"\x00\x00\x00\x00\x00\x00\x00\x01b")
+            assert websocket.receive_json()["code"] == "sequence_conflict"
+            with pytest.raises(WebSocketDisconnect):
+                websocket.receive_json()
+
+
+def test_pong_still_checks_absolute_connection_deadline() -> None:
+    class FakeWebSocket:
+        async def send_json(self, _payload: dict) -> None:
+            pass
+
+    session = realtime_v6.ConversationSession.for_test()
+    session._limits = ConversationLimits(
+        started_at=0.0,
+        monotonic=lambda: MAX_CONNECTION_SECONDS + 1.0,
+    )
+    socket = realtime_v6.ConversationSocket(FakeWebSocket(), session, device_id="board-1")
+
+    with pytest.raises(ProtocolError, match="connection_time_exceeded"):
+        asyncio.run(socket._handle_text('{"type":"pong"}'))
 
 
 def test_cancelled_audio_token_returns_410() -> None:

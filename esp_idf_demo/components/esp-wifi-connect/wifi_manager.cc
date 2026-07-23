@@ -60,7 +60,7 @@ void WifiManager::NotifyEvent(WifiEvent event, const std::string& data) {
 
 bool WifiManager::Initialize(const WifiManagerConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
     if (initialized_) {
         ESP_LOGW(TAG, "Already initialized");
         return true;

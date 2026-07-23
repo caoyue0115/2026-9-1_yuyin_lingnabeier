@@ -240,6 +240,28 @@ def test_cancel_timeout_bounds_close_hooks_and_worker_join_together() -> None:
     assert session.event_log == []
 
 
+def test_session_close_shuts_down_executor_after_cancel_failure(monkeypatch) -> None:
+    session = ConversationSession.for_test()
+    session.start_turn("t1", 0)
+    shutdown_calls: list[tuple[bool, bool]] = []
+
+    monkeypatch.setattr(
+        session,
+        "cancel_turn",
+        lambda _turn_id: (_ for _ in ()).throw(TimeoutError("turn_cancel_timeout")),
+    )
+    monkeypatch.setattr(
+        session._executor,
+        "shutdown",
+        lambda *, wait, cancel_futures: shutdown_calls.append((wait, cancel_futures)),
+    )
+
+    with pytest.raises(TimeoutError, match="turn_cancel_timeout"):
+        session.close()
+
+    assert shutdown_calls == [(False, True)]
+
+
 def test_context_uses_only_three_committed_turns_and_marks_partial_answer() -> None:
     session = ConversationSession.for_test(
         max_audio_queue_bytes=8,

@@ -7,8 +7,10 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +27,7 @@ struct playback_session {
     bool completion_published;
     int cancel_reason;
     esp_err_t result;
+    int64_t last_progress_us;
 };
 
 static esp_err_t playback_session_pcm_sink(const uint8_t *pcm,
@@ -32,11 +35,16 @@ static esp_err_t playback_session_pcm_sink(const uint8_t *pcm,
                                            void *user_ctx)
 {
     playback_session_t *session = (playback_session_t *)user_ctx;
-    if (session == NULL || session->cancel_requested) {
+    if (session == NULL ||
+        __atomic_load_n(&session->cancel_requested, __ATOMIC_ACQUIRE)) {
         return DEMO_CLOUD_ERR_AUDIO_CANCELLED;
     }
     size_t written = 0;
-    return audio_out_write_pcm_chunk_buffered(pcm, pcm_bytes, &written);
+    const esp_err_t ret = audio_out_write_pcm_chunk_buffered(pcm, pcm_bytes, &written);
+    if (ret == ESP_OK && written > 0) {
+        __atomic_store_n(&session->last_progress_us, esp_timer_get_time(), __ATOMIC_RELEASE);
+    }
+    return ret;
 }
 
 static void playback_session_owner(void *arg)
@@ -90,6 +98,7 @@ esp_err_t playback_session_start(const char *url, playback_session_t **out)
         free(session);
         return ESP_ERR_NO_MEM;
     }
+    session->last_progress_us = esp_timer_get_time();
     if (xTaskCreate(playback_session_owner,
                     "playback_owner",
                     DEMO_REALTIME_AUDIO_PARALLEL_TASK_STACK_SIZE,
@@ -110,39 +119,64 @@ esp_err_t playback_session_cancel(playback_session_t *session, int reason)
         return ESP_ERR_INVALID_ARG;
     }
     session->cancel_reason = reason;
-    session->cancel_requested = true;
+    __atomic_store_n(&session->cancel_requested, true, __ATOMIC_RELEASE);
     return ESP_OK;
 }
 
-esp_err_t playback_session_join(playback_session_t *session,
-                                TickType_t timeout,
+esp_err_t playback_session_join(playback_session_t **session,
+                                TickType_t inactivity_timeout,
                                 esp_err_t *playback_result)
 {
     if (session == NULL || playback_result == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    const EventBits_t bits = xEventGroupWaitBits(session->events,
-                                                 PLAYBACK_SESSION_DONE_BIT,
-                                                 pdFALSE,
-                                                 pdFALSE,
-                                                 timeout);
-    if ((bits & PLAYBACK_SESSION_DONE_BIT) == 0) {
-        return ESP_ERR_TIMEOUT;
+    if (*session == NULL) {
+        return ESP_OK;
     }
-    while (!__atomic_load_n(&session->completion_published, __ATOMIC_ACQUIRE)) {
+    playback_session_t *owned = *session;
+    const int64_t inactivity_timeout_us =
+        inactivity_timeout == portMAX_DELAY
+            ? INT64_MAX
+            : (int64_t)inactivity_timeout * portTICK_PERIOD_MS * 1000;
+    while (true) {
+        const EventBits_t bits = xEventGroupWaitBits(owned->events,
+                                                     PLAYBACK_SESSION_DONE_BIT,
+                                                     pdFALSE,
+                                                     pdFALSE,
+                                                     pdMS_TO_TICKS(250));
+        if ((bits & PLAYBACK_SESSION_DONE_BIT) != 0) {
+            break;
+        }
+        const int64_t last_progress_us =
+            __atomic_load_n(&owned->last_progress_us, __ATOMIC_ACQUIRE);
+        if (inactivity_timeout_us != INT64_MAX &&
+            esp_timer_get_time() - last_progress_us >= inactivity_timeout_us) {
+            __atomic_store_n(&owned->cancel_requested, true, __ATOMIC_RELEASE);
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+    while (!__atomic_load_n(&owned->completion_published, __ATOMIC_ACQUIRE)) {
         taskYIELD();
     }
-    const esp_err_t result = session->result;
-    TaskHandle_t task = session->task;
+    const esp_err_t result = owned->result;
+    TaskHandle_t task = owned->task;
     if (task != NULL) {
-        while (eTaskGetState(task) != eSuspended) {
+        const int64_t suspend_deadline_us =
+            esp_timer_get_time() +
+            (int64_t)DEMO_REALTIME_AUDIO_CLOSE_WAIT_TIMEOUT_MS * 1000;
+        while (eTaskGetState(task) != eSuspended &&
+               esp_timer_get_time() < suspend_deadline_us) {
             taskYIELD();
         }
+        if (eTaskGetState(task) != eSuspended) {
+            return ESP_ERR_TIMEOUT;
+        }
         vTaskDelete(task);
-        session->task = NULL;
+        owned->task = NULL;
     }
-    vEventGroupDelete(session->events);
-    free(session);
+    vEventGroupDelete(owned->events);
+    free(owned);
+    *session = NULL;
     *playback_result = result;
     return ESP_OK;
 }

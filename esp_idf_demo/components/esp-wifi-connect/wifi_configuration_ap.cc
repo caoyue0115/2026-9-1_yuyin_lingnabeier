@@ -42,7 +42,7 @@ std::vector<wifi_ap_record_t> WifiConfigurationAp::GetAccessPoints()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return ap_records_;
-}   
+}
 
 WifiConfigurationAp::~WifiConfigurationAp()
 {
@@ -89,7 +89,7 @@ void WifiConfigurationAp::Start()
 
     StartAccessPoint();
     StartWebServer();
-    
+
     // Start scan immediately
     esp_wifi_scan_start(nullptr, false);
     // Setup periodic WiFi scan timer.
@@ -136,7 +136,7 @@ void WifiConfigurationAp::StartAccessPoint()
 {
     // Note: esp_netif_init() and esp_wifi_init() should be called once before calling this method
     // WiFi driver is initialized by WifiManager::Initialize() and kept alive
-    
+
     // Create the default WiFi AP interface
     ap_netif_ = esp_netif_create_default_wifi_ap();
 
@@ -451,20 +451,20 @@ void WifiConfigurationAp::StartWebServer()
         .method = HTTP_POST,
         .handler = [](httpd_req_t *req) -> esp_err_t {
             auto* this_ = static_cast<WifiConfigurationAp*>(req->user_ctx);
-            
+
             // 设置响应头，防止浏览器缓存
             httpd_resp_set_type(req, "application/json");
             httpd_resp_set_hdr(req, "Cache-Control", "no-store");
             httpd_resp_set_hdr(req, "Connection", "close");
             // 发送响应
             httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
-            
+
             // 延迟调用回调，确保HTTP响应完全发送
             ESP_LOGI(TAG, "Exiting config mode...");
             xTaskCreate([](void *ctx) {
                 // 等待200ms确保HTTP响应完全发送
                 vTaskDelay(pdMS_TO_TICKS(200));
-                
+
                 auto* self = static_cast<WifiConfigurationAp*>(ctx);
                 // 通知回调退出配网模式
                 if (self->on_exit_requested_) {
@@ -472,7 +472,7 @@ void WifiConfigurationAp::StartWebServer()
                 }
                 vTaskDelete(NULL);
             }, "exit_config_task", 4096, this_, 5, NULL);
-            
+
             return ESP_OK;
         },
         .user_ctx = this
@@ -522,7 +522,7 @@ void WifiConfigurationAp::StartWebServer()
         .handler = [](httpd_req_t *req) -> esp_err_t {
             // 获取当前对象
             auto *this_ = static_cast<WifiConfigurationAp *>(req->user_ctx);
-            
+
             // 创建JSON对象
             cJSON *json = cJSON_CreateObject();
             if (!json) {
@@ -684,7 +684,7 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
         ESP_LOGE(TAG, "SSID cannot be empty");
         return false;
     }
-    
+
     if (ssid.length() > 32) {  // WiFi SSID 最大长度
         ESP_LOGE(TAG, "SSID too long");
         return false;
@@ -694,7 +694,7 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
         ESP_LOGE(TAG, "Password too long");
         return false;
     }
-    
+
     is_connecting_ = true;
     esp_wifi_scan_stop();
     xEventGroupClearBits(event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
@@ -705,7 +705,7 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     memcpy(wifi_config.sta.password, password.data(), password.size());
     wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wifi_config.sta.failure_retry_cnt = 1;
-    
+
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     auto ret = esp_wifi_connect();
     if (ret != ESP_OK) {
@@ -903,7 +903,7 @@ void WifiConfigurationAp::Stop() {
 
     // 停止WiFi（但不 deinit，WiFi 驱动由 WifiManager 管理）
     esp_wifi_stop();
-    
+
     // 销毁网络接口
     if (ap_netif_) {
         esp_netif_destroy_default_wifi(ap_netif_);

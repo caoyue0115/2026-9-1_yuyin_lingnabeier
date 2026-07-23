@@ -28,7 +28,7 @@ struct WifiApRecord {
 
 /**
  * WifiStation - WiFi station mode handler
- * 
+ *
  * This class handles connecting to WiFi access points in station mode.
  * Note: WiFi driver must be initialized before using this class.
  */
@@ -74,7 +74,7 @@ private:
     uint8_t remember_bssid_;
     int reconnect_count_ = 0;
     int candidate_timeout_ms_ = 3000;
-    
+
     // Exponential backoff for scan interval
     int scan_min_interval_microseconds_ = 10 * 1000 * 1000;   // Default 10 seconds
     int scan_max_interval_microseconds_ = 300 * 1000 * 1000;  // Default 5 minutes
