@@ -5,6 +5,7 @@ from redis import Redis
 
 from src.api.ota import router as ota_router
 from src.api.realtime import router as realtime_router
+from src.api.realtime_v6 import router as realtime_v6_router
 from src.api.tasks import router as tasks_router
 from src.models.schema import HealthzResponse
 from src.providers.asr import asr_health
@@ -17,6 +18,7 @@ app = FastAPI(title=settings.project_name, version=settings.version)
 init_db()
 app.include_router(tasks_router)
 app.include_router(realtime_router)
+app.include_router(realtime_v6_router)
 app.include_router(ota_router)
 
 

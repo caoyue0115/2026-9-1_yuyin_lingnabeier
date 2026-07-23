@@ -131,6 +131,13 @@ static void audio_in_close_locked(void)
     }
 }
 
+esp_err_t audio_in_probe(void)
+{
+    esp_err_t ret = audio_in_open_locked();
+    audio_in_close_locked();
+    return ret;
+}
+
 static uint8_t *audio_in_alloc_record_buffer(void)
 {
     audio_in_log_heap("before_record_alloc");
@@ -267,9 +274,11 @@ static esp_err_t audio_in_record_after_voice_start_impl(const uint8_t *speech_pr
 
 esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
                                          size_t *out_speech_prefix_bytes,
+                                         uint32_t start_threshold,
                                          audio_in_wait_metrics_t *out_metrics)
 {
-    if (out_speech_prefix == NULL || out_speech_prefix_bytes == NULL) {
+    if (out_speech_prefix == NULL || out_speech_prefix_bytes == NULL ||
+        start_threshold == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -295,7 +304,7 @@ esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
 
     const int64_t wait_start_us = esp_timer_get_time();
     const int64_t armed_at_us = wait_start_us + (int64_t)DEMO_WAITING_SPEECH_ARM_MS * 1000;
-    const int64_t timeout_at_us = wait_start_us + (int64_t)DEMO_WAIT_FOR_SPEECH_TIMEOUT_MS * 1000;
+    const int64_t timeout_at_us = armed_at_us + (int64_t)DEMO_WAIT_FOR_SPEECH_TIMEOUT_MS * 1000;
     size_t hold_bytes = 0;
     size_t prefix_bytes = 0;
     uint32_t max_level = 0;
@@ -322,12 +331,13 @@ esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
 
         if (!armed_logged) {
             ESP_LOGI(TAG,
-                     "stage=waiting_speech event=armed elapsed_ms=%u",
-                     (unsigned)((now_us - wait_start_us) / 1000));
+                     "stage=waiting_speech event=armed elapsed_ms=%u threshold=%u",
+                     (unsigned)((now_us - wait_start_us) / 1000),
+                     (unsigned)start_threshold);
             armed_logged = true;
         }
 
-        if (chunk_level >= DEMO_RECORD_VAD_START_THRESHOLD) {
+        if (chunk_level >= start_threshold) {
             const size_t prefix_capacity = DEMO_SPEECH_START_HOLD_BYTES + DEMO_AUDIO_CHUNK_BYTES;
             if (prefix_bytes + DEMO_AUDIO_CHUNK_BYTES > prefix_capacity) {
                 memmove(speech_prefix,

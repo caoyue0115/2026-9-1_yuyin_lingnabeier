@@ -1,0 +1,753 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+from hashlib import sha256
+from time import monotonic as default_monotonic
+from typing import Any, Callable, Mapping
+from types import MappingProxyType
+
+
+MAX_TURNS = 4
+MAX_FRAME_BYTES = 4096
+MAX_TURN_AUDIO_BYTES = 16_000 * 2 * 8
+MAX_CONNECTION_SECONDS = 180
+MAX_FRAMES_PER_TURN = 1024
+SUPPORTED_AUDIO_FORMATS = frozenset({"opus"})
+SUPPORTED_ANSWER_MODES = frozenset({"streaming"})
+
+
+class TurnState(StrEnum):
+    IDLE = "idle"
+    RECEIVING = "receiving"
+    PROCESSING = "processing"
+    RESULT_READY = "result_ready"
+    PLAYING = "playing"
+    CANCELLING = "cancelling"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class TurnOutcome(StrEnum):
+    PLAYED = "played"
+    ASR_EMPTY = "asr_empty"
+    TECHNICAL_ERROR = "technical_error"
+    REJECTED = "rejected"
+
+
+class ProtocolError(ValueError):
+    """A stable v6 protocol error code."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+_TURN_CONTROLS = frozenset({"turn_start", "turn_end", "turn_cancel", "turn_playback_complete"})
+_CONVERSATION_CONTROLS = frozenset({"conversation_start", "conversation_end"})
+_TURN_EVENTS = frozenset({"ack", "asr_final", "turn_result", "turn_complete", "turn_cancelled"})
+_SERVER_EVENTS = _TURN_EVENTS | frozenset({"conversation_ready", "conversation_done", "error"})
+_RESERVED_EVENT_DATA_KEYS = frozenset(
+    {"type", "conversation_id", "turn_id", "turn_index", "outcome", "highest_contiguous_sequence"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ClientControl:
+    type: str
+    conversation_id: str | None = None
+    turn_id: str | None = None
+    turn_index: int | None = None
+    client_conversation_id: str | None = None
+    data: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class TurnTransition:
+    """Internal FSM output that cannot be serialized onto the wire."""
+
+    type: str
+    turn_id: str
+    turn_index: int
+    conversation_id: str | None = None
+    outcome: TurnOutcome | None = None
+    highest_contiguous_sequence: int | None = None
+    data: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ServerEvent:
+    type: str
+    conversation_id: str | None = None
+    turn_id: str | None = None
+    turn_index: int | None = None
+    outcome: TurnOutcome | None = None
+    highest_contiguous_sequence: int | None = None
+    data: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.type, str):
+            raise ProtocolError("invalid_server_event_type")
+        if self.type not in _SERVER_EVENTS:
+            raise ProtocolError("unknown_server_event")
+        if not isinstance(self.data, Mapping):
+            raise ProtocolError("invalid_event_data")
+        data = dict(self.data)
+        if _RESERVED_EVENT_DATA_KEYS.intersection(data):
+            raise ProtocolError("reserved_event_data")
+        object.__setattr__(self, "data", MappingProxyType(data))
+        if self.type in _TURN_EVENTS:
+            _require_turn_correlation(self.conversation_id, self.turn_id, self.turn_index)
+        elif self.type in {"conversation_ready", "conversation_done", "error"}:
+            _require_nonempty_string(self.conversation_id, "conversation_id")
+        _validate_server_event(self)
+
+    def to_payload(self) -> dict[str, Any]:
+        self.__post_init__()
+        if self.type in _TURN_EVENTS:
+            _require_turn_correlation(self.conversation_id, self.turn_id, self.turn_index)
+        elif self.type in {"conversation_ready", "conversation_done", "error"}:
+            _require_nonempty_string(self.conversation_id, "conversation_id")
+
+        payload: dict[str, Any] = dict(self.data)
+        payload["type"] = self.type
+        if self.conversation_id is not None:
+            payload["conversation_id"] = self.conversation_id
+        if self.turn_id is not None:
+            payload["turn_id"] = self.turn_id
+        if self.turn_index is not None:
+            payload["turn_index"] = self.turn_index
+        if self.outcome is not None:
+            payload["outcome"] = self.outcome.value
+        if self.highest_contiguous_sequence is not None:
+            payload["highest_contiguous_sequence"] = self.highest_contiguous_sequence
+        return payload
+
+
+def parse_client_control(payload: Mapping[str, Any]) -> ClientControl:
+    """Validate one JSON client control without applying it to a conversation."""
+    if not isinstance(payload, Mapping):
+        raise ProtocolError("invalid_control")
+
+    message_type = payload.get("type")
+    if not isinstance(message_type, str):
+        raise ProtocolError("invalid_control_type")
+    if message_type not in _TURN_CONTROLS | _CONVERSATION_CONTROLS:
+        raise ProtocolError("unknown_control")
+
+    if message_type == "conversation_start":
+        client_conversation_id = _require_nonempty_string(
+            payload.get("client_conversation_id"), "client_conversation_id"
+        )
+        if payload.get("conversation_id") is not None:
+            raise ProtocolError("unexpected_conversation_id")
+        _require_nonempty_string(payload.get("device_id"), "device_id")
+        audio_format = _require_nonempty_string(payload.get("audio_format"), "audio_format")
+        if audio_format not in SUPPORTED_AUDIO_FORMATS:
+            raise ProtocolError("unsupported_audio_format")
+        if payload.get("protocol_version") != "v6":
+            raise ProtocolError("unsupported_protocol_version")
+        answer_mode = _require_nonempty_string(payload.get("answer_mode"), "answer_mode")
+        if answer_mode not in SUPPORTED_ANSWER_MODES:
+            raise ProtocolError("unsupported_answer_mode")
+        return ClientControl(
+            type=message_type,
+            client_conversation_id=client_conversation_id,
+            data=_extra_payload(payload),
+        )
+
+    conversation_id = _require_nonempty_string(payload.get("conversation_id"), "conversation_id")
+    if message_type == "conversation_end":
+        _require_nonempty_string(payload.get("reason"), "reason")
+        return ClientControl(type=message_type, conversation_id=conversation_id, data=_extra_payload(payload))
+
+    turn_id, turn_index = _parse_turn_correlation(payload)
+    return ClientControl(
+        type=message_type,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        turn_index=turn_index,
+        data=_extra_payload(payload),
+    )
+
+
+def conversation_ready_event(client_conversation_id: str, conversation_id: str) -> ServerEvent:
+    return ServerEvent(
+        type="conversation_ready",
+        conversation_id=_require_nonempty_string(conversation_id, "conversation_id"),
+        data={
+            "client_conversation_id": _require_nonempty_string(
+                client_conversation_id, "client_conversation_id"
+            )
+        },
+    )
+
+
+def conversation_done_event(conversation_id: str) -> ServerEvent:
+    return ServerEvent(
+        type="conversation_done",
+        conversation_id=_require_nonempty_string(conversation_id, "conversation_id"),
+    )
+
+
+def error_event(conversation_id: str, code: str, message: str | None = None) -> ServerEvent:
+    data: dict[str, Any] = {"code": _require_nonempty_string(code, "code")}
+    if message is not None:
+        data["message"] = message
+    return ServerEvent(
+        type="error",
+        conversation_id=_require_nonempty_string(conversation_id, "conversation_id"),
+        data=data,
+    )
+
+
+def ack_event(
+    conversation_id: str,
+    turn_id: str,
+    turn_index: int,
+    message_type: str,
+    highest_contiguous_sequence: int | None = None,
+) -> ServerEvent:
+    data = {"acknowledged_type": _require_nonempty_string(message_type, "message_type")}
+    return _turn_event(
+        "ack",
+        conversation_id,
+        turn_id,
+        turn_index,
+        highest_contiguous_sequence=highest_contiguous_sequence,
+        data=data,
+    )
+
+
+def asr_final_event(
+    conversation_id: str, turn_id: str, turn_index: int, text: str
+) -> ServerEvent:
+    return _turn_event(
+        "asr_final", conversation_id, turn_id, turn_index, data={"text": text}
+    )
+
+
+def turn_result_event(
+    conversation_id: str,
+    turn_id: str,
+    turn_index: int,
+    *,
+    session_id: str,
+    audio_stream_url: str,
+) -> ServerEvent:
+    return _turn_event(
+        "turn_result",
+        conversation_id,
+        turn_id,
+        turn_index,
+        data={"session_id": session_id, "audio_stream_url": audio_stream_url, "status": "ready"},
+    )
+
+
+def turn_complete_event(
+    conversation_id: str, turn_id: str, turn_index: int, outcome: TurnOutcome
+) -> ServerEvent:
+    return _turn_event("turn_complete", conversation_id, turn_id, turn_index, outcome=outcome)
+
+
+def turn_cancelled_event(conversation_id: str, turn_id: str, turn_index: int) -> ServerEvent:
+    return _turn_event("turn_cancelled", conversation_id, turn_id, turn_index)
+
+
+def build_turn_event(
+    transition: TurnTransition,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    turn_index: int,
+) -> ServerEvent:
+    if not isinstance(transition, TurnTransition) or transition.type not in _TURN_EVENTS:
+        raise ProtocolError("invalid_turn_transition")
+    if turn_id != transition.turn_id:
+        raise ProtocolError("turn_mismatch")
+    if turn_index != transition.turn_index:
+        raise ProtocolError("turn_index_mismatch")
+    if transition.conversation_id is not None and conversation_id != transition.conversation_id:
+        raise ProtocolError("conversation_mismatch")
+    return _turn_event(
+        transition.type,
+        conversation_id,
+        turn_id,
+        turn_index,
+        outcome=transition.outcome,
+        highest_contiguous_sequence=transition.highest_contiguous_sequence,
+        data=transition.data,
+    )
+
+
+class ConversationLimits:
+    """Connection-scoped turn and duration limits with an injectable clock."""
+
+    def __init__(
+        self,
+        *,
+        started_at: float | None = None,
+        monotonic: Callable[[], float] = default_monotonic,
+    ) -> None:
+        self._monotonic = monotonic
+        self._started_at = monotonic() if started_at is None else _validate_timestamp(started_at)
+        self._last_activity_at = self._started_at
+        self._turn_ids: set[str] = set()
+        self._turn_indices: dict[int, int] = {}
+
+    @property
+    def turn_count(self) -> int:
+        return len(self._turn_indices)
+
+    @property
+    def attempt_count(self) -> int:
+        return len(self._turn_ids)
+
+    def now(self) -> float:
+        return self._monotonic()
+
+    def check_deadline(self, now: float) -> None:
+        now = _validate_timestamp(now)
+        if now - self._started_at > MAX_CONNECTION_SECONDS:
+            raise ProtocolError("connection_time_exceeded")
+
+    def note_activity(self, now: float) -> None:
+        self.check_deadline(now)
+        self._last_activity_at = now
+
+    def start_turn(
+        self,
+        turn_id: str,
+        turn_index: int,
+        *,
+        now: float | None = None,
+        allow_index_retry: bool = False,
+    ) -> None:
+        self.note_activity(self._monotonic() if now is None else now)
+        turn_id = _require_nonempty_string(turn_id, "turn_id")
+        if turn_id in self._turn_ids:
+            raise ProtocolError("turn_id_reused")
+        if len(self._turn_indices) >= MAX_TURNS and turn_index not in self._turn_indices:
+            raise ProtocolError("turn_limit_exceeded")
+        turn_index = _validate_turn_index(turn_index)
+        attempts = self._turn_indices.get(turn_index, 0)
+        if attempts:
+            if not allow_index_retry or attempts >= 2:
+                raise ProtocolError("turn_index_conflict")
+        elif turn_index != len(self._turn_indices):
+            raise ProtocolError("turn_index_conflict")
+        self._turn_ids.add(turn_id)
+        self._turn_indices[turn_index] = attempts + 1
+
+
+class TurnStateMachine:
+    """Pure per-turn state and binary frame sequencing for the v6 protocol."""
+
+    def __init__(
+        self,
+        turn_id: str,
+        turn_index: int,
+        *,
+        conversation_id: str | None = None,
+        limits: ConversationLimits | None = None,
+        monotonic: Callable[[], float] | None = None,
+        allow_index_retry: bool = False,
+    ) -> None:
+        self.turn_id = _require_nonempty_string(turn_id, "turn_id")
+        self.turn_index = _validate_turn_index(turn_index)
+        self.conversation_id = (
+            None if conversation_id is None else _require_nonempty_string(conversation_id, "conversation_id")
+        )
+        self._limits = limits
+        self._monotonic = monotonic or (limits.now if limits is not None else default_monotonic)
+        self._allow_index_retry = allow_index_retry
+        self.state = TurnState.IDLE
+        self._frame_digests: dict[int, str] = {}
+        self._highest_contiguous_sequence = -1
+        self._audio_bytes = 0
+        self._cancelled_event: TurnTransition | None = None
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.state in {TurnState.COMPLETED, TurnState.CANCELLED}
+
+    @property
+    def highest_contiguous_sequence(self) -> int:
+        return self._highest_contiguous_sequence
+
+    @property
+    def audio_bytes(self) -> int:
+        return self._audio_bytes
+
+    def validate_correlation(
+        self, message: ClientControl | ServerEvent, *, conversation_id: str | None = None
+    ) -> None:
+        expected_conversation_id = conversation_id or self.conversation_id
+        if expected_conversation_id is None:
+            raise ProtocolError("missing_conversation_id")
+        if message.conversation_id != _require_nonempty_string(
+            expected_conversation_id, "conversation_id"
+        ):
+            raise ProtocolError("conversation_mismatch")
+        if message.turn_id != self.turn_id:
+            raise ProtocolError("turn_mismatch")
+        if message.turn_index != self.turn_index:
+            raise ProtocolError("turn_index_mismatch")
+
+    def on_turn_start(self, control: ClientControl | None = None) -> TurnTransition:
+        self._validate_control(control, "turn_start")
+        self._note_activity(start_turn=True)
+        self._require_state(TurnState.IDLE)
+        self._frame_digests.clear()
+        self._highest_contiguous_sequence = -1
+        self._audio_bytes = 0
+        self.state = TurnState.RECEIVING
+        return self._transition("ack", data={"acknowledged_type": "turn_start"})
+
+    def accept_frame(self, sequence: int, digest: str) -> TurnTransition:
+        self._require_state(TurnState.RECEIVING)
+        self._note_activity()
+        duplicate = self._check_duplicate(sequence, digest)
+        if duplicate is not None:
+            return duplicate
+        return self._record_frame(sequence, digest, frame_bytes=0)
+
+    def ingest_frame(self, sequence: int, payload: bytes | bytearray | memoryview) -> TurnTransition:
+        """Accept a binary payload after enforcing per-frame and per-turn byte limits."""
+        self._require_state(TurnState.RECEIVING)
+        self._note_activity()
+        payload = _frame_payload(payload)
+        frame_bytes = len(payload)
+        digest = sha256(payload).hexdigest()
+        duplicate = self._check_duplicate(sequence, digest)
+        if duplicate is not None:
+            return duplicate
+        if not payload:
+            raise ProtocolError("empty_frame")
+        if frame_bytes > MAX_FRAME_BYTES:
+            raise ProtocolError("frame_too_large")
+        is_new = sequence not in self._frame_digests
+        if is_new and self._audio_bytes + frame_bytes > MAX_TURN_AUDIO_BYTES:
+            raise ProtocolError("turn_audio_limit_exceeded")
+        transition = self.accept_frame(sequence, digest)
+        if is_new:
+            self._audio_bytes += frame_bytes
+        return transition
+
+    def on_turn_end(self, control: ClientControl | None = None) -> None:
+        self._validate_control(control, "turn_end")
+        self._note_activity()
+        self._require_state(TurnState.RECEIVING)
+        self.state = TurnState.PROCESSING
+
+    def on_asr_final(self, text: str) -> TurnTransition:
+        text = _require_nonempty_string(text, "text")
+        self._note_activity()
+        self._require_state(TurnState.PROCESSING)
+        self.state = TurnState.RESULT_READY
+        return self._transition("asr_final", data={"text": text})
+
+    def on_asr_empty(self) -> TurnTransition:
+        self._note_activity()
+        self._require_state(TurnState.PROCESSING)
+        self.state = TurnState.COMPLETED
+        return self._transition("turn_complete", outcome=TurnOutcome.ASR_EMPTY)
+
+    def on_turn_result(self, *, session_id: str, audio_stream_url: str) -> TurnTransition:
+        session_id = _require_nonempty_string(session_id, "session_id")
+        audio_stream_url = _require_nonempty_string(audio_stream_url, "audio_stream_url")
+        self._note_activity()
+        self._require_state(TurnState.RESULT_READY)
+        self.state = TurnState.PLAYING
+        return self._transition(
+            "turn_result",
+            data={"session_id": session_id, "audio_stream_url": audio_stream_url, "status": "ready"},
+        )
+
+    def on_turn_playback_complete(self, control: ClientControl | None = None) -> TurnTransition:
+        self._validate_control(control, "turn_playback_complete")
+        self._note_activity()
+        self._require_state(TurnState.PLAYING)
+        self.state = TurnState.COMPLETED
+        return self._transition("turn_complete", outcome=TurnOutcome.PLAYED)
+
+    def on_technical_error(self) -> TurnTransition:
+        self._note_activity()
+        return self._complete_error(TurnOutcome.TECHNICAL_ERROR)
+
+    def on_rejected(self) -> TurnTransition:
+        self._note_activity()
+        return self._complete_error(TurnOutcome.REJECTED)
+
+    def begin_cancel(self, control: ClientControl | None = None) -> None:
+        self._validate_control(control, "turn_cancel")
+        self._note_activity()
+        if self.state is TurnState.CANCELLED:
+            return
+        if self.state not in {
+            TurnState.RECEIVING,
+            TurnState.PROCESSING,
+            TurnState.RESULT_READY,
+            TurnState.PLAYING,
+            TurnState.CANCELLING,
+        }:
+            raise ProtocolError("invalid_state")
+        self.state = TurnState.CANCELLING
+
+    def on_turn_cancelled(self) -> TurnTransition:
+        self._note_activity()
+        if self.state is TurnState.CANCELLED:
+            assert self._cancelled_event is not None
+            return self._cancelled_event
+        self._require_state(TurnState.CANCELLING)
+        self.state = TurnState.CANCELLED
+        self._cancelled_event = self._transition("turn_cancelled")
+        return self._cancelled_event
+
+    def on_turn_cancel(self, control: ClientControl | None = None) -> TurnTransition:
+        self.begin_cancel(control)
+        return self.on_turn_cancelled()
+
+    def _complete_error(self, outcome: TurnOutcome) -> TurnTransition:
+        if self.state not in {
+            TurnState.RECEIVING,
+            TurnState.PROCESSING,
+            TurnState.RESULT_READY,
+            TurnState.PLAYING,
+        }:
+            raise ProtocolError("invalid_state")
+        self.state = TurnState.COMPLETED
+        return self._transition("turn_complete", outcome=outcome)
+
+    def _validate_control(self, control: ClientControl | None, expected_type: str) -> None:
+        if control is None:
+            return
+        if control.type != expected_type:
+            raise ProtocolError("unexpected_control")
+        _require_turn_correlation(control.conversation_id, control.turn_id, control.turn_index)
+        if control.turn_id != self.turn_id:
+            raise ProtocolError("turn_mismatch")
+        if control.turn_index != self.turn_index:
+            raise ProtocolError("turn_index_mismatch")
+        self._bind_conversation(control.conversation_id)
+
+    def _bind_conversation(self, conversation_id: str | None) -> None:
+        conversation_id = _require_nonempty_string(conversation_id, "conversation_id")
+        if self.conversation_id is None:
+            self.conversation_id = conversation_id
+        elif self.conversation_id != conversation_id:
+            raise ProtocolError("conversation_mismatch")
+
+    def _note_activity(self, *, start_turn: bool = False) -> None:
+        if self._limits is None:
+            return
+        now = self._monotonic()
+        if start_turn:
+            self._limits.start_turn(
+                self.turn_id,
+                self.turn_index,
+                now=now,
+                allow_index_retry=self._allow_index_retry,
+            )
+        else:
+            self._limits.note_activity(now)
+
+    def _require_state(self, expected: TurnState) -> None:
+        if self.state is not expected:
+            raise ProtocolError("invalid_state")
+
+    def _check_duplicate(self, sequence: int, digest: str) -> TurnTransition | None:
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+            raise ProtocolError("invalid_sequence")
+        _require_nonempty_string(digest, "digest")
+        existing_digest = self._frame_digests.get(sequence)
+        if existing_digest is None:
+            return None
+        if existing_digest != digest:
+            raise ProtocolError("sequence_conflict")
+        return self._transition(
+            "ack",
+            highest_contiguous_sequence=self._highest_contiguous_sequence,
+            data={"acknowledged_type": "binary"},
+        )
+
+    def _record_frame(self, sequence: int, digest: str, *, frame_bytes: int) -> TurnTransition:
+        if len(self._frame_digests) >= MAX_FRAMES_PER_TURN:
+            raise ProtocolError("frame_limit_exceeded")
+        self._frame_digests[sequence] = digest
+        self._audio_bytes += frame_bytes
+        while self._highest_contiguous_sequence + 1 in self._frame_digests:
+            self._highest_contiguous_sequence += 1
+        return self._transition(
+            "ack",
+            highest_contiguous_sequence=self._highest_contiguous_sequence,
+            data={"acknowledged_type": "binary"},
+        )
+
+    def _transition(
+        self,
+        transition_type: str,
+        *,
+        outcome: TurnOutcome | None = None,
+        highest_contiguous_sequence: int | None = None,
+        data: Mapping[str, Any] | None = None,
+    ) -> TurnTransition:
+        return TurnTransition(
+            type=transition_type,
+            turn_id=self.turn_id,
+            turn_index=self.turn_index,
+            conversation_id=self.conversation_id,
+            outcome=outcome,
+            highest_contiguous_sequence=highest_contiguous_sequence,
+            data={} if data is None else data,
+        )
+
+
+def _turn_event(
+    event_type: str,
+    conversation_id: str,
+    turn_id: str,
+    turn_index: int,
+    *,
+    outcome: TurnOutcome | None = None,
+    highest_contiguous_sequence: int | None = None,
+    data: Mapping[str, Any] | None = None,
+) -> ServerEvent:
+    conversation_id, turn_id, turn_index = _require_turn_correlation(
+        conversation_id, turn_id, turn_index
+    )
+    return ServerEvent(
+        type=event_type,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        turn_index=turn_index,
+        outcome=outcome,
+        highest_contiguous_sequence=highest_contiguous_sequence,
+        data={} if data is None else data,
+    )
+
+
+def _parse_turn_correlation(payload: Mapping[str, Any]) -> tuple[str, int]:
+    return _require_turn_correlation(
+        payload.get("conversation_id"), payload.get("turn_id"), payload.get("turn_index")
+    )[1:]
+
+
+def _require_turn_correlation(
+    conversation_id: Any, turn_id: Any, turn_index: Any
+) -> tuple[str, str, int]:
+    return (
+        _require_nonempty_string(conversation_id, "conversation_id"),
+        _require_nonempty_string(turn_id, "turn_id"),
+        _validate_turn_index(turn_index),
+    )
+
+
+def _validate_server_event(event: ServerEvent) -> None:
+    if event.type == "turn_complete":
+        _require_event_data_keys(event.data, allowed=frozenset())
+        if not isinstance(event.outcome, TurnOutcome):
+            raise ProtocolError("invalid_turn_outcome")
+        _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
+        return
+    if event.type == "ack":
+        _require_event_data_keys(event.data, allowed=frozenset({"acknowledged_type"}))
+        _require_absent(event.outcome, "outcome")
+        acknowledged_type = _require_event_data_string(event.data, "acknowledged_type")
+        if acknowledged_type == "binary":
+            sequence = event.highest_contiguous_sequence
+            if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < -1:
+                raise ProtocolError("invalid_highest_contiguous_sequence")
+        else:
+            _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
+            if acknowledged_type != "turn_start":
+                raise ProtocolError("unsupported_acknowledged_type")
+        return
+    if event.type == "asr_final":
+        _require_event_data_keys(event.data, allowed=frozenset({"text"}))
+        _require_absent(event.outcome, "outcome")
+        _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
+        _require_event_data_string(event.data, "text")
+        return
+    if event.type == "turn_result":
+        _require_event_data_keys(
+            event.data, allowed=frozenset({"session_id", "audio_stream_url", "status"})
+        )
+        _require_absent(event.outcome, "outcome")
+        _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
+        _require_event_data_string(event.data, "session_id")
+        _require_event_data_string(event.data, "audio_stream_url")
+        if _require_event_data_string(event.data, "status") != "ready":
+            raise ProtocolError("unsupported_turn_result_status")
+        return
+    if event.type == "turn_cancelled":
+        _require_event_data_keys(event.data, allowed=frozenset())
+        _require_absent(event.outcome, "outcome")
+        _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
+        return
+    if event.type == "conversation_ready":
+        _require_conversation_event_shape(event)
+        _require_event_data_keys(event.data, allowed=frozenset({"client_conversation_id"}))
+        _require_event_data_string(event.data, "client_conversation_id")
+        return
+    if event.type == "conversation_done":
+        _require_conversation_event_shape(event)
+        _require_event_data_keys(event.data, allowed=frozenset())
+        return
+    if event.type == "error":
+        _require_conversation_event_shape(event)
+        _require_event_data_keys(event.data, allowed=frozenset({"code", "message"}))
+        _require_event_data_string(event.data, "code")
+        if "message" in event.data and not isinstance(event.data["message"], str):
+            raise ProtocolError("invalid_message")
+
+
+def _require_event_data_string(data: Mapping[str, Any], field_name: str) -> str:
+    return _require_nonempty_string(data.get(field_name), field_name)
+
+
+def _require_event_data_keys(data: Mapping[str, Any], *, allowed: frozenset[str]) -> None:
+    if not set(data).issubset(allowed):
+        raise ProtocolError("unexpected_event_data")
+
+
+def _require_absent(value: Any, field_name: str) -> None:
+    if value is not None:
+        raise ProtocolError(f"unexpected_{field_name}")
+
+
+def _require_conversation_event_shape(event: ServerEvent) -> None:
+    _require_absent(event.turn_id, "turn_id")
+    _require_absent(event.turn_index, "turn_index")
+    _require_absent(event.outcome, "outcome")
+    _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
+
+
+def _frame_payload(payload: bytes | bytearray | memoryview) -> bytes:
+    if not isinstance(payload, (bytes, bytearray, memoryview)):
+        raise ProtocolError("invalid_frame_bytes")
+    payload = bytes(payload)
+    return payload
+
+
+def _validate_timestamp(value: Any) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ProtocolError("invalid_timestamp")
+    return float(value)
+
+
+def _require_nonempty_string(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ProtocolError(f"missing_{field_name}")
+    return value
+
+
+def _validate_turn_index(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value < MAX_TURNS:
+        raise ProtocolError("invalid_turn_index")
+    return value
+
+
+def _extra_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    reserved = {"type", "conversation_id", "turn_id", "turn_index", "client_conversation_id"}
+    return {key: value for key, value in payload.items() if key not in reserved}

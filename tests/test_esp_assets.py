@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from array import array
+import hashlib
 import re
 import subprocess
 import sys
@@ -371,7 +373,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_BOOT_SOUND_EMBEDDED_ENABLED", config)
         self.assertEqual("1", _read_macro_value(config, "DEMO_BOOT_SOUND_EMBEDDED_ENABLED"))
         self.assertIn("DEMO_BOOT_SOUND_PATH", config)
-        self.assertEqual('"/spiffs/boot_amitabha_1.pcm"', _read_macro_value(config, "DEMO_BOOT_SOUND_PATH"))
+        self.assertEqual('"/spiffs/intro_1.pcm"', _read_macro_value(config, "DEMO_BOOT_SOUND_PATH"))
         self.assertIn("DEMO_BOOT_SOUND_MAX_BYTES", config)
         self.assertEqual("(64 * 1024)", _read_macro_value(config, "DEMO_BOOT_SOUND_MAX_BYTES"))
 
@@ -380,12 +382,14 @@ class EspAssetTests(unittest.TestCase):
         audio_header = (ESP_DIR / "main" / "audio_out.h").read_text(encoding="utf-8")
         audio_source = (ESP_DIR / "main" / "audio_out.c").read_text(encoding="utf-8")
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        prompt_source = (ESP_DIR / "main" / "prompt_arbiter.c").read_text(encoding="utf-8")
 
         self.assertIn('target_add_binary_data(${COMPONENT_LIB} "../spiffs/boot_amitabha_1.pcm" BINARY)', main_cmake)
         self.assertIn("audio_out_play_pcm_buffer", audio_header)
         self.assertIn("audio_out_play_pcm_buffer", audio_source)
-        self.assertIn("_binary_boot_amitabha_1_pcm_start", main_source)
-        self.assertIn("_binary_boot_amitabha_1_pcm_end", main_source)
+        self.assertIn("_binary_intro_1_pcm_start", main_source)
+        self.assertIn("_binary_intro_1_pcm_end", main_source)
+        self.assertIn("_binary_boot_amitabha_1_pcm_start", prompt_source)
         self.assertIn("audio_out_play_pcm_buffer(boot_sound_start", main_source)
         self.assertNotIn("audio_out_play_pcm_file(DEMO_BOOT_SOUND_PATH", main_source)
 
@@ -445,8 +449,8 @@ class EspAssetTests(unittest.TestCase):
         network_source = (ESP_DIR / "main" / "app_network.cc").read_text(encoding="utf-8")
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
 
-        self.assertIn("78/esp-wifi-connect", manifest)
-        self.assertIn("3.1.4", manifest)
+        self.assertNotIn("78/esp-wifi-connect", manifest)
+        self.assertTrue((ESP_DIR / "components" / "esp-wifi-connect").is_dir())
         self.assertIn('"app_network.cc"', cmake)
         self.assertTrue((ESP_DIR / "main" / "app_network.h").exists())
 
@@ -462,10 +466,11 @@ class EspAssetTests(unittest.TestCase):
 
         self.assertIn('extern "C"', network_header)
         self.assertIn("WifiManager::GetInstance()", network_source)
-        self.assertIn("SsidManager::GetInstance()", network_source)
+        self.assertIn("WifiCredentialStore::GetInstance()", network_source)
+        self.assertNotIn("SsidManager::GetInstance()", network_source)
         self.assertIn("StartStation()", network_source)
         self.assertIn("StartConfigAp()", network_source)
-        self.assertIn('ssid_prefix = "Miaoban"', network_source)
+        self.assertIn('ssid_prefix = "GreenMotive"', network_source)
         self.assertIn("wifi_saved_credentials_found", network_source)
         self.assertIn("wifi_no_saved_credentials", network_source)
         self.assertIn("wifi_config_mode_enter", network_source)
@@ -477,6 +482,147 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("app_network_is_connected()", main_source)
         self.assertNotIn("DEMO_WIFI_SSID is empty", main_source)
         self.assertNotIn("Wi-Fi initialization failed; stopping demo", main_source)
+
+    def test_wifi_credentials_are_versioned_bounded_and_owned_by_the_app(self) -> None:
+        component = ESP_DIR / "components" / "esp-wifi-connect"
+        upstream = (component / "UPSTREAM.md").read_text(encoding="utf-8")
+        manifest = (ESP_DIR / "main" / "idf_component.yml").read_text(encoding="utf-8")
+        header = (ESP_DIR / "main" / "wifi_credential_store.h").read_text(encoding="utf-8")
+        source = (ESP_DIR / "main" / "wifi_credential_store.cc").read_text(encoding="utf-8")
+        manager = (component / "ssid_manager.cc").read_text(encoding="utf-8")
+
+        self.assertIn("78/esp-wifi-connect", upstream)
+        self.assertIn("3.1.4", upstream)
+        self.assertIn("096f3db8146eebc784d5b7dda61af361e405bf9f72771561c78779daedbdbfb7", upstream)
+        self.assertNotIn("78/esp-wifi-connect", manifest)
+        self.assertIn("MAX_WIFI_CREDENTIALS = 5", header)
+        for symbol in ("LoadAndMigrate", "List", "Upsert", "MarkSuccessful"):
+            self.assertIn(symbol, header)
+            self.assertIn(symbol, source)
+
+        self.assertIn('nvs_open("wifi", NVS_READONLY', source)
+        self.assertNotIn('nvs_open("wifi", NVS_READWRITE', source)
+        self.assertIn("WriteSlot", source)
+        self.assertIn("ReadSlot", source)
+        self.assertIn("SetActiveSlot", source)
+        self.assertLess(source.index("WriteSlot(inactive_slot"), source.index("ReadSlot(inactive_slot"))
+        self.assertLess(source.index("ReadSlot(inactive_slot"), source.index("SetActiveSlot(inactive_slot"))
+        self.assertNotIn("nvs_open", manager)
+        self.assertIn("SetChangeCallback", manager)
+
+    def test_v7_wifi_and_prompt_policy_contract(self) -> None:
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        network = (ESP_DIR / "main" / "app_network.cc").read_text(encoding="utf-8")
+        policy = (ESP_DIR / "main" / "wifi_connection_policy.cc").read_text(encoding="utf-8")
+        prompt_header = (ESP_DIR / "main" / "prompt_arbiter.h").read_text(encoding="utf-8")
+        prompt_source = (ESP_DIR / "main" / "prompt_arbiter.c").read_text(encoding="utf-8")
+        cmake = (ESP_DIR / "main" / "CMakeLists.txt").read_text(encoding="utf-8")
+
+        self.assertIn("DEMO_WIFI_BOOT_DEADLINE_MS 8000", config)
+        self.assertIn("DEMO_WIFI_CANDIDATE_TIMEOUT_MS 3000", config)
+        self.assertIn("DEMO_WIFI_RUNTIME_PROMPT_MS 12000", config)
+        self.assertIn("DEMO_WIFI_RUNTIME_RETRY_MS {15000, 30000, 60000}", config)
+        self.assertIn("DEMO_WIFI_RECONFIG_TIMEOUT_MS (5 * 60 * 1000)", config)
+        self.assertIn("DEMO_WIFI_SMARTCONFIG_ENABLED 0", config)
+        self.assertIn('config.ssid_prefix = "GreenMotive"', network)
+        self.assertIn("wifi_policy_rank_scan", policy)
+        self.assertIn("wifi_policy_candidate_deadline", policy)
+        self.assertIn("wifi_policy_next_rescan_deadline", policy)
+        self.assertIn("esp_wifi_disconnect", network)
+        self.assertIn("prompt_arbiter_submit(PROMPT_NETWORK_REQUIRED", network)
+        self.assertNotIn("audio_out_play", network)
+
+        for declaration in (
+            "PROMPT_BOOT_BELL = 10",
+            "PROMPT_NETWORK_CONNECTED = 20",
+            "PROMPT_CONVERSATION_DONE = 30",
+            "PROMPT_FOLLOWUP_CUE = 35",
+            "PROMPT_SPEAK = 40",
+            "PROMPT_NETWORK_REQUIRED = 50",
+            "PROMPT_TECHNICAL_ERROR = 60",
+            "prompt_arbiter_submit",
+            "prompt_arbiter_wait_key",
+            "prompt_arbiter_set_conversation_active",
+        ):
+            self.assertIn(declaration, prompt_header)
+        self.assertIn("prompt_arbiter_owner_task", prompt_source)
+        self.assertIn("s_playing_key", prompt_source)
+        self.assertIn("prompt_arbiter_network_prompt_is_relevant", prompt_source)
+        self.assertIn(
+            "case PROMPT_TECHNICAL_ERROR:\n"
+            "        start = prompt_conversation_done_start;\n"
+            "        end = prompt_conversation_done_end;",
+            prompt_source,
+        )
+        for asset in (
+            "network_required_1.pcm",
+            "conversation_done_1.pcm",
+            "followup_bell_1.pcm",
+            "intro_1.pcm",
+            "boot_amitabha_1.pcm",
+        ):
+            self.assertIn(f'../spiffs/{asset}', cmake)
+
+    def test_v7_embedded_prompt_assets_have_locked_pcm_hashes(self) -> None:
+        expected = {
+            "intro_1.pcm": (48_000, "b9cbe3581350a0a168b57d3c2b6c887099ae11c4b070fb741368cc5eb78cb424"),
+            "network_required_1.pcm": (61_440, "672cf8483a72cb39b60fbe385725ff1a06b81d63ae0da7e818b3821268c53cd8"),
+            "conversation_done_1.pcm": (46_080, "135a2c19a79f4cb9b89b7d962e439a4609ca2be275195ce45f19edbd4973aef0"),
+            "followup_bell_1.pcm": (27_200, "88d1d0bbad225cf5c0fea00cff23dc037172f717cc6a95d9c579b4f23de2d8fb"),
+        }
+        for name, (size, digest) in expected.items():
+            payload = (ESP_DIR / "spiffs" / name).read_bytes()
+            self.assertEqual(size, len(payload))
+            self.assertGreater(len(payload), 0)
+            self.assertEqual(0, len(payload) % 2)
+            self.assertNotEqual(b"RIFF", payload[:4])
+            self.assertEqual(digest, hashlib.sha256(payload).hexdigest())
+            if name == "followup_bell_1.pcm":
+                self.assertEqual(bytes(3_200), payload[-3_200:])
+
+    def test_v7_wifi_review_regressions_are_guarded(self) -> None:
+        component = ESP_DIR / "components" / "esp-wifi-connect"
+        station = (component / "wifi_station.cc").read_text(encoding="utf-8")
+        manager = (component / "wifi_manager.cc").read_text(encoding="utf-8")
+        portal = (component / "wifi_configuration_ap.cc").read_text(encoding="utf-8")
+        ssid_header = (component / "include" / "ssid_manager.h").read_text(encoding="utf-8")
+        credential_store = (ESP_DIR / "main" / "wifi_credential_store.cc").read_text(encoding="utf-8")
+        network = (ESP_DIR / "main" / "app_network.cc").read_text(encoding="utf-8")
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+
+        self.assertIn("wifi_policy_rank_scan", station)
+        self.assertIn("wifi_policy_next_rescan_deadline", station)
+        self.assertIn("on_no_candidates_", station)
+        self.assertNotIn("strcpy((char *)wifi_config.sta", station)
+        self.assertNotIn("strlcpy((char *)wifi_config.sta", portal)
+        self.assertNotIn("WIFI_EVENT_STA_CONNECTED) {\n        xEventGroupSetBits", portal)
+        self.assertNotIn("Password: %s", portal)
+        self.assertIn("bool Save(", (component / "include" / "wifi_configuration_ap.h").read_text(encoding="utf-8"))
+        self.assertIn("std::function<bool(", ssid_header)
+        self.assertIn("const auto previous = credentials_", credential_store)
+        self.assertIn("APP_NETWORK_NO_CANDIDATES_BIT", network)
+        self.assertEqual(1, network.count('xTaskCreate(app_network_runtime_outage_task'))
+        self.assertIn("portMUX_TYPE s_outage_lock", network)
+        self.assertIn("prompt_arbiter_set_conversation_active", main_source)
+        self.assertIn("_binary_intro_1_pcm_start", main_source)
+
+        for method in ("StartStation", "StopStation", "StartConfigAp", "StopConfigAp"):
+            body = manager.split(f"void WifiManager::{method}()", 1)[1].split("\n}", 1)[0]
+            self.assertIn("lock.unlock()", body)
+
+    def test_v7_voice_prompts_are_audible_and_not_clipped(self) -> None:
+        minimum_sizes = {
+            "network_required_1.pcm": 20_000,
+            "conversation_done_1.pcm": 12_000,
+        }
+        for name, minimum_size in minimum_sizes.items():
+            payload = (ESP_DIR / "spiffs" / name).read_bytes()
+            samples = array("h")
+            samples.frombytes(payload)
+            peak = max(abs(value) for value in samples)
+            self.assertGreaterEqual(len(payload), minimum_size)
+            self.assertGreaterEqual(peak, 7_000)
+            self.assertLess(peak, 30_000)
 
     def test_wifi_board_lite_raises_event_task_stack_for_esp_wifi_connect_callbacks(self) -> None:
         sdkconfig_defaults = (ESP_DIR / "sdkconfig.defaults.vocat_lowcost_16m8m").read_text(encoding="utf-8")
@@ -821,6 +967,48 @@ class EspAssetTests(unittest.TestCase):
         timeout_pos = main_source.index("stage=ota_app_validation event=timeout")
         mark_valid_pos = main_source.index("esp_ota_mark_app_valid_cancel_rollback")
         self.assertLess(mark_valid_pos, timeout_pos)
+
+    def test_ota_pending_watchdog_starts_before_blocking_network_startup(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        runtime = main_source.rsplit("static void app_runtime_task(void *arg)", 1)[1]
+        prepare_pos = runtime.index("app_ota_rollback_prepare_before_network()")
+        network_pos = runtime.index("app_network_start()")
+
+        self.assertLess(prepare_pos, network_pos)
+        self.assertIn("app_ota_p3c_load_pending", main_source)
+        self.assertIn("xTaskCreate(app_ota_rollback_validation_timeout_task", main_source)
+        self.assertIn("s_ota_credential_migration_ready", main_source)
+        self.assertIn("s_ota_audio_ready", main_source)
+        self.assertIn("audio_in_probe()", main_source)
+        self.assertIn("app_network_is_connected()", main_source)
+        business_ready = main_source.split(
+            "static void app_ota_rollback_note_business_ready", 1
+        )[1].split("static void app_ota_rollback_validation_task", 1)[0]
+        self.assertNotIn("s_ota_post_reboot_report_done", business_ready)
+        self.assertLess(
+            runtime.index("s_ota_credential_migration_ready = true"),
+            runtime.index("s_ota_audio_ready = true"),
+        )
+
+    def test_ota_validation_report_failure_cannot_rearm_local_rollback(self) -> None:
+        main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
+        validation = main_source.rsplit(
+            "static void app_ota_rollback_validation_task(void *arg)", 1
+        )[1].split("static void app_ota_rollback_validation_timeout_task", 1)[0]
+
+        mark_pos = validation.index("esp_ota_mark_app_valid_cancel_rollback()")
+        clear_local_pos = validation.index("s_ota_rollback_validation_pending = false")
+        clear_pending_pos = validation.index("app_ota_p3c_clear_pending()")
+        report_pos = validation.index("app_submit_ota_app_validated_report")
+        self.assertLess(mark_pos, clear_local_pos)
+        self.assertLess(clear_local_pos, report_pos)
+        self.assertLess(clear_pending_pos, report_pos)
+
+        timeout = main_source.rsplit(
+            "static void app_ota_rollback_validation_timeout_task(void *arg)", 1
+        )[1].split("#endif", 1)[0]
+        self.assertIn("if (s_ota_rollback_validation_pending)", timeout)
+        self.assertNotIn("!s_ota_rollback_business_ready", timeout)
 
     def test_ota_p3d_persists_breadcrumb_and_reports_rollback_recovered(self) -> None:
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")

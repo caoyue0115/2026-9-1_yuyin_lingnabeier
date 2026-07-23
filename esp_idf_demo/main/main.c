@@ -4,6 +4,10 @@
 #include "audio_in.h"
 #include "audio_out.h"
 #include "cloud_client.h"
+#include "prompt_arbiter.h"
+#include "cloud_conversation.h"
+#include "conversation_controller.h"
+#include "playback_session.h"
 
 #include "esp_err.h"
 #include "esp_app_desc.h"
@@ -11,12 +15,14 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_random.h"
 #include "esp_spiffs.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
+#include "nvs_flash.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -24,8 +30,8 @@
 
 static const char *TAG = "esp_idf_demo";
 
-extern const uint8_t boot_sound_embed_start[] asm("_binary_boot_amitabha_1_pcm_start");
-extern const uint8_t boot_sound_embed_end[] asm("_binary_boot_amitabha_1_pcm_end");
+extern const uint8_t boot_sound_embed_start[] asm("_binary_intro_1_pcm_start");
+extern const uint8_t boot_sound_embed_end[] asm("_binary_intro_1_pcm_end");
 static TaskHandle_t s_pipeline_task_handle = NULL;
 static TaskHandle_t s_ota_manifest_task_handle = NULL;
 static int64_t s_last_pipeline_finish_us = 0;
@@ -109,6 +115,11 @@ static void app_set_state(app_state_t *current_state, app_state_t next_state)
              app_state_to_string(*current_state),
              app_state_to_string(next_state));
     *current_state = next_state;
+    const bool conversation_active =
+        next_state != APP_STATE_IDLE &&
+        next_state != APP_STATE_DONE &&
+        next_state != APP_STATE_ERROR;
+    prompt_arbiter_set_conversation_active(conversation_active);
 }
 
 typedef struct {
@@ -407,6 +418,283 @@ static esp_err_t app_v5_opus_uplink_pcm_sink(const uint8_t *pcm,
     return cloud_client_opus_uplink_send_pcm((cloud_opus_uplink_t *)user_ctx, pcm, pcm_bytes);
 }
 
+typedef struct {
+    cloud_conversation_t *conversation;
+    volatile bool done;
+    esp_err_t result;
+} app_v6_open_task_t;
+
+static void app_v6_open_task(void *arg)
+{
+    app_v6_open_task_t *task = (app_v6_open_task_t *)arg;
+    task->result = cloud_conversation_open(&task->conversation);
+    task->done = true;
+    vTaskDelete(NULL);
+}
+
+static esp_err_t app_v6_pcm_sink(const uint8_t *pcm, size_t pcm_bytes, void *user_ctx)
+{
+    return cloud_conversation_send_pcm((cloud_conversation_t *)user_ctx, pcm, pcm_bytes);
+}
+
+static esp_err_t app_v6_play_prompt(prompt_id_t prompt, const char *key)
+{
+    esp_err_t ret = prompt_arbiter_submit(prompt, key);
+    if (ret == ESP_OK) {
+        ret = prompt_arbiter_wait_key(key, 15000);
+    }
+    return ret;
+}
+
+static esp_err_t run_v6_conversation(app_state_t *state)
+{
+    if (!app_network_is_connected()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    conversation_controller_t controller;
+    conversation_controller_init(&controller);
+    (void)conversation_controller_handle(&controller, CONVERSATION_EVENT_BEGIN,
+                                         esp_timer_get_time() / 1000);
+
+    app_v6_open_task_t open_task = {0};
+    cloud_conversation_t *conversation = NULL;
+    if (xTaskCreate(app_v6_open_task,
+                    "v6_open",
+                    V5_OPUS_UPLINK_WS_TASK_STACK_SIZE,
+                    &open_task,
+                    DEMO_PIPELINE_TASK_PRIORITY,
+                    NULL) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    app_set_state(state, APP_STATE_PLAYING_PROMPT);
+    esp_err_t ret = app_v6_play_prompt(PROMPT_SPEAK, "conversation:speak:0");
+    while (!open_task.done) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    conversation = open_task.conversation;
+    if (ret != ESP_OK || !open_task.done || open_task.result != ESP_OK) {
+        ret = ret != ESP_OK ? ret : (open_task.done ? open_task.result : ESP_ERR_TIMEOUT);
+        if (conversation != NULL) {
+            (void)cloud_conversation_close(conversation, "prompt_or_open_failed");
+        }
+        goto technical_failure;
+    }
+    (void)conversation_controller_handle(&controller, CONVERSATION_EVENT_PROMPT_DONE,
+                                         esp_timer_get_time() / 1000);
+
+    while (true) {
+        uint8_t *speech_prefix = NULL;
+        size_t speech_prefix_bytes = 0;
+        audio_in_wait_metrics_t wait_metrics = {0};
+        app_set_state(state, APP_STATE_WAITING_SPEECH);
+        const uint32_t start_threshold =
+            controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW
+                ? DEMO_FOLLOWUP_VAD_START_THRESHOLD
+                : DEMO_RECORD_VAD_START_THRESHOLD;
+        ret = audio_in_wait_for_speech_start(&speech_prefix,
+                                             &speech_prefix_bytes,
+                                             start_threshold,
+                                             &wait_metrics);
+        if (ret == DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT) {
+            conversation_transition_t timeout = conversation_controller_handle(
+                &controller, CONVERSATION_EVENT_SPEECH_TIMEOUT,
+                esp_timer_get_time() / 1000);
+            audio_in_deinit();
+            free(speech_prefix);
+            if (timeout.action == CONVERSATION_ACTION_PLAY_REPROMPT) {
+                app_set_state(state, APP_STATE_PLAYING_PROMPT);
+                ret = app_v6_play_prompt(PROMPT_REPROMPT, "conversation:reprompt");
+                if (ret != ESP_OK) {
+                    goto technical_close;
+                }
+                (void)conversation_controller_handle(&controller,
+                                                     CONVERSATION_EVENT_PROMPT_DONE,
+                                                     esp_timer_get_time() / 1000);
+                continue;
+            }
+            if (timeout.action != CONVERSATION_ACTION_PLAY_DONE) {
+                const int64_t now_ms = esp_timer_get_time() / 1000;
+                if (timeout.deadline_ms > now_ms) {
+                    vTaskDelay(pdMS_TO_TICKS((uint32_t)(timeout.deadline_ms - now_ms)));
+                }
+                timeout = conversation_controller_handle(
+                    &controller, CONVERSATION_EVENT_TIMER,
+                    esp_timer_get_time() / 1000);
+                if (timeout.action != CONVERSATION_ACTION_PLAY_DONE) {
+                    goto technical_close;
+                }
+            }
+            ret = app_v6_play_prompt(PROMPT_CONVERSATION_DONE, "conversation:done");
+            (void)conversation_controller_handle(&controller,
+                                                 CONVERSATION_EVENT_PROMPT_DONE,
+                                                 esp_timer_get_time() / 1000);
+            (void)cloud_conversation_close(conversation, "normal_silence");
+            app_cleanup_pipeline_resources();
+            app_set_state(state, APP_STATE_IDLE);
+            return ret;
+        }
+        if (ret != ESP_OK) {
+            free(speech_prefix);
+            goto technical_close;
+        }
+        if (controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW) {
+            (void)conversation_controller_handle(&controller,
+                                                 CONVERSATION_EVENT_SPEECH_STARTED,
+                                                 esp_timer_get_time() / 1000);
+        }
+
+        char turn_id[64];
+        snprintf(turn_id, sizeof(turn_id), "turn-%u-%04x-%08lx",
+                 (unsigned)controller.turn_index,
+                 (unsigned)(controller.attempt_serial + 1),
+                 (unsigned long)esp_random());
+        ret = cloud_conversation_start_turn(conversation, controller.turn_index, turn_id);
+        if (ret != ESP_OK) {
+            free(speech_prefix);
+            goto technical_close;
+        }
+
+        app_set_state(state, APP_STATE_RECORDING);
+        audio_in_record_metrics_t record_metrics = {0};
+        ret = audio_in_stream_after_speech_start(speech_prefix,
+                                                 speech_prefix_bytes,
+                                                 app_v6_pcm_sink,
+                                                 conversation,
+                                                 &record_metrics);
+        free(speech_prefix);
+        audio_in_deinit();
+        if (ret != ESP_OK) {
+            (void)cloud_conversation_cancel_turn(conversation, turn_id);
+            goto technical_close;
+        }
+        (void)conversation_controller_handle(&controller,
+                                             CONVERSATION_EVENT_RECORDING_DONE,
+                                             esp_timer_get_time() / 1000);
+
+        app_set_state(state, APP_STATE_POSTING_SESSION);
+        cloud_realtime_session_t result = {0};
+        ret = cloud_conversation_finish_turn(conversation, &result);
+        if (ret != ESP_OK) {
+            goto technical_close;
+        }
+        if (strcmp(result.status, "asr_empty") == 0) {
+            conversation_transition_t empty = conversation_controller_handle(
+                &controller, CONVERSATION_EVENT_ASR_EMPTY,
+                esp_timer_get_time() / 1000);
+            if (empty.action == CONVERSATION_ACTION_PLAY_REPROMPT) {
+                app_set_state(state, APP_STATE_PLAYING_PROMPT);
+                ret = app_v6_play_prompt(PROMPT_REPROMPT, "conversation:reprompt");
+                if (ret != ESP_OK) {
+                    goto technical_close;
+                }
+                (void)conversation_controller_handle(&controller,
+                                                     CONVERSATION_EVENT_PROMPT_DONE,
+                                                     esp_timer_get_time() / 1000);
+                continue;
+            }
+            ret = app_v6_play_prompt(PROMPT_CONVERSATION_DONE, "conversation:done");
+            (void)cloud_conversation_close(conversation, "asr_empty");
+            app_cleanup_pipeline_resources();
+            app_set_state(state, APP_STATE_IDLE);
+            return ret;
+        }
+
+        conversation_transition_t ready = conversation_controller_handle(
+            &controller, CONVERSATION_EVENT_TURN_RESULT,
+            esp_timer_get_time() / 1000);
+        if (ready.action != CONVERSATION_ACTION_PLAY_ANSWER ||
+            result.audio_stream_url[0] == '\0') {
+            ret = DEMO_CLOUD_ERR_INVALID_RESPONSE;
+            goto technical_close;
+        }
+        app_set_state(state, APP_STATE_PLAYING);
+        playback_session_t *playback = NULL;
+        ret = playback_session_start(result.audio_stream_url, &playback);
+        if (ret == ESP_OK) {
+            esp_err_t join_ret = playback_session_join(&playback,
+                                                       pdMS_TO_TICKS(DEMO_REALTIME_AUDIO_TASK_JOIN_TIMEOUT_MS),
+                                                       &ret);
+            if (join_ret == ESP_ERR_TIMEOUT && playback != NULL) {
+                (void)playback_session_cancel(playback, ESP_ERR_TIMEOUT);
+                join_ret = playback_session_join(&playback,
+                                                 pdMS_TO_TICKS(DEMO_REALTIME_AUDIO_CLOSE_WAIT_TIMEOUT_MS),
+                                                 &ret);
+            }
+            if (join_ret != ESP_OK) {
+                if (playback != NULL) {
+                    const esp_err_t detach_ret = playback_session_detach(&playback);
+                    if (detach_ret != ESP_OK) {
+                        ESP_LOGE(TAG,
+                                 "Playback cleanup ownership transfer failed: %s",
+                                 esp_err_to_name(detach_ret));
+                    }
+                }
+                ret = join_ret;
+            }
+        }
+        if (ret != ESP_OK) {
+            goto technical_close;
+        }
+        const int64_t playback_done_ms = esp_timer_get_time() / 1000;
+        ret = cloud_conversation_complete_playback(conversation, turn_id);
+        if (ret != ESP_OK) {
+            goto technical_close;
+        }
+        conversation_transition_t played = conversation_controller_handle(
+            &controller, CONVERSATION_EVENT_PLAYBACK_DONE,
+            playback_done_ms);
+        if (played.action == CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE) {
+            char followup_cue_key[64];
+            snprintf(followup_cue_key,
+                     sizeof(followup_cue_key),
+                     "conversation:followup-cue:%u",
+                     (unsigned)(played.turn_index + 1));
+            app_set_state(state, APP_STATE_PLAYING_PROMPT);
+            ret = app_v6_play_prompt(PROMPT_FOLLOWUP_CUE, followup_cue_key);
+            if (ret != ESP_OK) {
+                goto technical_close;
+            }
+            conversation_transition_t cue_done = conversation_controller_handle(
+                &controller, CONVERSATION_EVENT_PROMPT_DONE,
+                esp_timer_get_time() / 1000);
+            if (cue_done.action != CONVERSATION_ACTION_LISTEN_FOLLOWUP) {
+                goto technical_close;
+            }
+            continue;
+        }
+        if (played.state == CONVERSATION_STATE_ENDING) {
+            const int64_t now_ms = esp_timer_get_time() / 1000;
+            if (played.deadline_ms > now_ms) {
+                vTaskDelay(pdMS_TO_TICKS((uint32_t)(played.deadline_ms - now_ms)));
+            }
+            (void)conversation_controller_handle(&controller,
+                                                 CONVERSATION_EVENT_TIMER,
+                                                 esp_timer_get_time() / 1000);
+            ret = app_v6_play_prompt(PROMPT_CONVERSATION_DONE, "conversation:done");
+            (void)conversation_controller_handle(&controller,
+                                                 CONVERSATION_EVENT_PROMPT_DONE,
+                                                 esp_timer_get_time() / 1000);
+            (void)cloud_conversation_close(conversation, "followup_limit");
+            app_cleanup_pipeline_resources();
+            app_set_state(state, APP_STATE_IDLE);
+            return ret;
+        }
+    }
+
+technical_close:
+    (void)conversation_controller_handle(&controller,
+                                         CONVERSATION_EVENT_TECHNICAL_ERROR,
+                                         esp_timer_get_time() / 1000);
+    (void)cloud_conversation_close(conversation, "technical_error");
+technical_failure:
+    (void)app_v6_play_prompt(PROMPT_TECHNICAL_ERROR, "conversation:technical_error");
+    app_cleanup_pipeline_resources();
+    app_set_state(state, APP_STATE_ERROR);
+    app_set_state(state, APP_STATE_IDLE);
+    return ret;
+}
+
 static void app_log_v5_uplink_metrics(const cloud_opus_uplink_metrics_t *metrics,
                                       int64_t pipeline_start_us)
 {
@@ -515,7 +803,7 @@ static esp_err_t app_validate_runtime_config(void)
     return ESP_OK;
 }
 
-static esp_err_t run_trigger_pipeline(app_state_t *state)
+static esp_err_t __attribute__((unused)) run_trigger_pipeline(app_state_t *state)
 {
     esp_err_t ret = ESP_OK;
     int64_t pipeline_start_us = esp_timer_get_time();
@@ -585,7 +873,10 @@ static esp_err_t run_trigger_pipeline(app_state_t *state)
         app_log_stage_start("waiting_speech");
         stage_start_us = esp_timer_get_time();
         for (int attempt = 0; attempt <= DEMO_MIC_INIT_RETRY_COUNT; ++attempt) {
-            ret = audio_in_wait_for_speech_start(&speech_prefix, &speech_prefix_bytes, &wait_metrics);
+            ret = audio_in_wait_for_speech_start(&speech_prefix,
+                                                 &speech_prefix_bytes,
+                                                 DEMO_RECORD_VAD_START_THRESHOLD,
+                                                 &wait_metrics);
             if (ret == ESP_OK || ret == DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT) {
                 break;
             }
@@ -1065,7 +1356,11 @@ static void app_pipeline_task(void *arg)
                  (unsigned)task_args->event.y);
     }
 
+#if DEMO_V6_CONVERSATION_ENABLED
+    (void)run_v6_conversation(&s_app_state);
+#else
     (void)run_trigger_pipeline(&s_app_state);
+#endif
 
     free(task_args);
     s_pipeline_task_handle = NULL;
@@ -1140,6 +1435,8 @@ typedef struct {
 #if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
 static volatile bool s_ota_rollback_validation_pending = false;
 static volatile bool s_ota_rollback_business_ready = false;
+static volatile bool s_ota_credential_migration_ready = false;
+static volatile bool s_ota_audio_ready = false;
 static TaskHandle_t s_ota_rollback_validation_task_handle = NULL;
 static TaskHandle_t s_ota_rollback_timeout_task_handle = NULL;
 static app_ota_p3c_pending_t s_ota_rollback_pending = {0};
@@ -1288,6 +1585,70 @@ static esp_err_t app_ota_p3c_load_pending(app_ota_p3c_pending_t *pending)
     pending->pending = true;
     return ESP_OK;
 }
+
+#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+static esp_err_t app_ota_p3c_store_last_stage(const char *last_stage);
+
+static void app_ota_rollback_arm_pending(const app_ota_p3c_pending_t *pending)
+{
+    if (pending == NULL || !pending->pending) {
+        return;
+    }
+    s_ota_rollback_pending = *pending;
+    s_ota_rollback_validation_pending = true;
+    s_ota_rollback_business_ready = false;
+    if (s_ota_rollback_timeout_task_handle != NULL) {
+        return;
+    }
+    BaseType_t timeout_ok = xTaskCreate(app_ota_rollback_validation_timeout_task,
+                                        "ota_valid_timeout",
+                                        DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE,
+                                        NULL,
+                                        tskIDLE_PRIORITY + 1,
+                                        &s_ota_rollback_timeout_task_handle);
+    if (timeout_ok != pdPASS) {
+        s_ota_rollback_timeout_task_handle = NULL;
+        ESP_LOGE(TAG,
+                 "stage=ota_app_validation_timeout event=task_start_failed release_id=%s",
+                 pending->release_id);
+        (void)app_ota_p3c_store_last_stage("app_validation_watchdog_failed");
+        esp_restart();
+        return;
+    }
+    (void)app_ota_p3c_store_last_stage("app_validation_waiting");
+}
+
+static void app_ota_rollback_prepare_before_network(void)
+{
+    esp_err_t ret = nvs_flash_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "stage=ota_app_validation event=nvs_init_failed err=%s",
+                 esp_err_to_name(ret));
+        esp_restart();
+        return;
+    }
+
+    app_ota_p3c_pending_t pending = {0};
+    ret = app_ota_p3c_load_pending(&pending);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        return;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "stage=ota_app_validation event=pending_read_failed err=%s",
+                 esp_err_to_name(ret));
+        esp_restart();
+        return;
+    }
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const bool running_pending = running != NULL &&
+                                 running->address == pending.partition_address &&
+                                 strcmp(running->label, pending.partition_label) == 0;
+    if (running_pending) {
+        app_ota_rollback_arm_pending(&pending);
+    }
+}
+#endif
 
 static esp_err_t app_ota_p3c_store_last_stage(const char *last_stage)
 {
@@ -1793,23 +2154,6 @@ static void app_ota_post_reboot_confirm_if_pending(const char *app_version)
 #if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
         if (ok) {
             (void)app_ota_p3c_store_last_stage("post_reboot_confirm_reported");
-            s_ota_rollback_pending = pending;
-            s_ota_rollback_validation_pending = true;
-            s_ota_rollback_business_ready = false;
-            BaseType_t timeout_ok = xTaskCreate(app_ota_rollback_validation_timeout_task,
-                                                "ota_valid_timeout",
-                                                DEMO_OTA_POST_REBOOT_TASK_STACK_SIZE,
-                                                NULL,
-                                                tskIDLE_PRIORITY + 1,
-                                                &s_ota_rollback_timeout_task_handle);
-            if (timeout_ok != pdPASS) {
-                s_ota_rollback_timeout_task_handle = NULL;
-                ESP_LOGW(TAG,
-                         "stage=ota_app_validation_timeout event=task_start_failed release_id=%s",
-                         pending.release_id);
-            } else {
-                (void)app_ota_p3c_store_last_stage("app_validation_waiting");
-            }
         } else {
             int recovered_http_status = 0;
             esp_err_t recovered_ret =
@@ -1861,7 +2205,9 @@ static void app_ota_post_reboot_confirm_task(void *arg)
 static void app_ota_rollback_note_business_ready(const char *app_version)
 {
     (void)app_version;
-    if (!s_ota_rollback_validation_pending || s_ota_rollback_business_ready) {
+    if (!s_ota_rollback_validation_pending || s_ota_rollback_business_ready ||
+        !s_ota_credential_migration_ready || !s_ota_audio_ready ||
+        !app_network_is_connected()) {
         return;
     }
     s_ota_rollback_business_ready = true;
@@ -1892,6 +2238,11 @@ static void app_ota_rollback_validation_task(void *arg)
     const char *app_version = app_desc != NULL ? app_desc->version : "";
 
     esp_err_t ret = esp_ota_mark_app_valid_cancel_rollback();
+    if (ret == ESP_OK) {
+        s_ota_rollback_validation_pending = false;
+        (void)app_ota_p3c_store_last_stage("app_validation_local_done");
+        (void)app_ota_p3c_clear_pending();
+    }
     int report_http_status = 0;
     esp_err_t report_ret = app_submit_ota_app_validated_report(&s_ota_rollback_pending,
                                                                app_version,
@@ -1926,8 +2277,12 @@ static void app_ota_rollback_validation_task(void *arg)
     if (ret == ESP_OK && report_ret == ESP_OK) {
         (void)app_ota_p3c_store_last_stage("app_validation_done");
         (void)app_ota_p3c_clear_pending();
-        s_ota_rollback_validation_pending = false;
+    } else if (ret == ESP_OK) {
+        (void)app_ota_p3c_store_last_stage("app_validation_report_pending");
     } else {
+        s_ota_rollback_business_ready = false;
+    }
+    if (ret == ESP_OK) {
         s_ota_rollback_business_ready = false;
     }
     s_ota_rollback_validation_task_handle = NULL;
@@ -1938,7 +2293,7 @@ static void app_ota_rollback_validation_timeout_task(void *arg)
 {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(DEMO_OTA_ROLLBACK_VALIDATION_TIMEOUT_MS));
-    if (s_ota_rollback_validation_pending && !s_ota_rollback_business_ready) {
+    if (s_ota_rollback_validation_pending) {
         ESP_LOGW(TAG,
                  "stage=ota_app_validation event=timeout release_id=%s timeout_ms=%d",
                  s_ota_rollback_pending.release_id,
@@ -2273,12 +2628,18 @@ static void app_runtime_task(void *arg)
         return;
     }
 
+#if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+    app_ota_rollback_prepare_before_network();
+#endif
     if (app_network_start() != ESP_OK) {
         app_set_state(&s_app_state, APP_STATE_ERROR);
         ESP_LOGE(TAG, "Network initialization failed; stopping demo");
         vTaskDelete(NULL);
         return;
     }
+#if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+    s_ota_credential_migration_ready = true;
+#endif
     ESP_LOGI(TAG, "network_ready ssid=%s", app_network_get_ssid());
 #if DEMO_OTA_BOOT_SWITCH_ENABLED
     (void)app_ota_p3c_store_last_stage("wifi_connected");
@@ -2299,12 +2660,25 @@ static void app_runtime_task(void *arg)
 #if DEMO_OTA_BOOT_SWITCH_ENABLED
     (void)app_ota_p3c_store_last_stage("trigger_init_start");
 #endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */
+#if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+    esp_err_t audio_probe_ret = audio_in_probe();
+    if (audio_probe_ret != ESP_OK) {
+        app_set_state(&s_app_state, APP_STATE_ERROR);
+        ESP_LOGE(TAG, "Audio initialization probe failed; stopping demo: %s",
+                 esp_err_to_name(audio_probe_ret));
+        vTaskDelete(NULL);
+        return;
+    }
+#endif
     if (trigger_input_init(&trigger) != ESP_OK) {
         app_set_state(&s_app_state, APP_STATE_ERROR);
         ESP_LOGE(TAG, "Trigger initialization failed; stopping demo");
         vTaskDelete(NULL);
         return;
     }
+#if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+    s_ota_audio_ready = true;
+#endif
 #if DEMO_OTA_BOOT_SWITCH_ENABLED
     (void)app_ota_p3c_store_last_stage("trigger_init_done");
 #endif /* DEMO_OTA_BOOT_SWITCH_ENABLED */

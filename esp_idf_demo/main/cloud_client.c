@@ -26,6 +26,12 @@
 
 static const char *TAG = "cloud_client";
 
+static bool cloud_cancel_requested(const volatile bool *flag)
+{
+    return flag != NULL &&
+           __atomic_load_n((const bool *)flag, __ATOMIC_ACQUIRE);
+}
+
 typedef struct {
     char *data;
     size_t len;
@@ -111,6 +117,7 @@ typedef struct {
     esp_err_t decode_result;
     esp_err_t playback_result;
     int64_t decode_eof_us;
+    volatile bool *cancel_requested;
 } cloud_stream_runtime_t;
 
 struct cloud_opus_uplink {
@@ -1280,6 +1287,13 @@ static void cloud_decode_task(void *arg)
         if (packet == NULL) {
             continue;
         }
+        if (cloud_cancel_requested(runtime->cancel_requested) &&
+            packet->type == CLOUD_STREAM_PACKET) {
+            cloud_encoded_packet_free(packet);
+            runtime->decode_result = cloud_forward_terminal_packet(
+                runtime->pcm_queue, CLOUD_STREAM_ERROR, DEMO_CLOUD_ERR_AUDIO_CANCELLED);
+            break;
+        }
         if (runtime->metrics != NULL) {
             cloud_metrics_sub_pending_bytes(&runtime->metrics->receive_queue_pending_bytes,
                                             packet->payload_len);
@@ -1388,6 +1402,12 @@ static void cloud_playback_task(void *arg)
         }
         if (packet == NULL) {
             continue;
+        }
+        if (cloud_cancel_requested(runtime->cancel_requested) &&
+            packet->type == CLOUD_STREAM_PACKET) {
+            cloud_pcm_packet_free(packet);
+            runtime->playback_result = DEMO_CLOUD_ERR_AUDIO_CANCELLED;
+            break;
         }
         if (runtime->metrics != NULL) {
             cloud_metrics_sub_pending_bytes(&runtime->metrics->pcm_queue_pending_bytes,
@@ -2673,10 +2693,12 @@ esp_err_t cloud_client_poll_task(const char *task_id,
     return ESP_ERR_TIMEOUT;
 }
 
-esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
-                                             cloud_realtime_audio_chunk_callback_t callback,
-                                             void *user_ctx,
-                                             cloud_realtime_audio_metrics_t *metrics)
+esp_err_t cloud_client_stream_realtime_audio_cancellable(
+    const char *audio_stream_url,
+    cloud_realtime_audio_chunk_callback_t callback,
+    void *user_ctx,
+    cloud_realtime_audio_metrics_t *metrics,
+    volatile bool *cancel_requested)
 {
     if (audio_stream_url == NULL || audio_stream_url[0] == '\0' || callback == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -2703,9 +2725,9 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
         return ESP_FAIL;
     }
     esp_http_client_set_header(client, "X-Accept-Audio-Format", DEMO_REALTIME_AUDIO_ACCEPT_FORMATS);
+    esp_http_client_set_header(client, "X-Device-Id", DEMO_DEVICE_ID);
     ESP_LOGI(TAG,
-             "Opening realtime audio stream url=%s accept_audio_format=%s",
-             audio_stream_url,
+             "Opening realtime audio stream accept_audio_format=%s",
              DEMO_REALTIME_AUDIO_ACCEPT_FORMATS);
     cloud_log_heap_snapshot("stream_open_before");
 
@@ -2746,6 +2768,7 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
     runtime.audio_format = CLOUD_AUDIO_FORMAT_PCM;
     runtime.decode_result = ESP_OK;
     runtime.playback_result = ESP_OK;
+    runtime.cancel_requested = cancel_requested;
     runtime.encoded_queue = xQueueCreate(DEMO_REALTIME_AUDIO_ENCODED_QUEUE_LENGTH, sizeof(cloud_encoded_packet_t *));
     runtime.pcm_queue = xQueueCreate(DEMO_REALTIME_AUDIO_PCM_QUEUE_LENGTH, sizeof(cloud_pcm_packet_t *));
     if (frame_state == NULL || chunk == NULL || runtime.encoded_queue == NULL || runtime.pcm_queue == NULL) {
@@ -2843,7 +2866,15 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
     int64_t last_chunk_us = 0;
     esp_err_t stream_result = ESP_OK;
     while (true) {
+        if (cloud_cancel_requested(cancel_requested)) {
+            stream_result = DEMO_CLOUD_ERR_AUDIO_CANCELLED;
+            break;
+        }
         int read_len = esp_http_client_read(client, (char *)chunk, DEMO_REALTIME_AUDIO_HTTP_READ_CHUNK_BYTES);
+        if (cloud_cancel_requested(cancel_requested)) {
+            stream_result = DEMO_CLOUD_ERR_AUDIO_CANCELLED;
+            break;
+        }
         if (read_len < 0) {
             ESP_LOGE(TAG, "Realtime audio read failed: %d", read_len);
             stream_result = ESP_FAIL;
@@ -3004,7 +3035,19 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
     free(frame_state);
     free(audio_headers);
     cloud_log_heap_snapshot("stream_cleanup_after");
+    ESP_LOGI(TAG,
+             "Realtime audio stream finished stream_result=%s decode_result=%s playback_result=%s format=%s chunks=%u packets=%u audio_bytes=%u",
+             esp_err_to_name(stream_result),
+             esp_err_to_name(runtime.decode_result),
+             esp_err_to_name(runtime.playback_result),
+             audio_format == CLOUD_AUDIO_FORMAT_OPUS ? "opus" : "pcm",
+             metrics != NULL ? (unsigned)metrics->chunk_count : 0,
+             metrics != NULL ? (unsigned)metrics->packet_count : 0,
+             metrics != NULL ? (unsigned)metrics->total_audio_bytes : 0);
 
+    if (stream_result == DEMO_CLOUD_ERR_AUDIO_CANCELLED) {
+        return stream_result;
+    }
     if (!saw_first_chunk) {
         return DEMO_CLOUD_ERR_AUDIO_STREAM_EARLY_EOF;
     }
@@ -3018,4 +3061,16 @@ esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
         return runtime.playback_result;
     }
     return ESP_OK;
+}
+
+esp_err_t cloud_client_stream_realtime_audio(const char *audio_stream_url,
+                                             cloud_realtime_audio_chunk_callback_t callback,
+                                             void *user_ctx,
+                                             cloud_realtime_audio_metrics_t *metrics)
+{
+    return cloud_client_stream_realtime_audio_cancellable(audio_stream_url,
+                                                          callback,
+                                                          user_ctx,
+                                                          metrics,
+                                                          NULL);
 }
