@@ -628,7 +628,6 @@ static esp_err_t run_v6_conversation(app_state_t *state)
                         ESP_LOGE(TAG,
                                  "Playback cleanup ownership transfer failed: %s",
                                  esp_err_to_name(detach_ret));
-                        esp_restart();
                     }
                 }
                 ret = join_ret;

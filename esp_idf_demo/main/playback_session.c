@@ -8,6 +8,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 
 #include <stdbool.h>
@@ -207,10 +208,14 @@ esp_err_t playback_session_detach(playback_session_t **session)
     const bool ready = s_playback_reaper_task_handle != NULL && queue != NULL;
     taskEXIT_CRITICAL(&s_playback_reaper_lock);
     if (!ready) {
+        ESP_LOGE(TAG, "Playback reaper unavailable");
+        esp_restart();
         return ESP_ERR_INVALID_STATE;
     }
     playback_session_t *owned = *session;
     if (xQueueSend(queue, &owned, 0) != pdTRUE) {
+        ESP_LOGE(TAG, "Playback reaper queue full");
+        esp_restart();
         return ESP_ERR_TIMEOUT;
     }
     *session = NULL;
