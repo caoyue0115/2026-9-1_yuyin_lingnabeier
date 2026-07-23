@@ -5,6 +5,7 @@
 #include "config.h"
 
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -16,13 +17,18 @@
 #include <string.h>
 
 #define PLAYBACK_SESSION_DONE_BIT BIT0
-#define PLAYBACK_REAPER_STACK_WORDS 1024
+#define PLAYBACK_REAPER_STACK_BYTES 4096
 
 static const char *TAG = "playback_session";
 static StaticTask_t s_playback_reaper_task;
-static StackType_t s_playback_reaper_stack[PLAYBACK_REAPER_STACK_WORDS];
+static StackType_t
+    s_playback_reaper_stack[PLAYBACK_REAPER_STACK_BYTES / sizeof(StackType_t)];
+static StaticQueue_t s_playback_reaper_queue;
+static uint8_t s_playback_reaper_queue_storage[sizeof(playback_session_t *)];
 static portMUX_TYPE s_playback_reaper_lock = portMUX_INITIALIZER_UNLOCKED;
-static bool s_playback_reaper_active;
+static QueueHandle_t s_playback_reaper_queue_handle;
+static TaskHandle_t s_playback_reaper_task_handle;
+static bool s_playback_reaper_initializing;
 
 struct playback_session {
     char url[DEMO_CLOUD_AUDIO_URL_MAX_LEN];
@@ -83,12 +89,71 @@ static void playback_session_owner(void *arg)
     vTaskSuspend(NULL);
 }
 
+static void playback_session_reaper(void *arg)
+{
+    QueueHandle_t queue = (QueueHandle_t)arg;
+    while (true) {
+        playback_session_t *session = NULL;
+        if (xQueueReceive(queue, &session, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        esp_err_t playback_result = ESP_FAIL;
+        while (session != NULL &&
+               playback_session_join(&session, portMAX_DELAY, &playback_result) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+}
+
+static esp_err_t playback_session_ensure_reaper(void)
+{
+    taskENTER_CRITICAL(&s_playback_reaper_lock);
+    if (s_playback_reaper_task_handle != NULL) {
+        taskEXIT_CRITICAL(&s_playback_reaper_lock);
+        return ESP_OK;
+    }
+    if (s_playback_reaper_initializing) {
+        taskEXIT_CRITICAL(&s_playback_reaper_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_playback_reaper_initializing = true;
+    taskEXIT_CRITICAL(&s_playback_reaper_lock);
+
+    QueueHandle_t queue = xQueueCreateStatic(1,
+                                             sizeof(playback_session_t *),
+                                             s_playback_reaper_queue_storage,
+                                             &s_playback_reaper_queue);
+    TaskHandle_t task = NULL;
+    if (queue != NULL) {
+        task = xTaskCreateStatic(playback_session_reaper,
+                                 "playback_reaper",
+                                 PLAYBACK_REAPER_STACK_BYTES,
+                                 queue,
+                                 tskIDLE_PRIORITY + 1,
+                                 s_playback_reaper_stack,
+                                 &s_playback_reaper_task);
+    }
+
+    taskENTER_CRITICAL(&s_playback_reaper_lock);
+    if (task != NULL) {
+        s_playback_reaper_queue_handle = queue;
+        s_playback_reaper_task_handle = task;
+    }
+    s_playback_reaper_initializing = false;
+    taskEXIT_CRITICAL(&s_playback_reaper_lock);
+    return task != NULL ? ESP_OK : ESP_FAIL;
+}
+
 esp_err_t playback_session_start(const char *url, playback_session_t **out)
 {
     if (url == NULL || url[0] == '\0' || out == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     *out = NULL;
+    esp_err_t ret = playback_session_ensure_reaper();
+    if (ret != ESP_OK) {
+        return ret;
+    }
     playback_session_t *session = calloc(1, sizeof(*session));
     if (session == NULL) {
         return ESP_ERR_NO_MEM;
@@ -129,20 +194,6 @@ esp_err_t playback_session_cancel(playback_session_t *session, int reason)
     return ESP_OK;
 }
 
-static void playback_session_reaper(void *arg)
-{
-    playback_session_t *session = (playback_session_t *)arg;
-    esp_err_t playback_result = ESP_FAIL;
-    while (session != NULL &&
-           playback_session_join(&session, portMAX_DELAY, &playback_result) != ESP_OK) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    taskENTER_CRITICAL(&s_playback_reaper_lock);
-    s_playback_reaper_active = false;
-    taskEXIT_CRITICAL(&s_playback_reaper_lock);
-    vTaskDelete(NULL);
-}
-
 esp_err_t playback_session_detach(playback_session_t **session)
 {
     if (session == NULL) {
@@ -152,24 +203,15 @@ esp_err_t playback_session_detach(playback_session_t **session)
         return ESP_OK;
     }
     taskENTER_CRITICAL(&s_playback_reaper_lock);
-    if (s_playback_reaper_active) {
-        taskEXIT_CRITICAL(&s_playback_reaper_lock);
+    QueueHandle_t queue = s_playback_reaper_queue_handle;
+    const bool ready = s_playback_reaper_task_handle != NULL && queue != NULL;
+    taskEXIT_CRITICAL(&s_playback_reaper_lock);
+    if (!ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    s_playback_reaper_active = true;
-    taskEXIT_CRITICAL(&s_playback_reaper_lock);
-    TaskHandle_t reaper = xTaskCreateStatic(playback_session_reaper,
-                                           "playback_reaper",
-                                           PLAYBACK_REAPER_STACK_WORDS,
-                                           *session,
-                                           tskIDLE_PRIORITY + 1,
-                                           s_playback_reaper_stack,
-                                           &s_playback_reaper_task);
-    if (reaper == NULL) {
-        taskENTER_CRITICAL(&s_playback_reaper_lock);
-        s_playback_reaper_active = false;
-        taskEXIT_CRITICAL(&s_playback_reaper_lock);
-        return ESP_FAIL;
+    playback_session_t *owned = *session;
+    if (xQueueSend(queue, &owned, 0) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
     }
     *session = NULL;
     return ESP_OK;

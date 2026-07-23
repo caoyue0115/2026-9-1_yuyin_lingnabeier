@@ -200,6 +200,13 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertIn("detach_ret", playback_block)
         self.assertIn("esp_restart()", playback_block)
         self.assertIn("xTaskCreateStatic", playback_c)
+        self.assertIn("xQueueCreateStatic", playback_c)
+        self.assertIn("xQueueReceive", playback_c)
+        reaper = playback_c.split("static void playback_session_reaper", 1)[1].split(
+            "esp_err_t playback_session_detach", 1
+        )[0]
+        self.assertNotIn("vTaskDelete(NULL)", reaper)
+        self.assertIn("#define PLAYBACK_REAPER_STACK_BYTES 4096", playback_c)
         self.assertIn(
             "__atomic_store_n(&session->last_progress_us, esp_timer_get_time(), __ATOMIC_RELEASE)",
             playback_c,
