@@ -16,8 +16,13 @@
 #include <string.h>
 
 #define PLAYBACK_SESSION_DONE_BIT BIT0
+#define PLAYBACK_REAPER_STACK_WORDS 1024
 
 static const char *TAG = "playback_session";
+static StaticTask_t s_playback_reaper_task;
+static StackType_t s_playback_reaper_stack[PLAYBACK_REAPER_STACK_WORDS];
+static portMUX_TYPE s_playback_reaper_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_playback_reaper_active;
 
 struct playback_session {
     char url[DEMO_CLOUD_AUDIO_URL_MAX_LEN];
@@ -132,6 +137,9 @@ static void playback_session_reaper(void *arg)
            playback_session_join(&session, portMAX_DELAY, &playback_result) != ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+    taskENTER_CRITICAL(&s_playback_reaper_lock);
+    s_playback_reaper_active = false;
+    taskEXIT_CRITICAL(&s_playback_reaper_lock);
     vTaskDelete(NULL);
 }
 
@@ -143,13 +151,25 @@ esp_err_t playback_session_detach(playback_session_t **session)
     if (*session == NULL) {
         return ESP_OK;
     }
-    if (xTaskCreate(playback_session_reaper,
-                    "playback_reaper",
-                    3072,
-                    *session,
-                    tskIDLE_PRIORITY + 1,
-                    NULL) != pdPASS) {
-        return ESP_ERR_NO_MEM;
+    taskENTER_CRITICAL(&s_playback_reaper_lock);
+    if (s_playback_reaper_active) {
+        taskEXIT_CRITICAL(&s_playback_reaper_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_playback_reaper_active = true;
+    taskEXIT_CRITICAL(&s_playback_reaper_lock);
+    TaskHandle_t reaper = xTaskCreateStatic(playback_session_reaper,
+                                           "playback_reaper",
+                                           PLAYBACK_REAPER_STACK_WORDS,
+                                           *session,
+                                           tskIDLE_PRIORITY + 1,
+                                           s_playback_reaper_stack,
+                                           &s_playback_reaper_task);
+    if (reaper == NULL) {
+        taskENTER_CRITICAL(&s_playback_reaper_lock);
+        s_playback_reaper_active = false;
+        taskEXIT_CRITICAL(&s_playback_reaper_lock);
+        return ESP_FAIL;
     }
     *session = NULL;
     return ESP_OK;

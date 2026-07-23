@@ -623,7 +623,13 @@ static esp_err_t run_v6_conversation(app_state_t *state)
             }
             if (join_ret != ESP_OK) {
                 if (playback != NULL) {
-                    (void)playback_session_detach(&playback);
+                    const esp_err_t detach_ret = playback_session_detach(&playback);
+                    if (detach_ret != ESP_OK) {
+                        ESP_LOGE(TAG,
+                                 "Playback cleanup ownership transfer failed: %s",
+                                 esp_err_to_name(detach_ret));
+                        esp_restart();
+                    }
                 }
                 ret = join_ret;
             }

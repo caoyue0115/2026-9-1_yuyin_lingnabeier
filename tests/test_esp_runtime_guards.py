@@ -197,6 +197,9 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertNotIn("DEMO_REALTIME_SESSION_TIMEOUT_MS", playback_block)
         self.assertIn("playback_session_cancel(playback, ESP_ERR_TIMEOUT)", playback_block)
         self.assertIn("playback_session_detach(&playback)", playback_block)
+        self.assertIn("detach_ret", playback_block)
+        self.assertIn("esp_restart()", playback_block)
+        self.assertIn("xTaskCreateStatic", playback_c)
         self.assertIn(
             "__atomic_store_n(&session->last_progress_us, esp_timer_get_time(), __ATOMIC_RELEASE)",
             playback_c,
