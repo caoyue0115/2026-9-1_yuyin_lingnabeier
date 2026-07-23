@@ -748,6 +748,17 @@ done:
     vTaskSuspend(NULL);
 }
 
+static esp_err_t audio_out_finish_existing_stream(void)
+{
+    esp_err_t ret = audio_out_lock();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    const bool has_stream_task = s_audio_out_state.stream_task != NULL;
+    audio_out_unlock();
+    return has_stream_task ? audio_out_close_pcm_stream() : ESP_OK;
+}
+
 esp_err_t audio_out_open_pcm_stream(uint32_t sample_rate,
                                     uint16_t channels,
                                     uint16_t bits_per_sample)
@@ -756,7 +767,12 @@ esp_err_t audio_out_open_pcm_stream(uint32_t sample_rate,
         return ESP_ERR_NOT_SUPPORTED;
     }
 
-    esp_err_t ret = audio_out_lock();
+    esp_err_t ret = audio_out_finish_existing_stream();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = audio_out_lock();
     if (ret != ESP_OK) {
         return ret;
     }
@@ -1438,6 +1454,10 @@ esp_err_t audio_out_play_pcm_file(const char *path,
 
 void audio_out_deinit(void)
 {
+    if (audio_out_finish_existing_stream() != ESP_OK) {
+        ESP_LOGE(TAG, "Audio deinit deferred while stream task is still active");
+        return;
+    }
     if (audio_out_lock() != ESP_OK) {
         return;
     }

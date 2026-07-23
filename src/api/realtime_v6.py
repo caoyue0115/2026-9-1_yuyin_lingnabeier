@@ -412,7 +412,10 @@ class ConversationSocket:
             if not turn.cancel_event.is_set():
                 try:
                     transition = turn.state_machine.on_technical_error()
-                    self.session.complete_technical_error(turn.turn_id)
+                    await asyncio.to_thread(
+                        self.session.complete_technical_error,
+                        turn.turn_id,
+                    )
                     await self._send(turn_complete_event(
                         self.session.conversation_id,
                         turn.turn_id,

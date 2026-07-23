@@ -181,6 +181,31 @@ def test_technical_error_turn_is_terminal_during_session_cleanup() -> None:
     assert turn.status == "technical_error"
 
 
+def test_technical_error_closes_provider_and_joins_running_worker() -> None:
+    worker_started = threading.Event()
+    worker_stopped = threading.Event()
+    provider_closed = threading.Event()
+
+    def worker(turn) -> None:
+        turn.add_close_hook(provider_closed.set)
+        worker_started.set()
+        turn.cancel_event.wait()
+        worker_stopped.set()
+
+    session = ConversationSession.for_test(worker=worker)
+    turn = session.start_turn("t0", 0)
+    turn.state_machine.on_turn_end()
+    turn.state_machine.on_technical_error()
+    assert worker_started.wait(0.5)
+
+    session.complete_technical_error("t0")
+
+    assert provider_closed.is_set()
+    assert worker_stopped.is_set()
+    assert turn.join(timeout=0.0)
+    assert turn.status == "technical_error"
+
+
 def test_cancel_closes_provider_and_joins_worker_within_two_seconds() -> None:
     worker_started = threading.Event()
     worker_stopped = threading.Event()

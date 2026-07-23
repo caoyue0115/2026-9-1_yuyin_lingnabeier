@@ -85,6 +85,24 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertIn("return ESP_ERR_TIMEOUT;", close)
         self.assertNotIn("continuing safe wait", close)
 
+    def test_stalled_audio_task_blocks_resource_reuse_and_deinit(self) -> None:
+        audio_out_c = (ESP_MAIN / "audio_out.c").read_text(encoding="utf-8")
+        open_stream = audio_out_c.split(
+            "esp_err_t audio_out_open_pcm_stream", 1
+        )[1].split("esp_err_t audio_out_write_pcm_chunk", 1)[0]
+        deinit = audio_out_c.split("void audio_out_deinit(void)", 1)[1]
+
+        self.assertIn("audio_out_finish_existing_stream", open_stream)
+        self.assertLess(
+            open_stream.index("audio_out_finish_existing_stream"),
+            open_stream.index("audio_install_output_locked"),
+        )
+        self.assertIn("audio_out_finish_existing_stream", deinit)
+        self.assertLess(
+            deinit.index("audio_out_finish_existing_stream"),
+            deinit.index("audio_out_deinit_locked"),
+        )
+
     def test_audio_jitter_reader_releases_small_chunks_frequently(self) -> None:
         audio_out_c = (ESP_MAIN / "audio_out.c").read_text(encoding="utf-8")
         task = audio_out_c.split("static void audio_stream_task", 1)[1].split(
@@ -111,6 +129,7 @@ class EspRuntimeGuardTests(unittest.TestCase):
             "typedef struct playback_session playback_session_t;",
             "playback_session_start(const char *url, playback_session_t **out)",
             "playback_session_cancel(playback_session_t *session, int reason)",
+            "playback_session_detach(playback_session_t **session)",
             "playback_session_join(playback_session_t **session,\n                                TickType_t inactivity_timeout,\n                                esp_err_t *playback_result)",
         ):
             self.assertIn(declaration, playback_h)
@@ -177,6 +196,11 @@ class EspRuntimeGuardTests(unittest.TestCase):
         )
         self.assertNotIn("DEMO_REALTIME_SESSION_TIMEOUT_MS", playback_block)
         self.assertIn("playback_session_cancel(playback, ESP_ERR_TIMEOUT)", playback_block)
+        self.assertIn("playback_session_detach(&playback)", playback_block)
+        self.assertIn(
+            "__atomic_store_n(&session->last_progress_us, esp_timer_get_time(), __ATOMIC_RELEASE)",
+            playback_c,
+        )
 
     def test_cloud_conversation_publishes_callback_state_atomically(self) -> None:
         conversation_c = (ESP_MAIN / "cloud_conversation.c").read_text(encoding="utf-8")

@@ -622,6 +622,9 @@ static esp_err_t run_v6_conversation(app_state_t *state)
                                                  &ret);
             }
             if (join_ret != ESP_OK) {
+                if (playback != NULL) {
+                    (void)playback_session_detach(&playback);
+                }
                 ret = join_ret;
             }
         }

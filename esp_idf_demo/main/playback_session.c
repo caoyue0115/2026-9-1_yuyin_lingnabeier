@@ -120,6 +120,38 @@ esp_err_t playback_session_cancel(playback_session_t *session, int reason)
     }
     session->cancel_reason = reason;
     __atomic_store_n(&session->cancel_requested, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&session->last_progress_us, esp_timer_get_time(), __ATOMIC_RELEASE);
+    return ESP_OK;
+}
+
+static void playback_session_reaper(void *arg)
+{
+    playback_session_t *session = (playback_session_t *)arg;
+    esp_err_t playback_result = ESP_FAIL;
+    while (session != NULL &&
+           playback_session_join(&session, portMAX_DELAY, &playback_result) != ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    vTaskDelete(NULL);
+}
+
+esp_err_t playback_session_detach(playback_session_t **session)
+{
+    if (session == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (*session == NULL) {
+        return ESP_OK;
+    }
+    if (xTaskCreate(playback_session_reaper,
+                    "playback_reaper",
+                    3072,
+                    *session,
+                    tskIDLE_PRIORITY + 1,
+                    NULL) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    *session = NULL;
     return ESP_OK;
 }
 
@@ -151,7 +183,7 @@ esp_err_t playback_session_join(playback_session_t **session,
             __atomic_load_n(&owned->last_progress_us, __ATOMIC_ACQUIRE);
         if (inactivity_timeout_us != INT64_MAX &&
             esp_timer_get_time() - last_progress_us >= inactivity_timeout_us) {
-            __atomic_store_n(&owned->cancel_requested, true, __ATOMIC_RELEASE);
+            (void)playback_session_cancel(owned, ESP_ERR_TIMEOUT);
             return ESP_ERR_TIMEOUT;
         }
     }

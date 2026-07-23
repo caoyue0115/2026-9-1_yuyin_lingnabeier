@@ -185,8 +185,15 @@ class ConversationSession:
         with self._lock:
             if turn.state_machine.state is not TurnState.COMPLETED:
                 raise ProtocolError("invalid_state")
+        cleanup_error: BaseException | None = None
+        try:
+            self._stop_turn_worker(turn)
+        except BaseException as exc:
+            cleanup_error = exc
+        with self._lock:
             turn.status = "technical_error"
-            turn.audio.revoke()
+        if cleanup_error is not None:
+            raise cleanup_error
 
     def process_turn(self, turn_id: str, question: str) -> Future[Any]:
         turn = self._require_turn(turn_id)
@@ -226,15 +233,7 @@ class ConversationSession:
         try:
             deadline = time.monotonic() + max(0.0, self._cancel_timeout_seconds)
             turn.state_machine.begin_cancel()
-            turn.audio.revoke()
-            close_timeout = min(
-                max(0.0, self._close_timeout_seconds),
-                max(0.0, deadline - time.monotonic()),
-            )
-            turn.audio.close_providers(close_timeout)
-            join_timeout = max(0.0, deadline - time.monotonic())
-            if not turn.join(timeout=join_timeout):
-                raise TimeoutError("turn_cancel_timeout")
+            self._stop_turn_worker(turn, deadline=deadline)
             transition = turn.state_machine.on_turn_cancelled()
             event = self._cancelled_event(transition)
             with self._lock:
@@ -296,13 +295,20 @@ class ConversationSession:
             active_ids = [
                 turn_id
                 for turn_id, turn in self._turns.items()
-                if turn.status not in {"committed", "cancelled", "asr_empty", "technical_error"}
+                if (
+                    turn.status not in {"committed", "cancelled", "asr_empty", "technical_error"}
+                    or (turn.future is not None and not turn.future.done())
+                )
             ]
         first_error: BaseException | None = None
         try:
             for turn_id in active_ids:
                 try:
-                    self.cancel_turn(turn_id)
+                    turn = self._require_turn(turn_id)
+                    if turn.state_machine.state is TurnState.COMPLETED:
+                        self._stop_turn_worker(turn)
+                    else:
+                        self.cancel_turn(turn_id)
                 except BaseException as exc:
                     if first_error is None:
                         first_error = exc
@@ -310,6 +316,24 @@ class ConversationSession:
             self._executor.shutdown(wait=False, cancel_futures=True)
         if first_error is not None:
             raise first_error
+
+    def _stop_turn_worker(
+        self,
+        turn: ConversationTurn,
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        if deadline is None:
+            deadline = time.monotonic() + max(0.0, self._cancel_timeout_seconds)
+        turn.audio.revoke()
+        close_timeout = min(
+            max(0.0, self._close_timeout_seconds),
+            max(0.0, deadline - time.monotonic()),
+        )
+        turn.audio.close_providers(close_timeout)
+        join_timeout = max(0.0, deadline - time.monotonic())
+        if not turn.join(timeout=join_timeout):
+            raise TimeoutError("turn_cancel_timeout")
 
     def _run_owned_turn(
         self,
