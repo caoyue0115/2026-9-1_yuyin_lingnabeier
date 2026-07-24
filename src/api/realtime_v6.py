@@ -449,6 +449,8 @@ class ConversationSocket:
             settings.realtime_audio_opus_channels,
         )
         result = transcribe_wav_result(wav_path)
+        if result.error_code == "asr_empty_text":
+            return ""
         if result.error_code:
             raise RuntimeError(result.error_code)
         return str(result.text or "").strip()
