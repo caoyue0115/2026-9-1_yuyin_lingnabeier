@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 from src.app import app
 from src.api import realtime_v6
 from src.models.conversation_v6 import ConversationLimits, MAX_CONNECTION_SECONDS, ProtocolError
+from src.providers.asr import ASRResult
 
 
 @pytest.fixture(autouse=True)
@@ -407,3 +408,61 @@ def test_turn_result_is_sent_before_streaming_tts_worker_finishes(monkeypatch) -
         await task
 
     asyncio.run(run_until_result())
+
+
+def test_asr_empty_text_completes_turn_as_asr_empty(monkeypatch) -> None:
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_json(self, payload: dict) -> None:
+            self.sent.append(payload)
+
+    session = realtime_v6.conversation_registry.create(device_id="board-1")
+    turn = session.start_turn("turn-0", 0)
+    turn.state_machine.on_turn_end()
+    websocket = FakeWebSocket()
+    socket = realtime_v6.ConversationSocket(websocket, session, device_id="board-1")
+    socket._frames[turn.turn_id] = {0: b"opus"}
+    monkeypatch.setattr(realtime_v6, "decode_framed_opus_to_pcm", lambda *_args, **_kwargs: (b"\0\0", {}))
+    monkeypatch.setattr(realtime_v6, "save_pcm_as_wav", lambda *_args, **_kwargs: "audio.wav")
+    monkeypatch.setattr(
+        realtime_v6,
+        "transcribe_wav_result",
+        lambda _path: ASRResult(None, "asr_empty_text", "empty"),
+    )
+
+    asyncio.run(socket._finish_turn(turn.turn_id))
+
+    assert websocket.sent[-1]["type"] == "turn_complete"
+    assert websocket.sent[-1]["outcome"] == "asr_empty"
+    assert turn.status == "asr_empty"
+
+
+def test_asr_provider_failure_remains_a_technical_error(monkeypatch) -> None:
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_json(self, payload: dict) -> None:
+            self.sent.append(payload)
+
+    session = realtime_v6.conversation_registry.create(device_id="board-1")
+    turn = session.start_turn("turn-0", 0)
+    turn.state_machine.on_turn_end()
+    websocket = FakeWebSocket()
+    socket = realtime_v6.ConversationSocket(websocket, session, device_id="board-1")
+    socket._frames[turn.turn_id] = {0: b"opus"}
+    monkeypatch.setattr(realtime_v6, "decode_framed_opus_to_pcm", lambda *_args, **_kwargs: (b"\0\0", {}))
+    monkeypatch.setattr(realtime_v6, "save_pcm_as_wav", lambda *_args, **_kwargs: "audio.wav")
+    monkeypatch.setattr(
+        realtime_v6,
+        "transcribe_wav_result",
+        lambda _path: ASRResult(None, "asr_timeout", "timeout"),
+    )
+
+    asyncio.run(socket._finish_turn(turn.turn_id))
+
+    assert websocket.sent[-1]["type"] == "turn_complete"
+    assert websocket.sent[-1]["outcome"] == "technical_error"
+    assert turn.status == "technical_error"
