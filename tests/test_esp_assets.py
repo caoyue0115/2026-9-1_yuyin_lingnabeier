@@ -586,6 +586,7 @@ class EspAssetTests(unittest.TestCase):
         manager = (component / "wifi_manager.cc").read_text(encoding="utf-8")
         manager_header = (component / "include" / "wifi_manager.h").read_text(encoding="utf-8")
         portal = (component / "wifi_configuration_ap.cc").read_text(encoding="utf-8")
+        portal_header = (component / "include" / "wifi_configuration_ap.h").read_text(encoding="utf-8")
         ssid_header = (component / "include" / "ssid_manager.h").read_text(encoding="utf-8")
         credential_store = (ESP_DIR / "main" / "wifi_credential_store.cc").read_text(encoding="utf-8")
         network = (ESP_DIR / "main" / "app_network.cc").read_text(encoding="utf-8")
@@ -608,11 +609,31 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("_binary_intro_1_pcm_start", main_source)
         self.assertIn('#include "wifi_lifecycle.h"', manager_header)
         self.assertIn("WifiTransitionGate transition_gate_", manager_header)
+        self.assertIn("StopConfigApForGeneration", manager)
+        self.assertIn("esp_netif_t* station_netif_ = nullptr", portal_header)
+        self.assertIn("std::atomic<bool> is_connecting_{false}", portal_header)
+        self.assertIn("std::shared_ptr<WifiConfigSession> session_", portal_header)
+        self.assertIn("esp_netif_create_default_wifi_sta()", portal)
+        self.assertIn("session_->Stop()", portal)
+        self.assertIn("xEventGroupSetBits(event_group_, WIFI_FAIL_BIT)", portal)
+        self.assertIn("esp_netif_destroy_default_wifi(station_netif_)", portal)
+        self.assertLess(
+            portal.index("esp_wifi_stop();"),
+            portal.index("esp_netif_destroy_default_wifi(station_netif_)"),
+        )
+        self.assertNotIn("static_cast<WifiConfigurationAp*>(ctx)", portal)
+        self.assertNotIn("static_cast<WifiConfigurationAp *>(ctx)", portal)
 
         for method in ("StartStation", "StopStation", "StartConfigAp", "StopConfigAp"):
             body = manager.split(f"void WifiManager::{method}()", 1)[1].split("\n}", 1)[0]
             self.assertIn("transition_gate_.Acquire()", body)
+
+        for method in ("StartStation", "StopStation", "StartConfigAp"):
+            body = manager.split(f"void WifiManager::{method}()", 1)[1].split("\n}", 1)[0]
             self.assertIn("lock.unlock()", body)
+
+        generation_stop = manager.split("bool WifiManager::StopConfigApLocked", 1)[1].split("\n}", 1)[0]
+        self.assertIn("lock.unlock()", generation_stop)
 
     def test_v7_voice_prompts_are_audible_and_not_clipped(self) -> None:
         minimum_sizes = {

@@ -271,9 +271,9 @@ void WifiManager::StartConfigAp() {
     config_ap_->SetLanguage(config_.language);
 
     // Web handler calls this when user submits config
-    config_ap_->OnExitRequested([this]() {
+    config_ap_->OnExitRequested([this](uint32_t generation) {
         ESP_LOGI(TAG, "Config exit requested from web");
-        StopConfigAp();
+        StopConfigApForGeneration(generation);
     });
 
     config_mode_active_ = true;
@@ -288,18 +288,35 @@ void WifiManager::StartConfigAp() {
 
 void WifiManager::StopConfigAp() {
     auto transition = transition_gate_.Acquire();
+    const bool stopped = StopConfigApLocked(nullptr);
+    transition.unlock();
+    if (stopped) {
+        NotifyEvent(WifiEvent::ConfigModeExit);
+    }
+}
+
+void WifiManager::StopConfigApForGeneration(uint32_t expected_generation) {
+    auto transition = transition_gate_.Acquire();
+    const bool stopped = StopConfigApLocked(&expected_generation);
+    transition.unlock();
+    if (stopped) {
+        NotifyEvent(WifiEvent::ConfigModeExit);
+    }
+}
+
+bool WifiManager::StopConfigApLocked(const uint32_t* expected_generation) {
     std::unique_lock<std::mutex> lock(mutex_);
 
-    if (!config_mode_active_) {
-        return;
+    if (!config_mode_active_ ||
+        (expected_generation != nullptr &&
+         !config_ap_->IsGenerationCurrent(*expected_generation))) {
+        return false;
     }
-
     config_mode_active_ = false;
     lock.unlock();
     ESP_LOGI(TAG, "Stopping config AP");
     config_ap_->Stop();
-    transition.unlock();
-    NotifyEvent(WifiEvent::ConfigModeExit);
+    return true;
 }
 
 bool WifiManager::IsConfigMode() const {

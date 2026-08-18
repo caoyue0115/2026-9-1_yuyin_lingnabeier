@@ -106,6 +106,8 @@ private:
     ~WifiManager();
 
     void NotifyEvent(WifiEvent event, const std::string& data = "");
+    void StopConfigApForGeneration(uint32_t expected_generation);
+    bool StopConfigApLocked(const uint32_t* expected_generation);
 
     WifiManagerConfig config_;
     std::unique_ptr<WifiStation> station_;
