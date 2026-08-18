@@ -585,6 +585,8 @@ class EspAssetTests(unittest.TestCase):
         station = (component / "wifi_station.cc").read_text(encoding="utf-8")
         manager = (component / "wifi_manager.cc").read_text(encoding="utf-8")
         manager_header = (component / "include" / "wifi_manager.h").read_text(encoding="utf-8")
+        dns_server = (component / "dns_server.cc").read_text(encoding="utf-8")
+        dns_header = (component / "include" / "dns_server.h").read_text(encoding="utf-8")
         portal = (component / "wifi_configuration_ap.cc").read_text(encoding="utf-8")
         portal_header = (component / "include" / "wifi_configuration_ap.h").read_text(encoding="utf-8")
         ssid_header = (component / "include" / "ssid_manager.h").read_text(encoding="utf-8")
@@ -623,6 +625,18 @@ class EspAssetTests(unittest.TestCase):
         )
         self.assertNotIn("static_cast<WifiConfigurationAp*>(ctx)", portal)
         self.assertNotIn("static_cast<WifiConfigurationAp *>(ctx)", portal)
+        self.assertIn("SemaphoreHandle_t stopped_signal_", dns_header)
+        self.assertIn("std::mutex socket_mutex_", dns_header)
+        self.assertIn("xSemaphoreCreateBinary()", dns_server)
+        self.assertIn("const BaseType_t created = xTaskCreate", dns_server)
+        self.assertIn("xSemaphoreGive(dns_server->stopped_signal_)", dns_server)
+        self.assertIn("xSemaphoreTake(stopped_signal_, portMAX_DELAY)", dns_server)
+        self.assertGreaterEqual(
+            dns_server.count("std::lock_guard<std::mutex> socket_lock(socket_mutex_)"),
+            2,
+        )
+        self.assertNotIn("vTaskDelay(pdMS_TO_TICKS(100))", dns_server)
+        self.assertNotIn("task_handle_ = nullptr;\n    ESP_LOGI(TAG, \"DNS server task exiting\")", dns_server)
 
         for method in ("StartStation", "StopStation", "StartConfigAp", "StopConfigAp"):
             body = manager.split(f"void WifiManager::{method}()", 1)[1].split("\n}", 1)[0]

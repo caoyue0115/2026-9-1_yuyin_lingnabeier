@@ -94,6 +94,8 @@ public:
 
     // ==================== Event ====================
 
+    // Event callbacks run synchronously. Queue mode transitions to another task;
+    // do not call Start/StopStation or Start/StopConfigAp from inside a callback.
     void SetEventCallback(std::function<void(WifiEvent, const std::string&)> callback);
 
     const WifiManagerConfig& GetConfig() const { return config_; }
