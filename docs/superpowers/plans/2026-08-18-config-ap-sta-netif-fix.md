@@ -147,7 +147,6 @@ self.assertIn("WifiTransitionGate transition_gate_", manager_header)
 for method in ("StartStation", "StopStation", "StartConfigAp", "StopConfigAp"):
     body = manager.split(f"void WifiManager::{method}()", 1)[1].split("\n}", 1)[0]
     self.assertIn("transition_gate_.Acquire()", body)
-self.assertIn("StopConfigApForGeneration", manager)
 ```
 
 - [ ] **Step 2: Run the focused test and verify RED**
@@ -158,13 +157,8 @@ Expected: failure because the transition gate and generation-aware stop are abse
 
 - [ ] **Step 3: Wire the transition gate**
 
-In `wifi_manager.h`, include `wifi_lifecycle.h`, add
-`WifiTransitionGate transition_gate_;`, and declare:
-
-```cpp
-void StopConfigApForGeneration(uint32_t expected_generation);
-void StopConfigApLocked(const uint32_t* expected_generation);
-```
+In `wifi_manager.h`, include `wifi_lifecycle.h` and add
+`WifiTransitionGate transition_gate_;`.
 
 At the beginning of every public Start/Stop method, acquire the gate before
 inspecting or changing mode state:
@@ -178,20 +172,8 @@ Keep the gate held through each underlying `station_->Stop()`,
 which manager events must be emitted, release the gate, and only then call
 `NotifyEvent`.
 
-Configure the portal callback as:
-
-```cpp
-config_ap_->OnExitRequested([this](uint32_t generation) {
-    StopConfigApForGeneration(generation);
-});
-```
-
-Public `StopConfigAp()` and private `StopConfigApForGeneration()` each acquire
-the transition gate once, then call `StopConfigApLocked()`. The locked helper
-returns without stopping when config mode is inactive; when a generation
-pointer is present, it also returns when
-`!config_ap_->IsGenerationCurrent(*expected_generation)`. Auto-stop paths call
-the locked helper directly so they do not recursively acquire the gate.
+Auto-stop paths perform the underlying opposite-mode stop directly while the
+gate is already held so they do not recursively acquire the gate.
 
 - [ ] **Step 4: Verify manager wiring**
 
@@ -207,6 +189,8 @@ git commit -m "fix: serialize wifi mode transitions"
 ### Task 3: Give Config AP a temporary STA netif and cancellable session
 
 **Files:**
+- Modify: `esp_idf_demo/components/esp-wifi-connect/include/wifi_manager.h`
+- Modify: `esp_idf_demo/components/esp-wifi-connect/wifi_manager.cc`
 - Modify: `esp_idf_demo/components/esp-wifi-connect/include/wifi_configuration_ap.h`
 - Modify: `esp_idf_demo/components/esp-wifi-connect/wifi_configuration_ap.cc`
 - Modify: `tests/test_esp_assets.py`
@@ -219,6 +203,7 @@ Add assertions to the Wi-Fi regression test:
 self.assertIn("esp_netif_t* station_netif_ = nullptr", portal_header)
 self.assertIn("std::atomic<bool> is_connecting_{false}", portal_header)
 self.assertIn("std::shared_ptr<WifiConfigSession> session_", portal_header)
+self.assertIn("StopConfigApForGeneration", manager)
 self.assertIn("esp_netif_create_default_wifi_sta()", portal)
 self.assertIn("session_->Stop()", portal)
 self.assertIn("xEventGroupSetBits(event_group_, WIFI_FAIL_BIT)", portal)
@@ -249,6 +234,12 @@ std::shared_ptr<WifiConfigSession> session_ = std::make_shared<WifiConfigSession
 uint32_t active_generation_ = 0;
 std::function<void(uint32_t)> on_exit_requested_;
 ```
+
+In `wifi_manager.h`, declare `StopConfigApForGeneration(uint32_t)` and
+`StopConfigApLocked(const uint32_t*)`. Configure the portal callback to pass
+its expected generation. Public `StopConfigAp()` and the generation-aware path
+each acquire the transition gate once and call the locked helper; the helper
+rejects a stale generation before changing manager state or stopping the AP.
 
 At the start of `Start()`, set
 `active_generation_ = session_->Begin()`. In `StartAccessPoint()`, create both
@@ -291,7 +282,7 @@ Run the focused pytest. Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```powershell
-git add esp_idf_demo/components/esp-wifi-connect/include/wifi_configuration_ap.h esp_idf_demo/components/esp-wifi-connect/wifi_configuration_ap.cc tests/test_esp_assets.py
+git add esp_idf_demo/components/esp-wifi-connect/include/wifi_manager.h esp_idf_demo/components/esp-wifi-connect/wifi_manager.cc esp_idf_demo/components/esp-wifi-connect/include/wifi_configuration_ap.h esp_idf_demo/components/esp-wifi-connect/wifi_configuration_ap.cc tests/test_esp_assets.py
 git commit -m "fix: restore DHCP during repeated wifi provisioning"
 ```
 

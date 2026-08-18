@@ -23,6 +23,7 @@ WifiManager& WifiManager::GetInstance() {
 WifiManager::WifiManager() = default;
 
 WifiManager::~WifiManager() {
+    auto transition = transition_gate_.Acquire();
     bool stop_station = false;
     bool stop_config = false;
     bool deinit = false;
@@ -120,7 +121,9 @@ bool WifiManager::IsInitialized() const {
 // ==================== Station Mode ====================
 
 void WifiManager::StartStation() {
+    auto transition = transition_gate_.Acquire();
     std::unique_lock<std::mutex> lock(mutex_);
+    bool notify_config_exit = false;
 
     if (!initialized_) {
         ESP_LOGE(TAG, "Not initialized");
@@ -137,7 +140,7 @@ void WifiManager::StartStation() {
         config_mode_active_ = false;
         lock.unlock();
         config_ap_->Stop();
-        NotifyEvent(WifiEvent::ConfigModeExit);
+        notify_config_exit = true;
         lock.lock();
     }
 
@@ -168,9 +171,14 @@ void WifiManager::StartStation() {
     station_active_ = true;
     lock.unlock();
     station_->Start();
+    transition.unlock();
+    if (notify_config_exit) {
+        NotifyEvent(WifiEvent::ConfigModeExit);
+    }
 }
 
 void WifiManager::StopStation() {
+    auto transition = transition_gate_.Acquire();
     std::unique_lock<std::mutex> lock(mutex_);
 
     if (!station_active_) {
@@ -182,6 +190,7 @@ void WifiManager::StopStation() {
     ESP_LOGI(TAG, "Stopping station");
     station_->Stop();
     ESP_LOGI(TAG, "Station stopped");
+    transition.unlock();
     NotifyEvent(WifiEvent::Disconnected);
 }
 
@@ -233,7 +242,9 @@ std::string WifiManager::GetMacAddress() const {
 // ==================== Config AP Mode ====================
 
 void WifiManager::StartConfigAp() {
+    auto transition = transition_gate_.Acquire();
     std::unique_lock<std::mutex> lock(mutex_);
+    bool notify_disconnected = false;
 
     if (!initialized_) {
         ESP_LOGE(TAG, "Not initialized");
@@ -250,7 +261,7 @@ void WifiManager::StartConfigAp() {
         station_active_ = false;
         lock.unlock();
         station_->Stop();
-        NotifyEvent(WifiEvent::Disconnected);
+        notify_disconnected = true;
         lock.lock();
     }
 
@@ -268,10 +279,15 @@ void WifiManager::StartConfigAp() {
     config_mode_active_ = true;
     lock.unlock();
     config_ap_->Start();
+    transition.unlock();
+    if (notify_disconnected) {
+        NotifyEvent(WifiEvent::Disconnected);
+    }
     NotifyEvent(WifiEvent::ConfigModeEnter);
 }
 
 void WifiManager::StopConfigAp() {
+    auto transition = transition_gate_.Acquire();
     std::unique_lock<std::mutex> lock(mutex_);
 
     if (!config_mode_active_) {
@@ -282,6 +298,7 @@ void WifiManager::StopConfigAp() {
     lock.unlock();
     ESP_LOGI(TAG, "Stopping config AP");
     config_ap_->Stop();
+    transition.unlock();
     NotifyEvent(WifiEvent::ConfigModeExit);
 }
 

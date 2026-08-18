@@ -584,6 +584,7 @@ class EspAssetTests(unittest.TestCase):
         component = ESP_DIR / "components" / "esp-wifi-connect"
         station = (component / "wifi_station.cc").read_text(encoding="utf-8")
         manager = (component / "wifi_manager.cc").read_text(encoding="utf-8")
+        manager_header = (component / "include" / "wifi_manager.h").read_text(encoding="utf-8")
         portal = (component / "wifi_configuration_ap.cc").read_text(encoding="utf-8")
         ssid_header = (component / "include" / "ssid_manager.h").read_text(encoding="utf-8")
         credential_store = (ESP_DIR / "main" / "wifi_credential_store.cc").read_text(encoding="utf-8")
@@ -605,9 +606,12 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("portMUX_TYPE s_outage_lock", network)
         self.assertIn("prompt_arbiter_set_conversation_active", main_source)
         self.assertIn("_binary_intro_1_pcm_start", main_source)
+        self.assertIn('#include "wifi_lifecycle.h"', manager_header)
+        self.assertIn("WifiTransitionGate transition_gate_", manager_header)
 
         for method in ("StartStation", "StopStation", "StartConfigAp", "StopConfigAp"):
             body = manager.split(f"void WifiManager::{method}()", 1)[1].split("\n}", 1)[0]
+            self.assertIn("transition_gate_.Acquire()", body)
             self.assertIn("lock.unlock()", body)
 
     def test_v7_voice_prompts_are_audible_and_not_clipped(self) -> None:

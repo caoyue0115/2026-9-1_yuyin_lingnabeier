@@ -27,6 +27,7 @@
 #include <functional>
 #include <mutex>
 
+#include "wifi_lifecycle.h"
 #include "wifi_station.h"
 
 class WifiStation;
@@ -110,6 +111,7 @@ private:
     std::unique_ptr<WifiStation> station_;
     std::unique_ptr<WifiConfigurationAp> config_ap_;
 
+    WifiTransitionGate transition_gate_;
     mutable std::mutex mutex_;
     bool initialized_ = false;
     bool station_active_ = false;
