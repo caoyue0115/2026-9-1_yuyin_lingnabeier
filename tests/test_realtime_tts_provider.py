@@ -97,6 +97,21 @@ class RealtimeTtsProviderTests(unittest.TestCase):
         self.assertLess(len(normalized), len(pcm_24k))
         self.assertEqual(len(normalized) % 2, 0)
 
+    def test_realtime_tail_silence_uses_output_pcm_format(self) -> None:
+        from src.providers import realtime_tts
+
+        with mock.patch.object(realtime_tts.settings, "realtime_tts_tail_silence_ms", 500), mock.patch.object(
+            realtime_tts.settings, "realtime_audio_sample_rate", 16000
+        ), mock.patch.object(
+            realtime_tts.settings, "realtime_audio_sample_width_bits", 16
+        ), mock.patch.object(
+            realtime_tts.settings, "realtime_audio_channels", 1
+        ):
+            silence = realtime_tts.build_realtime_tail_silence()
+
+        self.assertEqual(len(silence), 16_000)
+        self.assertEqual(silence, bytes(16_000))
+
     def test_stream_realtime_tts_chunks_yields_audio_before_text_iterable_finishes(self) -> None:
         from src.providers import realtime_tts
 
@@ -163,7 +178,7 @@ class RealtimeTtsProviderTests(unittest.TestCase):
             remaining = list(stream)
 
         self.assertEqual(first_chunk, b"\x01\x00\x02\x00")
-        self.assertEqual(remaining, [])
+        self.assertEqual(remaining, [bytes(16_000)])
         self.assertEqual(
             clients[0].calls,
             ["connect", "update_session", "append:第一段", "append:第二段", "finish", "close"],

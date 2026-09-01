@@ -85,6 +85,14 @@ def normalize_realtime_pcm_chunk(
     return normalized
 
 
+def build_realtime_tail_silence() -> bytes:
+    duration_ms = max(0, min(int(settings.realtime_tts_tail_silence_ms), 5000))
+    sample_width = max(1, int(settings.realtime_audio_sample_width_bits) // 8)
+    frame_count = (int(settings.realtime_audio_sample_rate) * duration_ms) // 1000
+    byte_count = frame_count * sample_width * int(settings.realtime_audio_channels)
+    return bytes(max(0, byte_count))
+
+
 class _RealtimeTtsCallback(QwenTtsRealtimeCallback):
     def __init__(self) -> None:
         self.events: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -130,6 +138,9 @@ class PreparedRealtimeTtsSession:
                         str(event.get("message") or "failed to stream text chunks to realtime tts"),
                     )
                 if event_type == "response.done":
+                    tail_silence = build_realtime_tail_silence()
+                    if tail_silence:
+                        yield tail_silence
                     return
                 if event_type == "error":
                     error = event.get("error") or {}

@@ -545,19 +545,22 @@ class EspAssetTests(unittest.TestCase):
             "followup_bell_1.pcm",
             "followup_1.pcm",
             "intro_1.pcm",
+            "repeat_1.pcm",
             "speak_1.pcm",
         ):
             self.assertIn(f'../spiffs/{asset}', cmake)
 
         self.assertIn("_binary_speak_1_pcm_start", prompt_source)
+        self.assertIn("_binary_repeat_1_pcm_start", prompt_source)
         self.assertIn("_binary_followup_1_pcm_start", prompt_source)
 
     def test_v7_embedded_prompt_assets_have_locked_pcm_hashes(self) -> None:
         expected = {
             "intro_1.pcm": (48_000, "b9cbe3581350a0a168b57d3c2b6c887099ae11c4b070fb741368cc5eb78cb424"),
             "followup_bell_1.pcm": (27_200, "88d1d0bbad225cf5c0fea00cff23dc037172f717cc6a95d9c579b4f23de2d8fb"),
-            "speak_1.pcm": (25_600, "b265a119187cd06bb396dde62e3921590193b8f2e928811ede59ea75d691b433"),
-            "followup_1.pcm": (28_160, "f3efda1def7f0ab89e1b01ddfbc8634ff764ceb86b65a50d63f7a1600a3d67ac"),
+            "speak_1.pcm": (41_600, "ae9f47198e664a6412718f50a675665bcd0943716933ae6ca1087ef9eb713e42"),
+            "repeat_1.pcm": (51_840, "f93dd96750b166b8bc6afdf3620749d40c8a49247dfbc6930b96395e3348a98a"),
+            "followup_1.pcm": (46_720, "db361e32924af074185ae011890531d9fcf72b64a87bacb85aa465ea1b302ad6"),
         }
         for name, (size, digest) in expected.items():
             payload = (ESP_DIR / "spiffs" / name).read_bytes()
@@ -646,6 +649,7 @@ class EspAssetTests(unittest.TestCase):
         minimum_sizes = {
             "intro_1.pcm": 20_000,
             "followup_bell_1.pcm": 12_000,
+            "repeat_1.pcm": 20_000,
             "speak_1.pcm": 20_000,
             "followup_1.pcm": 20_000,
         }

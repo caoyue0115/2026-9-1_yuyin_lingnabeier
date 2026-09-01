@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     realtime_tts_first_segment_min_chars: int = 6
     realtime_tts_first_segment_max_chars: int = 10
     realtime_tts_warmup_enabled: bool = True
+    realtime_tts_tail_silence_ms: int = 500
     realtime_llm_compact_top_k: int = 1
     realtime_llm_compact_snippet_chars: int = 36
     conversation_v6_audio_queue_bytes: int = 256 * 1024
