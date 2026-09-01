@@ -13,26 +13,6 @@ from rank_bm25 import BM25Okapi
 
 from src.settings import settings
 
-BUDDHIST_KEYWORDS = [
-    "佛",
-    "菩萨",
-    "观音",
-    "观世音",
-    "佛法",
-    "经",
-    "修行",
-    "慈悲",
-    "业",
-    "因果",
-    "般若",
-    "无相",
-    "空性",
-    "涅槃",
-    "四圣谛",
-    "八正道",
-]
-
-
 def tokenize_zh(text: str) -> list[str]:
     return [t.strip() for t in jieba.cut(text) if t.strip()]
 
@@ -125,17 +105,13 @@ def to_float32_matrix(vectors: np.ndarray) -> np.ndarray:
 
 
 def index_paths() -> tuple[Path, Path]:
-    return settings.indices_dir / "buddhism.meta.json", settings.indices_dir / "buddhism.faiss"
-
-
-def is_buddhist_question(question: str) -> bool:
-    return any(k in question for k in BUDDHIST_KEYWORDS)
+    return settings.indices_dir / "disney.meta.json", settings.indices_dir / "disney.faiss"
 
 
 def retrieve_references(question_text: str, top_k: int | None = None) -> tuple[list[dict[str, Any]], float]:
     meta_file, faiss_file = index_paths()
     if not meta_file.exists() or not faiss_file.exists():
-        raise FileNotFoundError("buddhism index not found; run ingest first")
+        raise FileNotFoundError("Disney index not found; run `python -m src.rag.ingest` first")
     meta = json.loads(meta_file.read_text(encoding="utf-8"))
     index = faiss.read_index(str(faiss_file))
     chunks = meta["chunks"]
@@ -183,6 +159,8 @@ def retrieve_references(question_text: str, top_k: int | None = None) -> tuple[l
                 "vec_score": float(vec_s),
                 "source_file": ch["source_file"],
                 "source_title": ch["source_title"],
+                "source_url": ch.get("source_url"),
+                "fetched_at": ch.get("fetched_at"),
                 "page_no": ch["page_no"],
                 "chunk_id": ch["chunk_id"],
                 "snippet": build_snippet(question_text, ch["text"]),

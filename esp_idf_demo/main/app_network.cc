@@ -219,7 +219,7 @@ static esp_err_t app_network_ensure_initialized(void)
     }
 
     WifiManagerConfig config;
-    config.ssid_prefix = "GreenMotive";
+    config.ssid_prefix = "DisneyDemo";
     config.language = "zh-CN";
     config.station_scan_min_interval_seconds = 15;
     config.station_scan_max_interval_seconds = 60;

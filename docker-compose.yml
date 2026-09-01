@@ -20,7 +20,7 @@ services:
   worker:
     build: .
     restart: unless-stopped
-    command: rq worker -u redis://redis:6379/0 religion_tasks
+    command: rq worker -u redis://redis:6379/0 disney_tasks
     env_file:
       - .env
     volumes:

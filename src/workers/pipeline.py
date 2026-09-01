@@ -8,7 +8,13 @@ from rq import Queue
 from src.providers.asr import ASRResult, transcribe_wav_result
 from src.providers.llm import generate_answer
 from src.providers.tts import synthesize_audio
-from src.rag.retriever import is_buddhist_question, retrieve_references
+from src.rag.retriever import retrieve_references
+from src.services.question_router import (
+    DISNEY_KNOWLEDGE_MISS,
+    DYNAMIC_REFUSAL,
+    QuestionRoute,
+    route_question,
+)
 from src.settings import settings
 from src.storage.db import fetch_task, mark_task_done, mark_task_failed, update_task_status
 
@@ -46,12 +52,22 @@ def run_pipeline(task_id: str) -> None:
 
         retrieval_started = time.perf_counter()
         update_task_status(task_id, "running", "retrieval", 0.4)
-        references, top_score = retrieve_references(question_text, top_k=settings.top_k)
+        route = route_question(question_text)
+        references: list[dict] = []
+        top_score = 0.0
+        if route == QuestionRoute.DISNEY_KNOWLEDGE:
+            try:
+                references, top_score = retrieve_references(question_text, top_k=settings.top_k)
+            except FileNotFoundError:
+                references, top_score = [], 0.0
         trace["retrieval_ms"] = int((time.perf_counter() - retrieval_started) * 1000)
 
-        threshold = settings.min_top_score if is_buddhist_question(question_text) else settings.min_top_score_no_keyword
-        if not references or top_score < threshold:
-            answer_text = "佛说不可曰"
+        if route == QuestionRoute.DYNAMIC_CURRENT:
+            answer_text = DYNAMIC_REFUSAL
+        elif route == QuestionRoute.DISNEY_KNOWLEDGE and (
+            not references or top_score < settings.min_top_score
+        ):
+            answer_text = DISNEY_KNOWLEDGE_MISS
         else:
             update_task_status(task_id, "running", "llm", 0.7)
             llm_started = time.perf_counter()

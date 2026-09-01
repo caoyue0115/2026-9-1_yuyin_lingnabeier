@@ -15,15 +15,15 @@ from scripts.opus_uplink_stream_smoke import run_stream_smoke
 
 
 CASES = [
-    ("阿弥陀佛", "amitabha.wav"),
-    ("四十八愿", "forty_eight_vows.wav"),
-    ("净土宗", "pure_land.wav"),
-    ("无量寿经", "infinite_life_sutra.wav"),
-    ("金刚经", "diamond_sutra.wav"),
-    ("般若", "prajna.wav"),
-    ("慧远", "huiyuan.wav"),
-    ("善导", "shandao.wav"),
-    ("东林寺", "donglin_temple.wav"),
+    ("玲娜贝儿", "linabell.wav"),
+    ("达菲", "duffy.wav"),
+    ("雪莉玫", "shelliemay.wav"),
+    ("杰拉多尼", "gelatoni.wav"),
+    ("星黛露", "stellalou.wav"),
+    ("可琦安", "cookieann.wav"),
+    ("奥乐米拉", "olumel.wav"),
+    ("兔朱迪", "judy_hopps.wav"),
+    ("疯狂动物城", "zootopia.wav"),
 ]
 
 TIMELINE_FIELDS = [

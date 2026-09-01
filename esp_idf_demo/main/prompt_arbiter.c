@@ -14,12 +14,6 @@
 
 extern const uint8_t prompt_intro_start[] asm("_binary_intro_1_pcm_start");
 extern const uint8_t prompt_intro_end[] asm("_binary_intro_1_pcm_end");
-extern const uint8_t prompt_network_connected_start[] asm("_binary_boot_amitabha_1_pcm_start");
-extern const uint8_t prompt_network_connected_end[] asm("_binary_boot_amitabha_1_pcm_end");
-extern const uint8_t prompt_network_required_start[] asm("_binary_network_required_1_pcm_start");
-extern const uint8_t prompt_network_required_end[] asm("_binary_network_required_1_pcm_end");
-extern const uint8_t prompt_conversation_done_start[] asm("_binary_conversation_done_1_pcm_start");
-extern const uint8_t prompt_conversation_done_end[] asm("_binary_conversation_done_1_pcm_end");
 extern const uint8_t prompt_followup_bell_start[] asm("_binary_followup_bell_1_pcm_start");
 extern const uint8_t prompt_followup_bell_end[] asm("_binary_followup_bell_1_pcm_end");
 
@@ -71,36 +65,26 @@ static esp_err_t prompt_arbiter_play(prompt_id_t id)
         end = prompt_intro_end;
         break;
     case PROMPT_NETWORK_CONNECTED:
-        start = prompt_network_connected_start;
-        end = prompt_network_connected_end;
+        start = prompt_intro_start;
+        end = prompt_intro_end;
         break;
     case PROMPT_NETWORK_REQUIRED:
-        start = prompt_network_required_start;
-        end = prompt_network_required_end;
+        start = prompt_followup_bell_start;
+        end = prompt_followup_bell_end;
         break;
     case PROMPT_CONVERSATION_DONE:
-        start = prompt_conversation_done_start;
-        end = prompt_conversation_done_end;
+        start = prompt_followup_bell_start;
+        end = prompt_followup_bell_end;
         break;
     case PROMPT_FOLLOWUP_CUE:
         start = prompt_followup_bell_start;
         end = prompt_followup_bell_end;
         break;
     case PROMPT_SPEAK:
-        return audio_out_play_pcm_file(DEMO_RECORD_PROMPT_PATH,
-                                       DEMO_AUDIO_SAMPLE_RATE,
-                                       DEMO_AUDIO_CHANNELS,
-                                       DEMO_AUDIO_BITS_PER_SAMPLE,
-                                       DEMO_RECORD_RETRY_PROMPT_MAX_BYTES);
     case PROMPT_REPROMPT:
-        return audio_out_play_pcm_file(DEMO_RECORD_RETRY_REARM_PROMPT_PATH,
-                                       DEMO_AUDIO_SAMPLE_RATE,
-                                       DEMO_AUDIO_CHANNELS,
-                                       DEMO_AUDIO_BITS_PER_SAMPLE,
-                                       DEMO_RECORD_RETRY_PROMPT_MAX_BYTES);
     case PROMPT_TECHNICAL_ERROR:
-        start = prompt_conversation_done_start;
-        end = prompt_conversation_done_end;
+        start = prompt_followup_bell_start;
+        end = prompt_followup_bell_end;
         break;
     default:
         return ESP_ERR_NOT_SUPPORTED;

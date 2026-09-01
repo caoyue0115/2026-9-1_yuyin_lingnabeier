@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     sqlite_path: str = "./data/tasks.db"
     public_base_url: str = "http://localhost:8010"
     ota_artifact_dir: str = "./data/ota_artifacts"
-    queue_name: str = "religion_tasks"
+    queue_name: str = "disney_tasks"
     max_upload_mb: int = 3
     max_audio_seconds: int = 8
     chunk_size: int = 300
@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     realtime_tts_model: str = "qwen3-tts-vc-realtime-2026-01-15"
     realtime_tts_voice: str = ""
     tts_language_type: str = "Chinese"
-    tts_instructions: str = "请使用低沉庄重、平和慈悲的男性声线，语速略慢，停顿自然。"
+    tts_instructions: str = "请使用明快、机灵、温暖的年轻女性中文声线，语速自然，表达友好。"
     tts_timeout_seconds: int = 20
     dashscope_playback_rate: float = 1.0
     request_timeout_seconds: int = 30
@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     conversation_v6_close_timeout_seconds: float = 2.0
     conversation_v6_question_chars: int = 512
     conversation_v6_answer_chars: int = 4096
-    project_name: str = "Religion Cloud Demo"
+    project_name: str = "Disney Voice Assistant Demo"
     version: str = "0.1.0"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -105,7 +105,7 @@ class Settings(BaseSettings):
 
     @property
     def kb_dir(self) -> Path:
-        return self.data_dir / "buddhism"
+        return self.data_dir / "disney"
 
     @property
     def logs_dir(self) -> Path:

@@ -13,7 +13,7 @@ from src.settings import settings
 
 
 def default_hotwords_path() -> Path:
-    return ROOT / "config" / "asr_hotwords.buddhism.json"
+    return ROOT / "config" / "asr_hotwords.disney.json"
 
 
 def load_hotwords(path: str | Path) -> list[dict]:
@@ -61,7 +61,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--hotwords", default=str(default_hotwords_path()))
     parser.add_argument("--target-model", default=settings.asr_model)
-    parser.add_argument("--prefix", default="buddhaasr")
+    parser.add_argument("--prefix", default="disneyasr")
     parser.add_argument("--vocabulary-id")
     args = parser.parse_args()
 

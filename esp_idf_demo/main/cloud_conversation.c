@@ -383,7 +383,7 @@ esp_err_t cloud_conversation_open(cloud_conversation_t **out)
     }
     snprintf(conversation->client_conversation_id,
              sizeof(conversation->client_conversation_id),
-             "GreenMotive-%08lx-%08lx",
+             "DisneyDemo-%08lx-%08lx",
              (unsigned long)esp_random(), (unsigned long)esp_random());
     esp_err_t ret = v6_build_ws_url(conversation->ws_url, sizeof(conversation->ws_url));
     if (ret == ESP_OK) {

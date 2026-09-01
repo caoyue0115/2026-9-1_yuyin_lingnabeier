@@ -35,25 +35,39 @@ def _build_messages(
     answer_mode: str | None = None,
 ) -> list[dict[str, str]]:
     evidence = "\n".join(f"- {item['source_title']}: {item['snippet']}" for item in references)
+    if references:
+        role_prompt = (
+            "你是一个活泼、温暖、简洁的迪士尼主题语音助手。"
+            "涉及迪士尼角色、故事或乐园事实时，只能依据用户消息中的知识库证据回答；"
+            "证据没有覆盖的细节要坦诚说不知道，不要编造，也不要声称自己代表迪士尼官方。"
+        )
+        evidence_block = f"知识库证据：\n{evidence}\n"
+    else:
+        role_prompt = (
+            "你是一个活泼、温暖、简洁的迪士尼主题语音助手。"
+            "当前问题是普通静态闲聊，可以使用通用知识回答。"
+            "不要假装掌握实时天气、票价、营业时间、排队或其他最新数据，"
+            "也不要声称自己代表迪士尼官方。"
+        )
+        evidence_block = ""
     if _normalize_answer_mode(answer_mode) == ANSWER_MODE_SHORT:
         return [
             {
                 "role": "system",
                 "content": (
-                    "你是佛学问答助手，只能依据给定经文证据作答，语言简洁平和。"
+                    role_prompt
+                    +
                     "请用两句话内回答，总字数不超过70字。"
-                    "先给直接解释，再给一句修行/理解上的补充。"
-                    "保留佛教术语，但解释要白话化。"
-                    "不要输出来源话术，不要长篇解释，不要编造。"
+                    "先直接回答，再给一句有帮助的补充。"
+                    "不要输出来源话术，不要长篇解释。"
                 ),
             },
             {
                 "role": "user",
                 "content": (
                     f"问题：{question_text}\n"
-                    f"证据：\n{evidence}\n"
+                    f"{evidence_block}"
                     "回答要求：请用两句话内回答，总字数不超过70字。"
-                    "先给直接解释，再给一句修行/理解上的补充。"
                 ),
             },
         ]
@@ -61,21 +75,18 @@ def _build_messages(
         {
             "role": "system",
             "content": (
-                "你是佛学问答助手，只能依据给定经文证据作答，语言简洁平和。"
-                "默认用两句回答：先给一句定义，再用一句补核心思想。"
-                "保留佛教术语，但解释要白话化。"
-                "第二句控制在约40字，不要展开成长篇。"
-                "不要把“根据某法师指出”“依据某资料记载”这类来源话术直接说出口。"
-                "不要编造。"
+                role_prompt
+                +
+                "默认用两句回答：第一句直接回答，第二句补充最有用的信息。"
+                "第二句控制在约40字，不要展开成长篇，也不要直接朗读来源网址。"
             ),
         },
         {
             "role": "user",
             "content": (
                 f"问题：{question_text}\n"
-                f"证据：\n{evidence}\n"
-                "回答要求：先给一句定义，第二句补核心思想。"
-                "优先回答“它是什么”和“它主要讲什么”，不要先讲出处。"
+                f"{evidence_block}"
+                "回答要求：先直接回答，第二句补充最有用的信息。"
             ),
         },
     ]

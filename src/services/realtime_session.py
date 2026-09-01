@@ -17,7 +17,13 @@ from src.providers.realtime_tts import (
     warmup_realtime_tts_session,
 )
 from src.providers.tts import synthesize_audio
-from src.rag.retriever import is_buddhist_question, retrieve_references
+from src.rag.retriever import retrieve_references
+from src.services.question_router import (
+    DISNEY_KNOWLEDGE_MISS,
+    DYNAMIC_REFUSAL,
+    QuestionRoute,
+    route_question,
+)
 from src.settings import settings
 from src.storage.realtime_store import InMemoryRealtimeSessionStore
 
@@ -26,11 +32,13 @@ ANSWER_MODE_SHORT = "short"
 _SENTENCE_ENDINGS = "。！？!?；;…"
 _SOFT_CUT_HINTS = "，、,：: "
 _ASR_NORMALIZATION_RULES: tuple[tuple[str, str], ...] = (
-    ("汇远", "慧远"),
-    ("惠远", "慧远"),
-    ("四十八院", "四十八愿"),
-    ("48愿", "四十八愿"),
-    ("48院", "四十八愿"),
+    ("林娜贝尔", "玲娜贝儿"),
+    ("玲娜贝尔", "玲娜贝儿"),
+    ("达非", "达菲"),
+    ("雪莉梅", "雪莉玫"),
+    ("星代露", "星黛露"),
+    ("杰拉多妮", "杰拉多尼"),
+    ("疯狂动物成", "疯狂动物城"),
 )
 logger = logging.getLogger(__name__)
 
@@ -97,7 +105,7 @@ def _set_abs_trace(trace: dict, key: str, offset_ms: int | None, relative_ms: in
         trace[key] = offset_ms + relative_ms
 
 
-def normalize_buddhist_asr_text(text: str) -> tuple[str, list[str]]:
+def normalize_disney_asr_text(text: str) -> tuple[str, list[str]]:
     normalized = str(text or "")
     applied_rules: list[str] = []
     for source, target in _ASR_NORMALIZATION_RULES:
@@ -108,7 +116,7 @@ def normalize_buddhist_asr_text(text: str) -> tuple[str, list[str]]:
 
 
 def _apply_asr_normalization(trace: dict, raw_text: str) -> str:
-    normalized_text, applied_rules = normalize_buddhist_asr_text(raw_text)
+    normalized_text, applied_rules = normalize_disney_asr_text(raw_text)
     trace["asr_raw_text"] = raw_text
     trace["asr_normalized_text"] = normalized_text
     trace["asr_normalization_applied"] = bool(applied_rules)
@@ -349,17 +357,25 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
         )
 
     retrieval_started = time.perf_counter()
-    try:
-        references, top_score = retrieve_references(question_text, top_k=settings.top_k)
-    except FileNotFoundError as exc:
-        store.mark_failed(session_id, "retrieval_unavailable", str(exc) or "Retrieval unavailable")
-        store.fail_audio(session_id, "retrieval_unavailable")
-        return
-    except Exception as exc:
-        store.mark_failed(session_id, "retrieval_failed", str(exc) or "Retrieval failed")
-        store.fail_audio(session_id, "retrieval_failed")
-        return
+    route = route_question(question_text)
+    references: list[dict] = []
+    top_score = 0.0
+    canned_answer: str | None = None
+    if route == QuestionRoute.DYNAMIC_CURRENT:
+        canned_answer = DYNAMIC_REFUSAL
+    elif route == QuestionRoute.DISNEY_KNOWLEDGE:
+        try:
+            references, top_score = retrieve_references(question_text, top_k=settings.top_k)
+        except FileNotFoundError:
+            references, top_score = [], 0.0
+        except Exception as exc:
+            store.mark_failed(session_id, "retrieval_failed", str(exc) or "Retrieval failed")
+            store.fail_audio(session_id, "retrieval_failed")
+            return
+        if not references or top_score < settings.min_top_score:
+            canned_answer = DISNEY_KNOWLEDGE_MISS
     updated["trace"]["retrieval_ms"] = _elapsed_ms(retrieval_started)
+    updated["trace"]["question_route"] = route.value
     if stream_to_session_start_abs_ms is not None:
         _set_abs_trace(
             updated["trace"],
@@ -368,11 +384,10 @@ def run_stub_realtime_session(store: InMemoryRealtimeSessionStore, session_id: s
             _elapsed_ms(overall_started),
         )
     updated["trace"]["retrieval_top_score"] = top_score
-    threshold = settings.min_top_score if is_buddhist_question(question_text) else settings.min_top_score_no_keyword
-    is_reject = (not references) or top_score < threshold
+    is_reject = canned_answer is not None
     store.update_session(session_id, step="llm", trace=updated["trace"])
     if is_reject:
-        answer_text = "佛说不可曰"
+        answer_text = canned_answer or DISNEY_KNOWLEDGE_MISS
         updated["trace"]["first_llm_chunk_ms"] = _elapsed_ms(overall_started)
         _set_abs_trace(
             updated["trace"],

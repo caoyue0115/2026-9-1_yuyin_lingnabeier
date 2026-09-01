@@ -18,7 +18,7 @@ from src.settings import settings
 
 
 def default_voice_sample_path() -> Path:
-    return ROOT / "data" / "output" / "如来佛祖_爱给网_aigei_com.wav"
+    return ROOT / "data" / "voice_samples" / "judy_demo.wav"
 
 
 def inspect_audio_file(path: str | Path) -> dict:
@@ -91,7 +91,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sample", default=str(default_voice_sample_path()))
     parser.add_argument("--target-model", default=settings.realtime_tts_model)
-    parser.add_argument("--prefix", default="rulaivcrt")
+    parser.add_argument("--prefix", default="judydemo")
     args = parser.parse_args()
 
     summary = inspect_audio_file(args.sample)

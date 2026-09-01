@@ -1,159 +1,115 @@
-# 20260407_宗教大模型云服务器 Demo
+# Disney Voice Assistant Demo
 
-本目录用于记录当前云服务器 Demo 的运行方式，以及喵伴设备端的联调入口。
+基于 ESP32-S3 与 ESP-VoCat V1.0 圆屏整机的内部演示版 Disney 语音助手。项目沿用原仓库已经验证过的录音、唤醒、WebSocket、OTA 和音频播放框架，只替换产品人设、知识库、问答路由、显示交互与部署方式。
 
-> 2026-05-06 更新：旧公网生产入口 `OLD_PUBLIC_ENTRY_DISABLED` 已完全停用，所有联调和部署默认按公司上海云服务器 `greenunion-sh` 处理。不要再使用旧公网地址做健康检查、板端配置或部署判断。
+> 本项目是内部技术 Demo，不是 Disney 官方产品，也不应对外发布角色声音或受版权保护的视觉素材。
 
-## 本地工作盘约定
+## 首版行为
 
-后续本项目的本地开发、构建、临时文件和交付包默认使用 100GB 大云盘 `/mnt/data100`，避免再占用 20GB 根盘。
+- 开机直接进入角色动画界面；当前代码内置可替换的动画占位层，正式素材收到后再替换。
+- 语音交互只由唤醒词“小明同学”启动。
+- 触摸只在熄屏时点亮屏幕；亮屏状态下触摸不执行任何动作，也不会开始录音。
+- 无操作 30 秒降为 20% 亮度，60 秒背光关闭；触摸或唤醒词立即恢复亮度。
+- Disney 角色、达菲和朋友们、乐园基础常识走本地 RAG。
+- 普通静态闲聊由文本千问回答。
+- 天气、实时票价、营业时间、排队和客流等动态问题在首版友好拒绝，并提示查看官方 App 或官网。
+- 会话只保留当前连接内的短期上下文：最多 4 轮，重连或服务重启后清空。
 
-当前实际项目目录：
-
-- `/mnt/data100/GMT/20260521_16flash_8psram`
-
-常用大盘路径：
-
-- ESP-IDF build 根目录：`/mnt/data100/GMT/builds`
-- ESP-IDF 临时目录：`TMPDIR=/mnt/data100/GMT/builds/tmp`
-- 硬件交付包目录：`/mnt/data100/GMT/handoff_packages`
-
-不要把 ESP-IDF build、交付包、`managed_components` 复制或生成到根盘 `/home` 或 `/tmp`。根盘空间不足曾导致 Codex transcript、CMake/kconfgen 和 build 流程失败。
-
-## 当前设备端基线
-
-仓库内已经提供独立设备端工程：
-
-- [`esp_idf_demo/README.md`](esp_idf_demo/README.md)
-
-当前默认基线为：
-
-- 开发板：`ESP-VoCat v1.2`
-- 触发方式：`触摸屏`
-- 工具链：`ESP-IDF 5.5.4`
-
-当前设备端闭环为：
-
-`触摸 -> 录音 -> 上传 -> 轮询 -> 下载 -> 播放`
-
-当前并行探索线还新增了：
-
-`v3/realtime: 上传 PCM -> 创建 session -> /audio chunked 裸 PCM -> 边收边播`
-
-开始刷机前请先确认：
-
-- `esp_idf_demo/main/config.h` 中的 Wi-Fi、服务地址和 `device_id`
-- 本机已安装 `ESP-IDF 5.5.4`
-- 可执行 `idf.py build` 和 `idf.py flash monitor`
-
-## 当前可用的模拟设备命令
-
-在本地或云端项目目录中，可以用下面这条命令模拟设备端上传原始 PCM，并轮询任务结果：
-
-```bash
-BASE_URL=http://<CURRENT_BASE_URL> python3 scripts/esp_simulator.py /path/to/input.wav --download-audio --output-dir ./tmp
-```
-
-说明：
-
-- 输入文件使用 `wav`，脚本会自动剥离出 PCM 帧并按 `application/octet-stream` 上传
-- Header 会自动带上 `x-device-id`、`x-sample-rate`、`x-sample-width`、`x-channels`
-- 成功后会打印 `task_id`、`question_text`、`answer_text`、`audio_url`、`trace`
-- 加 `--download-audio` 后会把返回音频下载到 `--output-dir`
-
-## 当前可用的 ASR 热词命令
-
-如果你想提升“无相”“般若”等佛学术语的识别率，可以先创建 DashScope 热词表：
-
-```bash
-python3 scripts/create_asr_vocabulary.py
-```
-
-默认会读取：
+## 架构
 
 ```text
-config/asr_hotwords.buddhism.json
+“小明同学”
+  -> ESP32 录音
+  -> ASR
+  -> 问题路由
+       -> Disney 本地 RAG
+       -> 普通静态文本 LLM
+       -> 动态信息友好拒绝
+  -> 文本千问流式生成
+  -> Qwen Realtime TTS
+  -> ESP32 边收边播
 ```
 
-脚本会输出两部分内容：
+这里的 Realtime 只用于流式 TTS，不是端到端 Qwen Audio Realtime，因此 RAG 仍然位于 LLM 前并可独立验证。
 
-- 热词表摘要
-- 可直接写入 `.env` 的 `ASR_VOCABULARY_ID=...`
+## 目录
 
-如果已经有热词表 ID，也可以更新原有热词表而不是新建：
+- `src/`：FastAPI、ASR、RAG、文本 LLM、TTS 与 v6 会话服务。
+- `data/disney/`：从 Disney 官方允许抓取的页面产生的原始资料，以及带来源链接的中文整理资料。
+- `config/disney_sources.json`：官方来源白名单。
+- `config/asr_hotwords.disney.json`：Disney 角色 ASR 热词。
+- `esp_idf_demo/`：ESP32-S3 / ESP-VoCat V1.0 固件。
+- `deploy/intern2/`：无管理员权限的开发机部署脚本。
+
+## 本地后端
+
+建议在 Linux 或 WSL 使用 Python 3.11：
 
 ```bash
-python3 scripts/create_asr_vocabulary.py --vocabulary-id vocab-xxxx
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python scripts/crawl_disney_knowledge.py
+python -m src.rag.ingest
+uvicorn src.app:app --host 0.0.0.0 --port 18120
 ```
 
-## 服务器信息
+没有 `DASHSCOPE_API_KEY` 时可以完成代码、爬虫、索引和接口结构验证，但不能完成真实 ASR/LLM/TTS 闭环。
 
-- SSH 地址：`ssh -p 22 ubuntu@106.54.240.51`
-- SSH Host：`greenunion-sh`
-- 旧公网入口：`OLD_PUBLIC_ENTRY_DISABLED`，已完全停用
-- 项目目录：`/app/religion_demo_20260407`
-- 推荐运行方式：`screen` 托管服务
+## Disney 知识库
 
-## 常用运维命令
-
-查看当前 screen 会话：
+刷新知识库：
 
 ```bash
-screen -ls
+python scripts/crawl_disney_knowledge.py
+python -m src.rag.ingest
 ```
 
-如果你仍使用 `screen` 托管其它进程，重新进入会话查看日志：
+爬虫仅允许访问 `config/disney_sources.json` 中配置的 Disney 官方域名并检查 robots.txt。动态渲染或禁止抓取的页面不会被绕过；必要的中文摘要保存在 `data/disney/curated/`，每条都保留官方来源 URL。
+
+创建 ASR 热词表：
 
 ```bash
-screen -r esp
+python scripts/create_asr_vocabulary.py
 ```
 
-从 screen 中退出但不停止服务：
+脚本会输出可写入 `.env` 的 `ASR_VOCABULARY_ID`。
+
+## 声音样本
+
+收到内部演示用的兔朱迪声音样本后，将至少 24 kHz 的 WAV 放到：
 
 ```text
-Ctrl+A，然后按 D
+data/voice_samples/judy_demo.wav
 ```
 
-当前云端主服务实际由 `docker compose` 管理，更常用的是：
+然后执行：
 
 ```bash
-ssh -p 22 ubuntu@106.54.240.51
-cd /app/religion_demo_20260407
-docker compose ps
-docker logs -f religion_demo_20260407-api-1
-docker logs -f religion_demo_20260407-worker-1
+python scripts/create_realtime_tts_voice.py
 ```
 
-## 建议阅读顺序
+把返回的 `REALTIME_TTS_VOICE` 写入服务端 `.env`。声音样本和生成的 voice ID 不提交到仓库。
 
-1. [`使用手册.md`](使用手册.md)
-2. [`快速启动手册.md`](快速启动手册.md)
-3. [`esp_idf_demo/README.md`](esp_idf_demo/README.md)
-4. [`docs/superpowers/summaries/2026-04-08-hardware-handoff.md`](docs/superpowers/summaries/2026-04-08-hardware-handoff.md)
-5. [`20260409_流式传输/板端联调清单.md`](20260409_流式传输/板端联调清单.md)
-6. [`20260409_流式传输/安装建议.md`](20260409_流式传输/安装建议.md)
+## 设备端
 
-## 环境变量示例
+设备端目标为 ESP32-S3、16 MB Flash、8 MB PSRAM、ESP-VoCat V1.0 音频与 360×360 圆屏。当前 Windows 串口为 `COM7`。构建和刷机说明见 [esp_idf_demo/README.md](esp_idf_demo/README.md)。
 
-仓库根目录已补：
+## 开发机部署
 
-- [`.env.example`](/home/aitopia/Engineering_Projects/.worktrees/religion-demo-20260407/20260407_宗教大模型云服务器Demo/.env.example)
+目标开发机：
 
-其中已包含当前 `v3/realtime` 相关关键项：
+```text
+ssh -p 2223 intern2@210.22.71.130
+```
 
-- `REALTIME_TTS_MODEL`
-- `REALTIME_TTS_VOICE`
-- `REALTIME_TTS_WARMUP_ENABLED`
-- `REALTIME_LLM_COMPACT_TOP_K`
-- `REALTIME_LLM_COMPACT_SNIPPET_CHARS`
+部署目录默认为 `/home/intern2/projects/disney-voice-assistant`，服务端口默认为 `18120`，不需要 sudo 或 Docker 权限。详情见 [deploy/intern2/README.md](deploy/intern2/README.md)。
 
-## 交付资产入口
+## 尚需用户提供
 
-如果目标是把当前项目整理成交接材料，优先看：
+- `DASHSCOPE_API_KEY`
+- 兔朱迪 WAV 声音样本
+- 玲娜贝儿开机与状态动画素材
 
-1. [`handoff/README.md`](handoff/README.md)
-2. [`handoff/稳定交接包说明.md`](handoff/稳定交接包说明.md)
-3. [`handoff/快速启动手册.md`](handoff/快速启动手册.md)
-4. [`handoff/联调排障手册.md`](handoff/联调排障手册.md)
-5. [`handoff/系统架构图.md`](handoff/系统架构图.md)
-6. [`handoff/已知问题清单.md`](handoff/已知问题清单.md)
+这些输入只阻塞最终声音、画面和整机闭环验收，不阻塞首版框架、RAG、路由、显示状态机与服务器骨架部署。

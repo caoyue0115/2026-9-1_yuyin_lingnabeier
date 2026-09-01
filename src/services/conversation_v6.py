@@ -21,7 +21,13 @@ from src.models.conversation_v6 import (
 )
 from src.providers.llm import stream_answer_text
 from src.providers.realtime_tts import realtime_tts_health, stream_realtime_tts_chunks
-from src.rag.retriever import is_buddhist_question, retrieve_references
+from src.rag.retriever import retrieve_references
+from src.services.question_router import (
+    DISNEY_KNOWLEDGE_MISS,
+    DYNAMIC_REFUSAL,
+    QuestionRoute,
+    route_question,
+)
 from src.services.realtime_session import (
     _split_stream_buffer,
     _stream_answer_audio,
@@ -418,11 +424,22 @@ def run_turn(
     """Adapt the v5 retrieval, LLM, and TTS providers to an owned v6 turn."""
     answer_parts: list[str] = []
     _check_cancel(cancel_event, answer_parts)
-    references, top_score = retrieve_references(question, top_k=settings.top_k)
-    _check_cancel(cancel_event, answer_parts)
-    threshold = settings.min_top_score if is_buddhist_question(question) else settings.min_top_score_no_keyword
-    if not references or top_score < threshold:
-        answer = "佛说不可曰"
+    route = route_question(question)
+    references: list[dict] = []
+    canned_answer: str | None = None
+    if route == QuestionRoute.DYNAMIC_CURRENT:
+        canned_answer = DYNAMIC_REFUSAL
+    elif route == QuestionRoute.DISNEY_KNOWLEDGE:
+        try:
+            references, top_score = retrieve_references(question, top_k=settings.top_k)
+        except FileNotFoundError:
+            references, top_score = [], 0.0
+        _check_cancel(cancel_event, answer_parts)
+        if not references or top_score < settings.min_top_score:
+            canned_answer = DISNEY_KNOWLEDGE_MISS
+
+    if canned_answer is not None:
+        answer = canned_answer
         limit = settings.conversation_v6_answer_chars if answer_chars is None else answer_chars
         answer, answer_truncated = _truncate_text(answer, limit)
         checked_segments = _cancel_checked_segments([answer], cancel_event, [answer])

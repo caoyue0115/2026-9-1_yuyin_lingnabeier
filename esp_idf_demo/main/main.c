@@ -1,5 +1,6 @@
 #include "config.h"
 #include "app_network.h"
+#include "display_state.h"
 #include "trigger_input.h"
 #include "audio_in.h"
 #include "audio_out.h"
@@ -115,6 +116,31 @@ static void app_set_state(app_state_t *current_state, app_state_t next_state)
              app_state_to_string(*current_state),
              app_state_to_string(next_state));
     *current_state = next_state;
+    switch (next_state) {
+    case APP_STATE_IDLE:
+    case APP_STATE_DONE:
+        display_state_set(DISPLAY_UI_IDLE);
+        break;
+    case APP_STATE_PLAYING_PROMPT:
+    case APP_STATE_WAITING_SPEECH:
+    case APP_STATE_RECORDING:
+        display_state_set(DISPLAY_UI_LISTENING);
+        break;
+    case APP_STATE_POSTING_SESSION:
+    case APP_STATE_POLLING:
+    case APP_STATE_DOWNLOADING:
+    case APP_STATE_OPENING_AUDIO:
+        display_state_set(DISPLAY_UI_THINKING);
+        break;
+    case APP_STATE_STREAMING_AUDIO:
+    case APP_STATE_PLAYING:
+        display_state_set(DISPLAY_UI_SPEAKING);
+        break;
+    case APP_STATE_ERROR:
+    default:
+        display_state_set(DISPLAY_UI_ERROR);
+        break;
+    }
     const bool conversation_active =
         next_state != APP_STATE_IDLE &&
         next_state != APP_STATE_DONE &&
@@ -2610,10 +2636,16 @@ static void app_runtime_task(void *arg)
     trigger_input_t trigger = {0};
 
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "ESP-IDF audio demo starting");
+    ESP_LOGI(TAG, "Disney Voice Assistant Demo starting");
     ESP_LOGI(TAG, "Board: %s %s", DEMO_BOARD_NAME, DEMO_BOARD_REVISION);
     app_log_runtime_config();
     ESP_LOGI(TAG, "========================================");
+
+    esp_err_t display_ret = display_state_init();
+    if (display_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Display initialization failed; audio assistant will continue: %s",
+                 esp_err_to_name(display_ret));
+    }
 
     if (app_needs_spiffs_audio()) {
         (void)app_mount_spiffs();
@@ -2721,6 +2753,9 @@ static void app_runtime_task(void *arg)
             }
 
             if (s_app_state == APP_STATE_IDLE && s_pipeline_task_handle == NULL) {
+                if (event.type == TRIGGER_EVENT_WAKE_WORD) {
+                    display_state_notify_wake_word();
+                }
                 ESP_LOGI(TAG, "trigger source=%s x=%u y=%u -> starting pipeline",
                          trigger_input_source_name(event.type),
                          (unsigned)event.x,

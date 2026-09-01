@@ -21,15 +21,15 @@ from scripts.v5_full_chain_repeat_eval import (
 
 
 REAL_VOICE_CASES = [
-    ("阿弥陀佛", "amitabha"),
-    ("四十八愿", "forty_eight_vows"),
-    ("净土宗", "pure_land"),
-    ("无量寿经", "infinite_life_sutra"),
-    ("金刚经", "diamond_sutra"),
-    ("般若", "prajna"),
-    ("慧远", "huiyuan"),
-    ("善导", "shandao"),
-    ("东林寺", "donglin_temple"),
+    ("玲娜贝儿", "linabell"),
+    ("达菲", "duffy"),
+    ("雪莉玫", "shelliemay"),
+    ("杰拉多尼", "gelatoni"),
+    ("星黛露", "stellalou"),
+    ("可琦安", "cookieann"),
+    ("奥乐米拉", "olumel"),
+    ("兔朱迪", "judy_hopps"),
+    ("疯狂动物城", "zootopia"),
 ]
 
 FULL_CHAIN_FIELDS = [

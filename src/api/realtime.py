@@ -29,7 +29,7 @@ from src.providers.realtime_asr import (
     create_realtime_asr_session,
 )
 from src.services.realtime_session import (
-    normalize_buddhist_asr_text,
+    normalize_disney_asr_text,
     start_realtime_session,
     start_realtime_session_from_question,
 )
@@ -882,7 +882,7 @@ async def stream_opus_realtime_session(
     asr_normalization_applied = None
     asr_normalization_rules = None
     if asr_raw_text:
-        asr_normalized_text, asr_normalization_rules = normalize_buddhist_asr_text(asr_raw_text)
+        asr_normalized_text, asr_normalization_rules = normalize_disney_asr_text(asr_raw_text)
         asr_normalization_applied = bool(asr_normalization_rules)
 
     done_payload = {

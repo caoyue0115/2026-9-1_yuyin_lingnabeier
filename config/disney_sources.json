@@ -1,0 +1,30 @@
+[
+  {
+    "id": "hong_kong_disney_lina_bell_character",
+    "title": "香港迪士尼玲娜贝儿官方介绍",
+    "url": "https://www.hongkongdisneyland.com/zh-hk/attractions/linabell-at-duffy-and-friends-play-house/",
+    "format": "html",
+    "max_chars": 20000
+  },
+  {
+    "id": "tokyo_disney_duffy",
+    "title": "东京迪士尼达菲与朋友们官方介绍",
+    "url": "https://www.tokyodisneyresort.jp/en/tds/shop/duffy_goods",
+    "format": "html",
+    "max_chars": 20000
+  },
+  {
+    "id": "shanghai_disney_resort_facts",
+    "title": "上海迪士尼度假区官方概况",
+    "url": "https://shcorporate.shanghaidisneyresort.com/wp-content/uploads/2024/05/fact_sheet_shanghai_disney_resort_CHN_2024_Q2.pdf",
+    "format": "pdf",
+    "max_chars": 30000
+  },
+  {
+    "id": "disney_zootopia",
+    "title": "迪士尼《疯狂动物城》朱迪与尼克官方电影介绍",
+    "url": "https://movies.disney.com/zootopia",
+    "format": "html",
+    "max_chars": 20000
+  }
+]
