@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ESP_DIR = ROOT / "esp_idf_demo"
 ESP_MAIN = ROOT / "esp_idf_demo" / "main"
 
 
@@ -15,6 +16,11 @@ def test_voice_wake_is_the_only_conversation_trigger() -> None:
     config = _read(ESP_MAIN / "config.h")
     assert "#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_WAKE_WORD" in config
     assert '#define DEMO_WAKE_WORD_TEXT "小明同学"' in config
+
+
+def test_default_build_reuses_validated_vocat_lowcost_profile() -> None:
+    cmake = _read(ESP_DIR / "CMakeLists.txt")
+    assert 'set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.vocat_lowcost_16m8m")' in cmake
 
 
 def test_display_timeout_contract_is_30_and_60_seconds() -> None:

@@ -33,6 +33,11 @@ idf.py set-target esp32s3
 idf.py build
 ```
 
+项目根 `CMakeLists.txt` 默认加载
+`sdkconfig.defaults;sdkconfig.defaults.vocat_lowcost_16m8m`，沿用 002/003
+验证过的 N16R8 与 ESP-VoCat V1.0 配置。受控 OTA/canary 构建仍可显式覆盖
+`SDKCONFIG_DEFAULTS`。
+
 首次构建会由组件管理器下载 `esp_vocat`、LVGL、CST816S 触摸和语音唤醒相关依赖。
 
 ## Windows COM7 刷机
