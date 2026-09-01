@@ -8,7 +8,7 @@
 - Python 虚拟环境：项目内 `.venv`
 - 日志：项目内 `data/logs/server.log`
 - 默认监听：`0.0.0.0:18120`
-- screen 会话：`disney_voice`
+- PID 文件：项目内 `data/run/disney_voice.pid`
 
 ## 首次安装
 
@@ -34,13 +34,7 @@ curl http://127.0.0.1:18120/healthz
 tail -f data/logs/server.log
 ```
 
-进入 screen：
-
-```bash
-screen -r disney_voice
-```
-
-使用 `Ctrl+A`、再按 `D` 可退出 screen 而不停止服务。
+服务器没有安装 `screen`，启动脚本使用 `nohup` 和 PID 文件托管进程，不需要 sudo。
 
 ## 公网限制
 

@@ -2,20 +2,28 @@
 set -euo pipefail
 
 PROJECT_DIR="${DISNEY_PROJECT_DIR:-$HOME/projects/disney-voice-assistant}"
-SESSION_NAME="${DISNEY_SCREEN_SESSION:-disney_voice}"
 PORT="${DISNEY_PORT:-18120}"
+RUN_DIR="${PROJECT_DIR}/data/run"
+PID_FILE="${RUN_DIR}/disney_voice.pid"
 
 if [[ ! -f "${PROJECT_DIR}/.env" ]]; then
   echo "missing ${PROJECT_DIR}/.env; copy .env.example and configure it first" >&2
   exit 1
 fi
-if screen -ls 2>/dev/null | grep -q "\.${SESSION_NAME}[[:space:]]"; then
-  echo "screen session ${SESSION_NAME} is already running" >&2
-  exit 1
+if [[ -f "${PID_FILE}" ]]; then
+  EXISTING_PID="$(cat "${PID_FILE}")"
+  if kill -0 "${EXISTING_PID}" 2>/dev/null; then
+    echo "Disney voice service is already running as PID ${EXISTING_PID}" >&2
+    exit 1
+  fi
+  rm -f "${PID_FILE}"
 fi
 
-mkdir -p "${PROJECT_DIR}/data/logs"
-screen -dmS "${SESSION_NAME}" bash -lc \
-  "cd '${PROJECT_DIR}' && . .venv/bin/activate && exec uvicorn src.app:app --host 0.0.0.0 --port '${PORT}' >> data/logs/server.log 2>&1"
+mkdir -p "${PROJECT_DIR}/data/logs" "${RUN_DIR}"
+cd "${PROJECT_DIR}"
+nohup .venv/bin/uvicorn src.app:app --host 0.0.0.0 --port "${PORT}" \
+  >> data/logs/server.log 2>&1 < /dev/null &
+SERVICE_PID=$!
+echo "${SERVICE_PID}" > "${PID_FILE}"
 
-echo "started ${SESSION_NAME} on port ${PORT}"
+echo "started Disney voice service as PID ${SERVICE_PID} on port ${PORT}"
