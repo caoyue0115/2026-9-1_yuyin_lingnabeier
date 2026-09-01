@@ -665,9 +665,13 @@ class EspAssetTests(unittest.TestCase):
     def test_wifi_board_lite_raises_event_task_stack_for_esp_wifi_connect_callbacks(self) -> None:
         sdkconfig_defaults = (ESP_DIR / "sdkconfig.defaults.vocat_lowcost_16m8m").read_text(encoding="utf-8")
         package_script = (ROOT / "scripts" / "package_esp_compile_only.py").read_text(encoding="utf-8")
+        wifi_station = (
+            ESP_DIR / "components" / "esp-wifi-connect" / "wifi_station.cc"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096", sdkconfig_defaults)
         self.assertIn("CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096", package_script)
+        self.assertIn("CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE < 4096", wifi_station)
 
     def test_wifi_board_lite_defaults_to_wake_word_and_keeps_passwords_out_of_source(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")

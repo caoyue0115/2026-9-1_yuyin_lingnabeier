@@ -1,5 +1,6 @@
 #include "wifi_station.h"
 #include "wifi_connection_policy.h"
+#include "sdkconfig.h"
 #include <cstring>
 #include <algorithm>
 
@@ -18,6 +19,10 @@
 #define WIFI_EVENT_STOPPED BIT1
 #define WIFI_EVENT_SCAN_DONE_BIT BIT2
 #define MAX_RECONNECT_COUNT 0
+
+#if CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE < 4096
+#error "esp-wifi-connect requires CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE >= 4096"
+#endif
 
 WifiStation::WifiStation() {
     // Create the event group
