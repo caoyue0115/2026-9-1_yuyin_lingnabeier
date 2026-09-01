@@ -27,6 +27,7 @@
 #include <functional>
 #include <mutex>
 
+#include "wifi_lifecycle.h"
 #include "wifi_station.h"
 
 class WifiStation;
@@ -93,6 +94,8 @@ public:
 
     // ==================== Event ====================
 
+    // Event callbacks run synchronously. Queue mode transitions to another task;
+    // do not call Start/StopStation or Start/StopConfigAp from inside a callback.
     void SetEventCallback(std::function<void(WifiEvent, const std::string&)> callback);
 
     const WifiManagerConfig& GetConfig() const { return config_; }
@@ -105,11 +108,14 @@ private:
     ~WifiManager();
 
     void NotifyEvent(WifiEvent event, const std::string& data = "");
+    void StopConfigApForGeneration(uint32_t expected_generation);
+    bool StopConfigApLocked(const uint32_t* expected_generation);
 
     WifiManagerConfig config_;
     std::unique_ptr<WifiStation> station_;
     std::unique_ptr<WifiConfigurationAp> config_ap_;
 
+    WifiTransitionGate transition_gate_;
     mutable std::mutex mutex_;
     bool initialized_ = false;
     bool station_active_ = false;

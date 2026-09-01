@@ -6,6 +6,8 @@
 #include <mutex>
 #include <memory>
 #include <functional>
+#include <atomic>
+#include <cstdint>
 
 #include <esp_http_server.h>
 #include <esp_event.h>
@@ -15,6 +17,7 @@
 
 #include "dns_server.h"
 #include "sdkconfig.h"
+#include "wifi_lifecycle.h"
 
 /**
  * WifiConfigurationAp - WiFi configuration access point
@@ -50,7 +53,8 @@ public:
      * Set callback for when exit is requested from config mode
      * This is called when user requests to exit config mode (e.g., via /exit endpoint)
      */
-    void OnExitRequested(std::function<void()> callback);
+    void OnExitRequested(std::function<void(uint32_t)> callback);
+    bool IsGenerationCurrent(uint32_t generation) const;
 
 private:
     std::mutex mutex_;
@@ -62,9 +66,12 @@ private:
     esp_event_handler_instance_t instance_any_id_;
     esp_event_handler_instance_t instance_got_ip_;
     esp_timer_handle_t scan_timer_ = nullptr;
-    bool is_connecting_ = false;
+    std::atomic<bool> is_connecting_{false};
+    esp_netif_t* station_netif_ = nullptr;
     esp_netif_t* ap_netif_ = nullptr;
     std::vector<wifi_ap_record_t> ap_records_;
+    const std::shared_ptr<WifiConfigSession> session_ = std::make_shared<WifiConfigSession>();
+    std::atomic<uint32_t> active_generation_{0};
 
     // 高级配置项
     std::string ota_url_;
@@ -73,7 +80,7 @@ private:
     bool sleep_mode_;
 
     // Callbacks
-    std::function<void()> on_exit_requested_;
+    std::function<void(uint32_t)> on_exit_requested_;
 
     void StartAccessPoint();
     void StartWebServer();

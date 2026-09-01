@@ -56,3 +56,24 @@ def test_runtime_uses_disney_brand_and_neutral_prompt_assets() -> None:
     assert '"DisneyDemo-%08lx-%08lx"' in conversation
     assert "network_required_1.pcm" not in cmake
     assert "conversation_done_1.pcm" not in cmake
+
+
+def test_config_ap_owns_sta_netif_for_dhcp_and_serializes_transitions() -> None:
+    config_ap = _read(
+        ESP_DIR / "components" / "esp-wifi-connect" / "wifi_configuration_ap.cc"
+    )
+    config_header = _read(
+        ESP_DIR
+        / "components"
+        / "esp-wifi-connect"
+        / "include"
+        / "wifi_configuration_ap.h"
+    )
+    manager = _read(
+        ESP_DIR / "components" / "esp-wifi-connect" / "wifi_manager.cc"
+    )
+
+    assert "station_netif_ = esp_netif_create_default_wifi_sta();" in config_ap
+    assert "esp_netif_destroy_default_wifi(station_netif_);" in config_ap
+    assert "esp_netif_t* station_netif_ = nullptr;" in config_header
+    assert "auto transition = transition_gate_.Acquire();" in manager
