@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
 import unittest
@@ -18,10 +19,12 @@ if str(ROOT) not in sys.path:
 install_dependency_stubs()
 
 from fastapi import HTTPException
+from src.services.question_router import QuestionRoute
 
 
 def _write_test_wav(pcm_bytes: bytes) -> str:
     fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
     Path(path).unlink(missing_ok=True)
     with wave.open(path, "wb") as writer:
         writer.setnchannels(1)
@@ -92,7 +95,7 @@ class RealtimeSchemaTests(unittest.TestCase):
                 "close_reason": "Connection to remote host was lost.",
                 "last_payload_type": 9,
                 "last_log_id": "volc-log-1",
-                "last_result_text": "请解释阿弥陀佛是什么意思？",
+                "last_result_text": "请解释玲娜贝儿是什么意思？",
                 "packets_received": 1,
             },
             error_code=None,
@@ -128,7 +131,7 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertEqual(payload.trace.close_reason, "Connection to remote host was lost.")
         self.assertEqual(payload.trace.last_payload_type, 9)
         self.assertEqual(payload.trace.last_log_id, "volc-log-1")
-        self.assertEqual(payload.trace.last_result_text, "请解释阿弥陀佛是什么意思？")
+        self.assertEqual(payload.trace.last_result_text, "请解释玲娜贝儿是什么意思？")
         self.assertEqual(payload.trace.packets_received, 1)
 
     def test_settings_expose_realtime_defaults(self) -> None:
@@ -152,12 +155,12 @@ class RealtimeSchemaTests(unittest.TestCase):
         from src.services.realtime_session import split_realtime_answer_text
 
         segments = split_realtime_answer_text(
-            "诸法因缘生。诸法因缘灭。自净其意，是诸佛教。",
+            "玲娜贝儿喜欢探索。达菲是她的好朋友。一起去发现新故事吧。",
             min_chars=4,
             max_chars=20,
         )
 
-        self.assertEqual(segments, ["诸法因缘生。", "诸法因缘灭。", "自净其意，是诸佛教。"])
+        self.assertEqual(segments, ["玲娜贝儿喜欢探索。", "达菲是她的好朋友。", "一起去发现新故事吧。"])
 
     def test_realtime_text_segmenter_forces_split_when_no_punctuation(self) -> None:
         from src.services.realtime_session import split_realtime_answer_text
@@ -267,11 +270,12 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertTrue(first_claim)
         self.assertFalse(second_claim)
 
-    def test_store_update_session_refreshes_updated_at(self) -> None:
+    def test_store_update_session_keeps_updated_at_monotonic(self) -> None:
         from src.storage.realtime_store import InMemoryRealtimeSessionStore
 
         store = InMemoryRealtimeSessionStore(base_url="http://testserver")
         session = store.create_session(device_id="esp-1")
+        original_updated_at = session["updated_at"]
 
         updated = store.update_session(
             session["session_id"],
@@ -283,7 +287,10 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertEqual(updated["status"], "running")
         self.assertEqual(updated["step"], "asr")
         self.assertEqual(updated["started_at"], "2026-04-09T15:34:12.260000+00:00")
-        self.assertNotEqual(updated["updated_at"], session["updated_at"])
+        self.assertGreaterEqual(
+            datetime.fromisoformat(updated["updated_at"]),
+            datetime.fromisoformat(original_updated_at),
+        )
 
     def test_store_mark_done_sets_final_reason_and_finished_at(self) -> None:
         from src.storage.realtime_store import InMemoryRealtimeSessionStore
@@ -318,15 +325,15 @@ class RealtimeSchemaTests(unittest.TestCase):
             with mock.patch.object(
                 realtime_session_service,
                 "transcribe_wav_result",
-                return_value=ASRResult("什么是无相", None, None),
+                return_value=ASRResult("玲娜贝儿是谁", None, None),
             ), mock.patch.object(
                 realtime_session_service,
                 "retrieve_references",
-                return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+                return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
             ), mock.patch.object(
                 realtime_session_service,
-                "is_buddhist_question",
-                return_value=True,
+                "route_question",
+                return_value=QuestionRoute.DISNEY_KNOWLEDGE,
             ), mock.patch.object(
                 realtime_session_service,
                 "stream_answer_text",
@@ -370,15 +377,15 @@ class RealtimeSchemaTests(unittest.TestCase):
             with mock.patch.object(
                 realtime_session_service,
                 "transcribe_wav_result",
-                return_value=ASRResult("什么是无相", None, None),
+                return_value=ASRResult("玲娜贝儿是谁", None, None),
             ), mock.patch.object(
                 realtime_session_service,
                 "retrieve_references",
-                return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+                return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
             ), mock.patch.object(
                 realtime_session_service,
-                "is_buddhist_question",
-                return_value=True,
+                "route_question",
+                return_value=QuestionRoute.DISNEY_KNOWLEDGE,
             ), mock.patch.object(
                 realtime_session_service,
                 "stream_answer_text",
@@ -594,6 +601,9 @@ class RealtimeSchemaTests(unittest.TestCase):
     def test_get_realtime_audio_returns_opus_when_requested_and_enabled(self) -> None:
         from src.api import realtime as realtime_api
 
+        if not realtime_api.opus_available():
+            self.skipTest("libopus is not installed on this platform")
+
         pcm_frame = b"\x01\x00" * 960
         session = realtime_api.store.create_session(device_id="esp-1")
         realtime_api.store.append_audio_chunk(session["session_id"], pcm_frame)
@@ -654,10 +664,10 @@ class RealtimeSchemaTests(unittest.TestCase):
         realtime_api.store.update_session(session["session_id"], input_wav_path="/tmp/test.wav")
         wav_path = _write_test_wav(b"\x01\x02\x03\x04")
         try:
-            with mock.patch("src.services.realtime_session.transcribe_wav_result", return_value=ASRResult("什么是无相", None, None)), mock.patch(
+            with mock.patch("src.services.realtime_session.transcribe_wav_result", return_value=ASRResult("玲娜贝儿是谁", None, None)), mock.patch(
                 "src.services.realtime_session.retrieve_references",
-                return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
-            ), mock.patch("src.services.realtime_session.is_buddhist_question", return_value=True), mock.patch(
+                return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
+            ), mock.patch("src.services.realtime_session.route_question", return_value=QuestionRoute.DISNEY_KNOWLEDGE), mock.patch(
                 "src.services.realtime_session.stream_answer_text",
                 return_value=iter(["真实回答"]),
             ), mock.patch(
@@ -674,7 +684,7 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertEqual(updated["step"], "done")
         self.assertEqual(updated["final_reason"], "completed_answer")
         self.assertEqual(updated["answer_text"], "真实回答")
-        self.assertEqual(updated["question_text"], "什么是无相")
+        self.assertEqual(updated["question_text"], "玲娜贝儿是谁")
         self.assertIsNotNone(updated["trace"]["asr_ms"])
         self.assertIsNotNone(updated["trace"]["retrieval_ms"])
         self.assertIsNotNone(updated["trace"]["first_llm_chunk_ms"])
@@ -706,10 +716,10 @@ class RealtimeSchemaTests(unittest.TestCase):
 
         wav_path = _write_test_wav(b"\x01\x02\x03\x04")
         try:
-            with mock.patch("src.services.realtime_session.transcribe_wav_result", return_value=ASRResult("什么是无相", None, None)), mock.patch(
+            with mock.patch("src.services.realtime_session.transcribe_wav_result", return_value=ASRResult("玲娜贝儿是谁", None, None)), mock.patch(
                 "src.services.realtime_session.retrieve_references",
-                return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
-            ), mock.patch("src.services.realtime_session.is_buddhist_question", return_value=True), mock.patch(
+                return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
+            ), mock.patch("src.services.realtime_session.route_question", return_value=QuestionRoute.DISNEY_KNOWLEDGE), mock.patch(
                 "src.services.realtime_session.stream_answer_text",
                 return_value=iter(["真实回答"]),
             ), mock.patch(
@@ -738,15 +748,15 @@ class RealtimeSchemaTests(unittest.TestCase):
             with mock.patch.object(
                 realtime_session_service,
                 "transcribe_wav_result",
-                return_value=ASRResult("什么是无相", None, None),
+                return_value=ASRResult("玲娜贝儿是谁", None, None),
             ) as transcribe, mock.patch.object(
                 realtime_session_service,
                 "retrieve_references",
-                return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+                return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
             ) as retrieve, mock.patch.object(
                 realtime_session_service,
-                "is_buddhist_question",
-                return_value=True,
+                "route_question",
+                return_value=QuestionRoute.DISNEY_KNOWLEDGE,
             ), mock.patch.object(
                 realtime_session_service,
                 "stream_answer_text",
@@ -762,8 +772,8 @@ class RealtimeSchemaTests(unittest.TestCase):
 
         updated = store.get_session(session["session_id"])
         transcribe.assert_called_once_with("/tmp/test.wav")
-        retrieve.assert_called_once_with("什么是无相", top_k=realtime_session_service.settings.top_k)
-        self.assertEqual(updated["question_text"], "什么是无相")
+        retrieve.assert_called_once_with("玲娜贝儿是谁", top_k=realtime_session_service.settings.top_k)
+        self.assertEqual(updated["question_text"], "玲娜贝儿是谁")
         self.assertEqual(updated["final_reason"], "completed_answer")
 
     def test_realtime_session_marks_failed_when_asr_returns_error(self) -> None:
@@ -798,24 +808,24 @@ class RealtimeSchemaTests(unittest.TestCase):
         with mock.patch.object(
             realtime_session_service,
             "transcribe_wav_result",
-            return_value=ASRResult("什么是无相", None, None),
+            return_value=ASRResult("玲娜贝儿是谁", None, None),
         ), mock.patch.object(
             realtime_session_service,
             "retrieve_references",
             return_value=([], 0.0),
         ), mock.patch.object(
             realtime_session_service,
-            "is_buddhist_question",
-            return_value=True,
+            "route_question",
+            return_value=QuestionRoute.DISNEY_KNOWLEDGE,
         ):
             realtime_session_service.run_stub_realtime_session(store, session["session_id"])
 
         updated = store.get_session(session["session_id"])
         self.assertEqual(updated["status"], "done")
         self.assertEqual(updated["final_reason"], "completed_reject")
-        self.assertEqual(updated["answer_text"], "佛说不可曰")
+        self.assertEqual(updated["answer_text"], "这部分首版知识库还没有可靠资料，我先不乱讲。你可以问我玲娜贝儿、达菲和朋友们，或迪士尼乐园的基础知识。")
 
-    def test_realtime_session_marks_failed_when_retrieval_raises(self) -> None:
+    def test_realtime_session_returns_friendly_miss_when_index_is_absent(self) -> None:
         from src.services import realtime_session as realtime_session_service
         from src.storage.realtime_store import InMemoryRealtimeSessionStore
         from src.providers.asr import ASRResult
@@ -826,25 +836,26 @@ class RealtimeSchemaTests(unittest.TestCase):
         with mock.patch.object(
             realtime_session_service,
             "transcribe_wav_result",
-            return_value=ASRResult("什么是无相", None, None),
+            return_value=ASRResult("玲娜贝儿是谁", None, None),
         ), mock.patch.object(
             realtime_session_service,
             "retrieve_references",
-            side_effect=FileNotFoundError("buddhism index not found; run ingest first"),
+            side_effect=FileNotFoundError("disney index not found; run ingest first"),
         ):
             realtime_session_service.run_stub_realtime_session(store, session["session_id"])
 
         updated = store.get_session(session["session_id"])
-        self.assertEqual(updated["status"], "failed")
-        self.assertEqual(updated["step"], "failed")
-        self.assertEqual(updated["error_code"], "retrieval_unavailable")
+        self.assertEqual(updated["status"], "done")
+        self.assertEqual(updated["step"], "done")
+        self.assertEqual(updated["final_reason"], "completed_reject")
+        self.assertIn("知识库还没有可靠资料", updated["answer_text"])
 
     def test_realtime_session_uses_stream_answer_text_for_non_reject_path(self) -> None:
         from src.services import realtime_session as realtime_session_service
         from src.storage.realtime_store import InMemoryRealtimeSessionStore
         from src.providers.asr import ASRResult
 
-        references = [{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}]
+        references = [{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}]
         store = InMemoryRealtimeSessionStore(base_url="http://testserver")
         session = store.create_session(device_id="esp-1", input_wav_path="/tmp/test.wav")
 
@@ -853,15 +864,15 @@ class RealtimeSchemaTests(unittest.TestCase):
             with mock.patch.object(
                 realtime_session_service,
                 "transcribe_wav_result",
-                return_value=ASRResult("什么是无相", None, None),
+                return_value=ASRResult("玲娜贝儿是谁", None, None),
             ), mock.patch.object(
                 realtime_session_service,
                 "retrieve_references",
                 return_value=(references, 0.9),
             ), mock.patch.object(
                 realtime_session_service,
-                "is_buddhist_question",
-                return_value=True,
+                "route_question",
+                return_value=QuestionRoute.DISNEY_KNOWLEDGE,
             ), mock.patch.object(
                 realtime_session_service,
                 "stream_answer_text",
@@ -876,7 +887,7 @@ class RealtimeSchemaTests(unittest.TestCase):
             Path(wav_path).unlink(missing_ok=True)
 
         updated = store.get_session(session["session_id"])
-        stream_answer_text.assert_called_once_with("什么是无相", references)
+        stream_answer_text.assert_called_once_with("玲娜贝儿是谁", references)
         self.assertEqual(updated["status"], "done")
         self.assertEqual(updated["final_reason"], "completed_answer")
         self.assertEqual(updated["answer_text"], "真实回答")
@@ -892,15 +903,15 @@ class RealtimeSchemaTests(unittest.TestCase):
         with mock.patch.object(
             realtime_session_service,
             "transcribe_wav_result",
-            return_value=ASRResult("什么是无相", None, None),
+            return_value=ASRResult("玲娜贝儿是谁", None, None),
         ), mock.patch.object(
             realtime_session_service,
             "retrieve_references",
-            return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+            return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
         ), mock.patch.object(
             realtime_session_service,
-            "is_buddhist_question",
-            return_value=True,
+            "route_question",
+            return_value=QuestionRoute.DISNEY_KNOWLEDGE,
         ), mock.patch.object(
             realtime_session_service,
             "stream_answer_text",
@@ -928,15 +939,15 @@ class RealtimeSchemaTests(unittest.TestCase):
             with mock.patch.object(
                 realtime_session_service,
                 "transcribe_wav_result",
-                return_value=ASRResult("什么是无相", None, None),
+                return_value=ASRResult("玲娜贝儿是谁", None, None),
             ), mock.patch.object(
                 realtime_session_service,
                 "retrieve_references",
-                return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+                return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
             ), mock.patch.object(
                 realtime_session_service,
-                "is_buddhist_question",
-                return_value=True,
+                "route_question",
+                return_value=QuestionRoute.DISNEY_KNOWLEDGE,
             ), mock.patch.object(
                 realtime_session_service,
                 "stream_answer_text",
@@ -971,15 +982,15 @@ class RealtimeSchemaTests(unittest.TestCase):
         with mock.patch.object(
             realtime_session_service,
             "transcribe_wav_result",
-            return_value=ASRResult("什么是无相", None, None),
+            return_value=ASRResult("玲娜贝儿是谁", None, None),
         ), mock.patch.object(
             realtime_session_service,
             "retrieve_references",
-            return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+            return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
         ), mock.patch.object(
             realtime_session_service,
-            "is_buddhist_question",
-            return_value=True,
+            "route_question",
+            return_value=QuestionRoute.DISNEY_KNOWLEDGE,
         ), mock.patch.object(
             realtime_session_service,
             "stream_answer_text",
@@ -1015,7 +1026,7 @@ class RealtimeSchemaTests(unittest.TestCase):
         from src.providers.realtime_tts import RealtimeTtsError
 
         references = [
-            {"source_title": "金刚经", "snippet": "一二三四五六七八九十一二三四五六七八九十", "text": "一二三四五六七八九十一二三四五六七八九十"},
+            {"source_title": "玲娜贝儿官方角色介绍", "snippet": "一二三四五六七八九十一二三四五六七八九十", "text": "一二三四五六七八九十一二三四五六七八九十"},
             {"source_title": "楞严经", "snippet": "第二条证据", "text": "第二条证据"},
         ]
         store = InMemoryRealtimeSessionStore(base_url="http://testserver")
@@ -1034,15 +1045,15 @@ class RealtimeSchemaTests(unittest.TestCase):
         with mock.patch.object(
             realtime_session_service,
             "transcribe_wav_result",
-            return_value=ASRResult("什么是无相", None, None),
+            return_value=ASRResult("玲娜贝儿是谁", None, None),
         ), mock.patch.object(
             realtime_session_service,
             "retrieve_references",
             return_value=(references, 0.9),
         ), mock.patch.object(
             realtime_session_service,
-            "is_buddhist_question",
-            return_value=True,
+            "route_question",
+            return_value=QuestionRoute.DISNEY_KNOWLEDGE,
         ), mock.patch.object(
             realtime_session_service,
             "realtime_tts_health",
@@ -1064,7 +1075,7 @@ class RealtimeSchemaTests(unittest.TestCase):
 
         updated = store.get_session(session["session_id"])
         self.assertEqual(len(observed_references), 1)
-        self.assertEqual(observed_references[0]["source_title"], "金刚经")
+        self.assertEqual(observed_references[0]["source_title"], "玲娜贝儿官方角色介绍")
         self.assertLessEqual(
             len(observed_references[0]["snippet"]),
             realtime_session_service.settings.realtime_llm_compact_snippet_chars,
@@ -1077,7 +1088,7 @@ class RealtimeSchemaTests(unittest.TestCase):
         from src.providers.asr import ASRResult
 
         references = [
-            {"source_title": "金刚经", "snippet": "第一条很长的证据文本", "text": "第一条很长的证据文本"},
+            {"source_title": "玲娜贝儿官方角色介绍", "snippet": "第一条很长的证据文本", "text": "第一条很长的证据文本"},
             {"source_title": "楞严经", "snippet": "第二条证据", "text": "第二条证据"},
         ]
         store = InMemoryRealtimeSessionStore(base_url="http://testserver")
@@ -1100,15 +1111,15 @@ class RealtimeSchemaTests(unittest.TestCase):
         ), mock.patch.object(
             realtime_session_service,
             "transcribe_wav_result",
-            return_value=ASRResult("什么是无相", None, None),
+            return_value=ASRResult("玲娜贝儿是谁", None, None),
         ), mock.patch.object(
             realtime_session_service,
             "retrieve_references",
             return_value=(references, 0.9),
         ), mock.patch.object(
             realtime_session_service,
-            "is_buddhist_question",
-            return_value=True,
+            "route_question",
+            return_value=QuestionRoute.DISNEY_KNOWLEDGE,
         ), mock.patch.object(
             realtime_session_service,
             "realtime_tts_health",
@@ -1146,15 +1157,15 @@ class RealtimeSchemaTests(unittest.TestCase):
         ), mock.patch.object(
             realtime_session_service,
             "transcribe_wav_result",
-            return_value=ASRResult("什么是无相", None, None),
+            return_value=ASRResult("玲娜贝儿是谁", None, None),
         ), mock.patch.object(
             realtime_session_service,
             "retrieve_references",
-            return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+            return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
         ), mock.patch.object(
             realtime_session_service,
-            "is_buddhist_question",
-            return_value=True,
+            "route_question",
+            return_value=QuestionRoute.DISNEY_KNOWLEDGE,
         ), mock.patch.object(
             realtime_session_service,
             "realtime_tts_health",
@@ -1195,15 +1206,15 @@ class RealtimeSchemaTests(unittest.TestCase):
         with mock.patch.object(
             realtime_session_service,
             "transcribe_wav_result",
-            return_value=ASRResult("什么是无相", None, None),
+            return_value=ASRResult("玲娜贝儿是谁", None, None),
         ), mock.patch.object(
             realtime_session_service,
             "retrieve_references",
-            return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+            return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
         ), mock.patch.object(
             realtime_session_service,
-            "is_buddhist_question",
-            return_value=True,
+            "route_question",
+            return_value=QuestionRoute.DISNEY_KNOWLEDGE,
         ), mock.patch.object(
             realtime_session_service,
             "realtime_tts_health",
@@ -1255,15 +1266,15 @@ class RealtimeSchemaTests(unittest.TestCase):
         with mock.patch.object(
             realtime_session_service,
             "transcribe_wav_result",
-            return_value=ASRResult("什么是无相", None, None),
+            return_value=ASRResult("玲娜贝儿是谁", None, None),
         ), mock.patch.object(
             realtime_session_service,
             "retrieve_references",
-            return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+            return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
         ), mock.patch.object(
             realtime_session_service,
-            "is_buddhist_question",
-            return_value=True,
+            "route_question",
+            return_value=QuestionRoute.DISNEY_KNOWLEDGE,
         ), mock.patch.object(
             realtime_session_service,
             "stream_answer_text",
@@ -1300,15 +1311,15 @@ class RealtimeSchemaTests(unittest.TestCase):
             with mock.patch.object(
                 realtime_session_service,
                 "transcribe_wav_result",
-                return_value=ASRResult("什么是无相", None, None),
+                return_value=ASRResult("玲娜贝儿是谁", None, None),
             ), mock.patch.object(
                 realtime_session_service,
                 "retrieve_references",
-                return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+                return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
             ), mock.patch.object(
                 realtime_session_service,
-                "is_buddhist_question",
-                return_value=True,
+                "route_question",
+                return_value=QuestionRoute.DISNEY_KNOWLEDGE,
             ), mock.patch.object(
                 realtime_session_service,
                 "stream_answer_text",
@@ -1348,15 +1359,15 @@ class RealtimeSchemaTests(unittest.TestCase):
             with mock.patch.object(
                 realtime_session_service,
                 "transcribe_wav_result",
-                return_value=ASRResult("什么是无相", None, None),
+                return_value=ASRResult("玲娜贝儿是谁", None, None),
             ), mock.patch.object(
                 realtime_session_service,
                 "retrieve_references",
-                return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+                return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
             ), mock.patch.object(
                 realtime_session_service,
-                "is_buddhist_question",
-                return_value=True,
+                "route_question",
+                return_value=QuestionRoute.DISNEY_KNOWLEDGE,
             ), mock.patch.object(
                 realtime_session_service,
                 "stream_answer_text",
@@ -1411,15 +1422,15 @@ class RealtimeSchemaTests(unittest.TestCase):
             with mock.patch.object(
                 realtime_session_service,
                 "transcribe_wav_result",
-                return_value=ASRResult("什么是无相", None, None),
+                return_value=ASRResult("玲娜贝儿是谁", None, None),
             ), mock.patch.object(
                 realtime_session_service,
                 "retrieve_references",
-                return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+                return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
             ), mock.patch.object(
                 realtime_session_service,
-                "is_buddhist_question",
-                return_value=True,
+                "route_question",
+                return_value=QuestionRoute.DISNEY_KNOWLEDGE,
             ), mock.patch.object(
                 realtime_session_service,
                 "stream_answer_text",
@@ -1445,15 +1456,15 @@ class RealtimeSchemaTests(unittest.TestCase):
         with mock.patch.object(
             realtime_session_service,
             "transcribe_wav_result",
-            return_value=ASRResult("什么是无相", None, None),
+            return_value=ASRResult("玲娜贝儿是谁", None, None),
         ), mock.patch.object(
             realtime_session_service,
             "retrieve_references",
-            return_value=([{"source_title": "金刚经", "snippet": "应无所住而生其心", "text": "应无所住而生其心"}], 0.9),
+            return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。", "text": "玲娜贝儿是一只爱探索的粉色小狐狸。"}], 0.9),
         ), mock.patch.object(
             realtime_session_service,
-            "is_buddhist_question",
-            return_value=True,
+            "route_question",
+            return_value=QuestionRoute.DISNEY_KNOWLEDGE,
         ), mock.patch.object(
             realtime_session_service,
             "stream_answer_text",
@@ -1515,7 +1526,7 @@ class RealtimeSchemaTests(unittest.TestCase):
         wav_path = _write_test_wav(b"\x01\x00\x02\x00")
         store = InMemoryRealtimeSessionStore(base_url="http://testserver")
         session = store.create_session(device_id="esp-1")
-        question_text = "请解释阿弥陀佛是什么意思"
+        question_text = "请介绍玲娜贝儿"
         store.update_session(session["session_id"], question_text=question_text)
 
         try:
@@ -1525,15 +1536,15 @@ class RealtimeSchemaTests(unittest.TestCase):
             ) as transcribe_wav_result, mock.patch.object(
                 realtime_session_service,
                 "retrieve_references",
-                return_value=([{"source_title": "阿弥陀佛", "snippet": "无量光寿", "text": "无量光寿"}], 0.9),
+                return_value=([{"source_title": "玲娜贝儿官方角色介绍", "snippet": "她是一只爱探索的粉色小狐狸。", "text": "她是一只爱探索的粉色小狐狸。"}], 0.9),
             ) as retrieve_references, mock.patch.object(
                 realtime_session_service,
-                "is_buddhist_question",
-                return_value=True,
+                "route_question",
+                return_value=QuestionRoute.DISNEY_KNOWLEDGE,
             ), mock.patch.object(
                 realtime_session_service,
                 "stream_answer_text",
-                return_value=iter(["阿弥陀佛是无量光寿。"]),
+                return_value=iter(["玲娜贝儿是一只爱探索的粉色小狐狸。"]),
             ), mock.patch.object(
                 realtime_session_service,
                 "realtime_tts_health",
@@ -1554,29 +1565,29 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertEqual(updated["question_text"], question_text)
         self.assertEqual(updated["trace"]["retrieval_top_score"], 0.9)
 
-    def test_realtime_session_normalizes_buddhist_asr_terms_before_retrieval(self) -> None:
+    def test_realtime_session_normalizes_disney_asr_terms_before_retrieval(self) -> None:
         from src.services import realtime_session as realtime_session_service
         from src.storage.realtime_store import InMemoryRealtimeSessionStore
 
         wav_path = _write_test_wav(b"\x01\x00\x02\x00")
         store = InMemoryRealtimeSessionStore(base_url="http://testserver")
         session = store.create_session(device_id="esp-1")
-        raw_question = "什么汇远之类的，48院有哪些？"
+        raw_question = "玲娜贝尔是谁，达非是谁？"
         store.update_session(session["session_id"], question_text=raw_question)
 
         try:
             with mock.patch.object(
                 realtime_session_service,
                 "retrieve_references",
-                return_value=([{"source_title": "慧远", "snippet": "净土宗祖师", "text": "净土宗祖师"}], 0.9),
+                return_value=([{"source_title": "达菲和朋友们", "snippet": "玲娜贝儿和达菲都是达菲和朋友们中的角色。", "text": "玲娜贝儿和达菲都是达菲和朋友们中的角色。"}], 0.9),
             ) as retrieve_references, mock.patch.object(
                 realtime_session_service,
-                "is_buddhist_question",
-                return_value=True,
+                "route_question",
+                return_value=QuestionRoute.DISNEY_KNOWLEDGE,
             ), mock.patch.object(
                 realtime_session_service,
                 "stream_answer_text",
-                return_value=iter(["慧远与四十八愿相关回答。"]),
+                return_value=iter(["玲娜贝儿和达菲都是达菲和朋友们中的角色。"]),
             ) as stream_answer_text, mock.patch.object(
                 realtime_session_service,
                 "realtime_tts_health",
@@ -1590,7 +1601,7 @@ class RealtimeSchemaTests(unittest.TestCase):
         finally:
             Path(wav_path).unlink(missing_ok=True)
 
-        normalized_question = "什么慧远之类的，四十八愿有哪些？"
+        normalized_question = "玲娜贝儿是谁，达菲是谁？"
         retrieve_references.assert_called_once_with(normalized_question, top_k=mock.ANY)
         stream_answer_text.assert_called_once()
         self.assertEqual(stream_answer_text.call_args.args[0], normalized_question)
@@ -1601,23 +1612,23 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertTrue(updated["trace"]["asr_normalization_applied"])
         self.assertEqual(
             updated["trace"]["asr_normalization_rules"],
-            ["汇远->慧远", "48院->四十八愿"],
+            ["玲娜贝尔->玲娜贝儿", "达非->达菲"],
         )
 
-    def test_buddhist_asr_normalization_covers_known_terms(self) -> None:
-        from src.services.realtime_session import normalize_buddhist_asr_text
+    def test_disney_asr_normalization_covers_known_terms(self) -> None:
+        from src.services.realtime_session import normalize_disney_asr_text
 
         cases = {
-            "什么汇远之类的。": ("什么慧远之类的。", ["汇远->慧远"]),
-            "请介绍惠远。": ("请介绍慧远。", ["惠远->慧远"]),
-            "48愿有哪些？": ("四十八愿有哪些？", ["48愿->四十八愿"]),
-            "四十八院是什么？": ("四十八愿是什么？", ["四十八院->四十八愿"]),
-            "48院有哪些？": ("四十八愿有哪些？", ["48院->四十八愿"]),
+            "玲娜贝尔是谁？": ("玲娜贝儿是谁？", ["玲娜贝尔->玲娜贝儿"]),
+            "达非是谁？": ("达菲是谁？", ["达非->达菲"]),
+            "雪莉梅和星代露": ("雪莉玫和星黛露", ["雪莉梅->雪莉玫", "星代露->星黛露"]),
+            "杰拉多妮": ("杰拉多尼", ["杰拉多妮->杰拉多尼"]),
+            "疯狂动物成": ("疯狂动物城", ["疯狂动物成->疯狂动物城"]),
         }
 
         for raw_text, expected in cases.items():
             with self.subTest(raw_text=raw_text):
-                self.assertEqual(normalize_buddhist_asr_text(raw_text), expected)
+                self.assertEqual(normalize_disney_asr_text(raw_text), expected)
 
 
 if __name__ == "__main__":

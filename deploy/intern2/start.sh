@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_DIR="${DISNEY_PROJECT_DIR:-$HOME/projects/disney-voice-assistant}"
-PORT="${DISNEY_PORT:-18120}"
+PORT="${DISNEY_PORT:-18124}"
 RUN_DIR="${PROJECT_DIR}/data/run"
 PID_FILE="${RUN_DIR}/disney_voice.pid"
 

@@ -46,7 +46,7 @@ class RunPipelineTests(unittest.TestCase):
         with mock.patch.object(pipeline, "fetch_task", return_value=self.row), mock.patch.object(
             pipeline, "update_task_status"
         ), mock.patch.object(
-            pipeline, "transcribe_wav_result", return_value=pipeline.ASRResult("什么是无相", None, None)
+            pipeline, "transcribe_wav_result", return_value=pipeline.ASRResult("玲娜贝儿是谁", None, None)
         ) as transcribe_wav_result, mock.patch.object(
             pipeline, "retrieve_references", return_value=([], 0.0)
         ), mock.patch.object(
@@ -59,7 +59,7 @@ class RunPipelineTests(unittest.TestCase):
         transcribe_wav_result.assert_called_once_with(self.row["input_wav_path"])
         mark_task_done.assert_called_once()
         kwargs = mark_task_done.call_args.kwargs
-        self.assertEqual(kwargs["question_text"], "什么是无相")
+        self.assertEqual(kwargs["question_text"], "玲娜贝儿是谁")
         self.assertIn("asr_ms", kwargs["trace"])
 
 

@@ -24,14 +24,14 @@ class _FakeSuccessResult:
     status_code = HTTPStatus.OK
 
     def get_sentence(self) -> str:
-        return "观自在菩萨"
+        return "玲娜贝儿是谁"
 
 
 class _FakeFallbackResult:
     status_code = HTTPStatus.OK
 
     def __init__(self) -> None:
-        self.output = {"sentences": [{"text": "色即是空"}]}
+        self.output = {"sentences": [{"text": "达菲是米奇的泰迪熊"}]}
 
 
 class _FakeFailureResult:
@@ -94,7 +94,7 @@ class TranscribeWavTests(unittest.TestCase):
         ), mock.patch.object(asr, "_configure_dashscope_sdk") as configure_sdk:
             text, error_code = asr.transcribe_wav(self.audio_path)
 
-        self.assertEqual(text, "观自在菩萨")
+        self.assertEqual(text, "玲娜贝儿是谁")
         self.assertIsNone(error_code)
         self.assertEqual(_FakeRecognition.last_audio_path, str(self.audio_path))
         self.assertEqual(
@@ -114,13 +114,13 @@ class TranscribeWavTests(unittest.TestCase):
         with mock.patch.object(asr, "_is_asr_configured", return_value=True), mock.patch.object(
             asr, "_load_recognition_class", return_value=_FakeRecognition
         ), mock.patch.object(asr, "_configure_dashscope_sdk"), mock.patch.object(
-            asr.settings, "asr_vocabulary_id", "vocab-buddha-123"
+            asr.settings, "asr_vocabulary_id", "vocab-disney-123"
         ):
             text, error_code = asr.transcribe_wav(self.audio_path)
 
-        self.assertEqual(text, "观自在菩萨")
+        self.assertEqual(text, "玲娜贝儿是谁")
         self.assertIsNone(error_code)
-        self.assertEqual(_FakeRecognition.last_kwargs["vocabulary_id"], "vocab-buddha-123")
+        self.assertEqual(_FakeRecognition.last_kwargs["vocabulary_id"], "vocab-disney-123")
 
     def test_transcribe_wav_falls_back_to_nested_output_parsing(self) -> None:
         _FakeRecognition.result = _FakeFallbackResult()
@@ -129,7 +129,7 @@ class TranscribeWavTests(unittest.TestCase):
         ), mock.patch.object(asr, "_configure_dashscope_sdk"):
             text, error_code = asr.transcribe_wav(self.audio_path)
 
-        self.assertEqual(text, "色即是空")
+        self.assertEqual(text, "达菲是米奇的泰迪熊")
         self.assertIsNone(error_code)
 
     def test_transcribe_wav_maps_non_ok_status_to_asr_http_code(self) -> None:
@@ -174,7 +174,7 @@ class TranscribeWavTests(unittest.TestCase):
         with mock.patch.object(asr, "_is_main_thread", return_value=False), mock.patch.object(
             asr.signal, "signal"
         ) as signal_fn, mock.patch.object(
-            asr.signal, "setitimer"
+            asr.signal, "setitimer", create=True
         ) as setitimer_fn:
             thread = threading.Thread(target=_target)
             thread.start()

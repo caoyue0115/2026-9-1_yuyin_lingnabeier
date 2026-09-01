@@ -148,10 +148,10 @@ class EspAssetTests(unittest.TestCase):
         self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_BOOT_SWITCH_ENABLED"))
         self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_ROLLBACK_VALIDATION_ENABLED"))
 
-    def test_lowcost_default_trigger_is_gpio7_button_with_touch_override_available(self) -> None:
+    def test_lowcost_default_trigger_is_xiaoming_wake_word(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
 
-        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON_AND_WAKE_WORD", config)
+        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_WAKE_WORD", config)
         self.assertIn("#ifndef DEMO_BUTTON_GPIO", config)
         self.assertIn("#define DEMO_BUTTON_GPIO         GPIO_NUM_7", config)
         self.assertIn("#ifndef DEMO_WIFI_RECONFIG_GPIO", config)
@@ -210,33 +210,23 @@ class EspAssetTests(unittest.TestCase):
         self.assertGreater(intro.stat().st_size, 0)
         self.assertLessEqual(intro.stat().st_size, 64 * 1024)
 
-    def test_boot_sound_audio_asset_is_small_pcm_resource(self) -> None:
-        boot_sound = ESP_DIR / "spiffs" / "boot_amitabha_1.pcm"
+    def test_boot_sound_audio_asset_is_small_neutral_pcm_resource(self) -> None:
+        boot_sound = ESP_DIR / "spiffs" / "intro_1.pcm"
 
         self.assertTrue(boot_sound.exists())
         self.assertGreater(boot_sound.stat().st_size, 0)
         self.assertLessEqual(boot_sound.stat().st_size, 64 * 1024)
-        self.assertEqual(64_000, boot_sound.stat().st_size)
+        self.assertEqual(48_000, boot_sound.stat().st_size)
         boot_sound_bytes = boot_sound.read_bytes()
         self.assertEqual(0, len(boot_sound_bytes) % 2)
         self.assertNotEqual(b"RIFF", boot_sound_bytes[:4])
 
-    def test_record_prompt_audio_asset_is_small_pcm_resource(self) -> None:
-        prompt = ESP_DIR / "spiffs" / "record_prompt_1.pcm"
+    def test_legacy_spoken_record_prompt_is_removed(self) -> None:
+        self.assertFalse((ESP_DIR / "spiffs" / "record_prompt_1.pcm").exists())
 
-        self.assertTrue(prompt.exists())
-        self.assertGreater(prompt.stat().st_size, 0)
-        self.assertLessEqual(prompt.stat().st_size, 64 * 1024)
-
-    def test_retry_prompt_audio_assets_are_small_pcm_resources(self) -> None:
-        rearm_prompt = ESP_DIR / "spiffs" / "record_retry_rearm_1.pcm"
-        timeout_prompt = ESP_DIR / "spiffs" / "record_retry_timeout_1.pcm"
-        error_prompt = ESP_DIR / "spiffs" / "record_retry_error_1.pcm"
-
-        for prompt in (rearm_prompt, timeout_prompt, error_prompt):
-            self.assertTrue(prompt.exists())
-            self.assertGreater(prompt.stat().st_size, 0)
-            self.assertLessEqual(prompt.stat().st_size, 64 * 1024)
+    def test_legacy_spoken_retry_prompts_are_removed(self) -> None:
+        for name in ("record_retry_rearm_1.pcm", "record_retry_timeout_1.pcm", "record_retry_error_1.pcm"):
+            self.assertFalse((ESP_DIR / "spiffs" / name).exists())
 
     def test_compile_only_packager_injects_hardware_entrypoints(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -384,12 +374,12 @@ class EspAssetTests(unittest.TestCase):
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
         prompt_source = (ESP_DIR / "main" / "prompt_arbiter.c").read_text(encoding="utf-8")
 
-        self.assertIn('target_add_binary_data(${COMPONENT_LIB} "../spiffs/boot_amitabha_1.pcm" BINARY)', main_cmake)
+        self.assertIn('target_add_binary_data(${COMPONENT_LIB} "../spiffs/intro_1.pcm" BINARY)', main_cmake)
         self.assertIn("audio_out_play_pcm_buffer", audio_header)
         self.assertIn("audio_out_play_pcm_buffer", audio_source)
         self.assertIn("_binary_intro_1_pcm_start", main_source)
         self.assertIn("_binary_intro_1_pcm_end", main_source)
-        self.assertIn("_binary_boot_amitabha_1_pcm_start", prompt_source)
+        self.assertIn("_binary_intro_1_pcm_start", prompt_source)
         self.assertIn("audio_out_play_pcm_buffer(boot_sound_start", main_source)
         self.assertNotIn("audio_out_play_pcm_file(DEMO_BOOT_SOUND_PATH", main_source)
 
@@ -397,8 +387,9 @@ class EspAssetTests(unittest.TestCase):
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
 
         self.assertIn("DEMO_RECORD_PROMPT_ENABLED", config)
-        self.assertEqual("1", _read_macro_value(config, "DEMO_RECORD_PROMPT_ENABLED"))
+        self.assertEqual("0", _read_macro_value(config, "DEMO_RECORD_PROMPT_ENABLED"))
         self.assertIn("DEMO_RECORD_PROMPT_PATH", config)
+        self.assertEqual('""', _read_macro_value(config, "DEMO_RECORD_PROMPT_PATH"))
         self.assertIn("DEMO_RECORD_RETRY_REARM_PROMPT_PATH", config)
         self.assertIn("DEMO_RECORD_RETRY_TIMEOUT_PROMPT_PATH", config)
         self.assertIn("DEMO_RECORD_RETRY_ERROR_PROMPT_PATH", config)
@@ -470,7 +461,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertNotIn("SsidManager::GetInstance()", network_source)
         self.assertIn("StartStation()", network_source)
         self.assertIn("StartConfigAp()", network_source)
-        self.assertIn('ssid_prefix = "GreenMotive"', network_source)
+        self.assertIn('ssid_prefix = "DisneyDemo"', network_source)
         self.assertIn("wifi_saved_credentials_found", network_source)
         self.assertIn("wifi_no_saved_credentials", network_source)
         self.assertIn("wifi_config_mode_enter", network_source)
@@ -524,7 +515,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_WIFI_RUNTIME_RETRY_MS {15000, 30000, 60000}", config)
         self.assertIn("DEMO_WIFI_RECONFIG_TIMEOUT_MS (5 * 60 * 1000)", config)
         self.assertIn("DEMO_WIFI_SMARTCONFIG_ENABLED 0", config)
-        self.assertIn('config.ssid_prefix = "GreenMotive"', network)
+        self.assertIn('config.ssid_prefix = "DisneyDemo"', network)
         self.assertIn("wifi_policy_rank_scan", policy)
         self.assertIn("wifi_policy_candidate_deadline", policy)
         self.assertIn("wifi_policy_next_rescan_deadline", policy)
@@ -548,26 +539,17 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("prompt_arbiter_owner_task", prompt_source)
         self.assertIn("s_playing_key", prompt_source)
         self.assertIn("prompt_arbiter_network_prompt_is_relevant", prompt_source)
-        self.assertIn(
-            "case PROMPT_TECHNICAL_ERROR:\n"
-            "        start = prompt_conversation_done_start;\n"
-            "        end = prompt_conversation_done_end;",
-            prompt_source,
-        )
+        self.assertIn("case PROMPT_TECHNICAL_ERROR:", prompt_source)
+        self.assertIn("start = prompt_followup_bell_start;", prompt_source)
         for asset in (
-            "network_required_1.pcm",
-            "conversation_done_1.pcm",
             "followup_bell_1.pcm",
             "intro_1.pcm",
-            "boot_amitabha_1.pcm",
         ):
             self.assertIn(f'../spiffs/{asset}', cmake)
 
     def test_v7_embedded_prompt_assets_have_locked_pcm_hashes(self) -> None:
         expected = {
             "intro_1.pcm": (48_000, "b9cbe3581350a0a168b57d3c2b6c887099ae11c4b070fb741368cc5eb78cb424"),
-            "network_required_1.pcm": (61_440, "672cf8483a72cb39b60fbe385725ff1a06b81d63ae0da7e818b3821268c53cd8"),
-            "conversation_done_1.pcm": (46_080, "135a2c19a79f4cb9b89b7d962e439a4609ca2be275195ce45f19edbd4973aef0"),
             "followup_bell_1.pcm": (27_200, "88d1d0bbad225cf5c0fea00cff23dc037172f717cc6a95d9c579b4f23de2d8fb"),
         }
         for name, (size, digest) in expected.items():
@@ -611,10 +593,7 @@ class EspAssetTests(unittest.TestCase):
             self.assertIn("lock.unlock()", body)
 
     def test_v7_voice_prompts_are_audible_and_not_clipped(self) -> None:
-        minimum_sizes = {
-            "network_required_1.pcm": 20_000,
-            "conversation_done_1.pcm": 12_000,
-        }
+        minimum_sizes = {"intro_1.pcm": 20_000, "followup_bell_1.pcm": 12_000}
         for name, minimum_size in minimum_sizes.items():
             payload = (ESP_DIR / "spiffs" / name).read_bytes()
             samples = array("h")
@@ -631,7 +610,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096", sdkconfig_defaults)
         self.assertIn("CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096", package_script)
 
-    def test_wifi_board_lite_keeps_short_press_trigger_and_passwords_out_of_source(self) -> None:
+    def test_wifi_board_lite_defaults_to_wake_word_and_keeps_passwords_out_of_source(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
         trigger_source = (ESP_DIR / "main" / "trigger_input.c").read_text(encoding="utf-8")
         trigger_header = (ESP_DIR / "main" / "trigger_input.h").read_text(encoding="utf-8")
@@ -648,7 +627,7 @@ class EspAssetTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON_AND_WAKE_WORD", config)
+        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_WAKE_WORD", config)
         self.assertIn("#define DEMO_BUTTON_GPIO         GPIO_NUM_7", config)
         self.assertIn("#define DEMO_WIFI_RECONFIG_GPIO  GPIO_NUM_0", config)
         self.assertIn("#define DEMO_WIFI_RECONFIG_LONG_PRESS_MS 5000", config)
@@ -678,7 +657,7 @@ class EspAssetTests(unittest.TestCase):
             ):
             self.assertNotIn(forbidden, project_sources)
 
-    def test_wakenet_spike_combines_xiaoming_wake_word_with_gpio7_button(self) -> None:
+    def test_wakenet_uses_xiaoming_as_the_default_conversation_trigger(self) -> None:
         manifest = (ESP_DIR / "main" / "idf_component.yml").read_text(encoding="utf-8")
         cmake = (ESP_DIR / "main" / "CMakeLists.txt").read_text(encoding="utf-8")
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
@@ -695,7 +674,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("espressif__esp-sr", cmake)
 
         self.assertIn("DEMO_TRIGGER_SOURCE_BUTTON_AND_WAKE_WORD", config)
-        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_BUTTON_AND_WAKE_WORD", config)
+        self.assertIn("#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_WAKE_WORD", config)
         self.assertIn("#define DEMO_BUTTON_GPIO         GPIO_NUM_7", config)
         self.assertIn("#define DEMO_WIFI_RECONFIG_GPIO  GPIO_NUM_0", config)
         self.assertIn("#define DEMO_WAKE_WORD_ENABLED 1", config)
@@ -1053,15 +1032,6 @@ class EspAssetTests(unittest.TestCase):
 
             self.assertNotIn("OTA canary app artifact does not update SPIFFS", script)
             self.assertNotIn("DEMO_BOOT_SOUND_ENABLED 0", script)
-
-    def test_boot_sound_plan_uses_reproducible_secret_scan(self) -> None:
-        plan = (
-            ROOT / "docs" / "superpowers" / "plans" / "2026-07-09-v6-boot-amitabha-sound.md"
-        ).read_text(encoding="utf-8")
-
-        self.assertNotIn("gitleaks detect --source . --no-git --redact --verbose", plan)
-        self.assertIn("gitleaks dir esp_idf_demo/main/config.h", plan)
-        self.assertIn("pre-existing", plan)
 
     def test_compile_only_package_injects_p3d_canary_config_without_password(self) -> None:
         script = (ROOT / "scripts" / "package_esp_compile_only.py").read_text(encoding="utf-8")

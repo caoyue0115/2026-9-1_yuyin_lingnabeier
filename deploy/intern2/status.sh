@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_DIR="${DISNEY_PROJECT_DIR:-$HOME/projects/disney-voice-assistant}"
-PORT="${DISNEY_PORT:-18120}"
+PORT="${DISNEY_PORT:-18124}"
 PID_FILE="${PROJECT_DIR}/data/run/disney_voice.pid"
 
 if [[ -f "${PID_FILE}" ]]; then

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -28,6 +29,7 @@ def _load_script_module():
 
 def _write_test_wav(pcm_bytes: bytes) -> str:
     fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
     Path(path).unlink(missing_ok=True)
     with wave.open(path, "wb") as writer:
         writer.setnchannels(1)

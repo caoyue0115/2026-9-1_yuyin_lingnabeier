@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import time
@@ -25,6 +26,7 @@ from fastapi import HTTPException
 
 def _write_test_wav(pcm_bytes: bytes, *, sample_rate: int = 16000, channels: int = 1) -> str:
     fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
     Path(path).unlink(missing_ok=True)
     with wave.open(path, "wb") as writer:
         writer.setnchannels(channels)
@@ -124,7 +126,7 @@ class _FakeStreamingAsrAdapter:
     def __init__(
         self,
         *,
-        text: str | None = "请解释阿弥陀佛是什么意思",
+        text: str | None = "请介绍玲娜贝儿",
         error_code: str | None = None,
         request_id: str = "req-test",
         start_delay_seconds: float = 0.0,
@@ -266,7 +268,7 @@ class OpusUplinkProviderTests(unittest.TestCase):
         def _server_result_frame() -> bytes:
             payload = {
                 "result": {
-                    "text": "请解释阿弥陀佛是什么意思？",
+                    "text": "请介绍玲娜贝儿？",
                     "additions": {"log_id": "volc-log-1"},
                 }
             }
@@ -330,12 +332,12 @@ class OpusUplinkProviderTests(unittest.TestCase):
             result = session.finish()
 
         self.assertIsNone(result.error_code)
-        self.assertEqual(result.text, "请解释阿弥陀佛是什么意思？")
+        self.assertEqual(result.text, "请介绍玲娜贝儿？")
         self.assertEqual(result.request_id, "volc-log-1")
         self.assertEqual(result.close_code, 1000)
         self.assertIn("Connection to remote host was lost", result.close_reason)
         self.assertEqual(result.last_log_id, "volc-log-1")
-        self.assertEqual(result.last_result_text, "请解释阿弥陀佛是什么意思？")
+        self.assertEqual(result.last_result_text, "请介绍玲娜贝儿？")
         self.assertEqual(result.packets_received, 1)
         self.assertTrue(fake_ws.closed)
 
@@ -582,6 +584,9 @@ class OpusUplinkEndpointTests(unittest.TestCase):
     def test_stream_opus_realtime_session_reports_bad_frame_error(self) -> None:
         from src.api import realtime as realtime_api
 
+        if not realtime_api.opus_available():
+            self.skipTest("libopus unavailable")
+
         websocket = _FakeWebSocket([{"type": "websocket.receive", "bytes": b"\x00\x00"}])
 
         asyncio.run(
@@ -654,7 +659,7 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertIn("asr_final", payload_types)
         done_payload = websocket.sent_json[-1]
         self.assertEqual(done_payload["type"], "done")
-        self.assertEqual(done_payload["question_text"], "请解释阿弥陀佛是什么意思")
+        self.assertEqual(done_payload["question_text"], "请介绍玲娜贝儿")
         self.assertIsInstance(done_payload["done_abs_ms"], int)
         self.assertFalse(done_payload["session_started"])
         self.assertEqual(done_payload["asr_provider"], "dashscope")
@@ -843,13 +848,13 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         session = realtime_api.store.get_session(done_payload["session_id"])
         self.assertIsNotNone(session)
         trace = session["trace"]
-        self.assertEqual(trace["asr_raw_text"], "请解释阿弥陀佛是什么意思")
-        self.assertEqual(trace["asr_normalized_text"], "请解释阿弥陀佛是什么意思")
+        self.assertEqual(trace["asr_raw_text"], "请介绍玲娜贝儿")
+        self.assertEqual(trace["asr_normalized_text"], "请介绍玲娜贝儿")
         self.assertFalse(trace["asr_normalization_applied"])
         self.assertEqual(trace["asr_normalization_rules"], [])
         self.assertEqual(trace["asr_provider_used"], "dashscope")
         start_from_question.assert_called_once()
-        self.assertEqual(start_from_question.call_args.args[2], "请解释阿弥陀佛是什么意思")
+        self.assertEqual(start_from_question.call_args.args[2], "请介绍玲娜贝儿")
 
     def test_stream_opus_realtime_session_passes_short_answer_mode_to_session(self) -> None:
         from src.api import realtime as realtime_api
@@ -1000,6 +1005,9 @@ class OpusUplinkEndpointTests(unittest.TestCase):
 
     def test_stream_opus_realtime_session_drains_slow_asr_start_on_disconnect(self) -> None:
         from src.api import realtime as realtime_api
+
+        if not realtime_api.opus_available():
+            self.skipTest("libopus unavailable")
 
         websocket = _FakeWebSocket(
             [
@@ -1320,7 +1328,7 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         )
         primary_asr = _FakeStreamingAsrAdapter(text=None, error_code="volcengine_asr_empty_text")
         fallback_asr = _FakeStreamingAsrAdapter(
-            text="请解释阿弥陀佛是什么意思",
+            text="请介绍玲娜贝儿",
             request_id="dash-fallback",
         )
 
@@ -1379,7 +1387,7 @@ class OpusUplinkEndpointTests(unittest.TestCase):
         self.assertIn("asr_primary_provider_log_id=req-test", fallback_logs)
         self.assertIn("provider_log_id=dash-fallback", fallback_logs)
         start_from_question.assert_called_once()
-        self.assertEqual(start_from_question.call_args.args[2], "请解释阿弥陀佛是什么意思")
+        self.assertEqual(start_from_question.call_args.args[2], "请介绍玲娜贝儿")
 
     def test_stream_opus_realtime_session_reports_all_providers_failed_after_fallback(self) -> None:
         from src.api import realtime as realtime_api
@@ -1559,7 +1567,7 @@ class V5StreamingLatencyEvalScriptTests(unittest.TestCase):
             "first_asr_partial_abs_ms": 2823,
             "asr_final_abs_ms": 5675,
             "done_abs_ms": 5923,
-            "question_text": "情解释阿弥陀佛是什么意思？",
+            "question_text": "请介绍玲娜贝儿？",
             "error_code": None,
             "session_id": "session-1",
             "realtime_asr_request_id": "request-1",
@@ -1567,7 +1575,7 @@ class V5StreamingLatencyEvalScriptTests(unittest.TestCase):
         status_payload = {
             "session_id": "session-1",
             "status": "done",
-            "answer_text": "阿弥陀佛是西方极乐世界教主。",
+            "answer_text": "玲娜贝儿是一只爱探索的粉色小狐狸。",
             "trace": {
                 "retrieval_done_abs_ms": 6342,
                 "first_llm_chunk_abs_ms": 8588,
@@ -1579,8 +1587,8 @@ class V5StreamingLatencyEvalScriptTests(unittest.TestCase):
         }
 
         record = module.build_streaming_latency_record(
-            term="阿弥陀佛",
-            audio_path="/tmp/volc_asr_eval/amitabha.wav",
+            term="玲娜贝儿",
+            audio_path="/tmp/volc_asr_eval/linabell.wav",
             done_payload=done_payload,
             status_payload=status_payload,
         )
@@ -1600,7 +1608,7 @@ class V5StreamingLatencyEvalScriptTests(unittest.TestCase):
         self.assertEqual(record["first_audio_byte_abs_ms"], 10176)
         self.assertEqual(record["done_abs_ms"], 13910)
         self.assertTrue(record["term_hit"])
-        self.assertEqual(record["answer_chars"], 14)
+        self.assertEqual(record["answer_chars"], 17)
         self.assertEqual(record["session_id"], "session-1")
         self.assertEqual(record["log_id"], "request-1")
 
@@ -1665,7 +1673,7 @@ class V5AsrOnlyRepeatEvalScriptTests(unittest.TestCase):
             return {
                 "type": "done",
                 "asr_provider": "dashscope",
-                "question_text": "请解释阿弥陀佛是什么意思？",
+                "question_text": "请介绍玲娜贝儿？",
                 "first_frame_server_abs_ms": 4,
                 "provider_start_duration_ms": 70,
                 "first_pcm_sent_to_provider_abs_ms": 72,
@@ -1678,8 +1686,8 @@ class V5AsrOnlyRepeatEvalScriptTests(unittest.TestCase):
 
         with mock.patch.object(module, "run_stream_smoke", side_effect=_fake_run_stream_smoke):
             record = module.run_asr_only_case(
-                term="阿弥陀佛",
-                audio_path=Path("/tmp/volc_asr_eval/amitabha.wav"),
+                term="玲娜贝儿",
+                audio_path=Path("/tmp/volc_asr_eval/linabell.wav"),
                 repeat_index=2,
                 provider="dashscope",
                 base_url="http://127.0.0.1:8010",
@@ -1694,7 +1702,7 @@ class V5AsrOnlyRepeatEvalScriptTests(unittest.TestCase):
         self.assertEqual(calls[0]["asr_fallback_provider"], None)
         self.assertEqual(record["repeat_index"], 2)
         self.assertTrue(record["term_hit"])
-        self.assertEqual(record["question_text"], "请解释阿弥陀佛是什么意思？")
+        self.assertEqual(record["question_text"], "请介绍玲娜贝儿？")
         self.assertEqual(record["asr_final_abs_ms"], 5200)
         self.assertEqual(record["provider_log_id"], "req-1")
 
@@ -1724,10 +1732,10 @@ class V5AsrOnlyRepeatEvalScriptTests(unittest.TestCase):
         records = [
             {
                 "provider": "dashscope",
-                "term": "阿弥陀佛",
+                "term": "玲娜贝儿",
                 "repeat_index": 1,
-                "question_text": "请解释阿弥陀佛是什么意思？",
-                "recognized_text": "请解释阿弥陀佛是什么意思？",
+                "question_text": "请介绍玲娜贝儿？",
+                "recognized_text": "请介绍玲娜贝儿？",
                 "term_hit": True,
                 "asr_final_abs_ms": 5000,
                 "provider_start_duration_ms": 70,
@@ -1736,10 +1744,10 @@ class V5AsrOnlyRepeatEvalScriptTests(unittest.TestCase):
             },
             {
                 "provider": "dashscope",
-                "term": "阿弥陀佛",
+                "term": "玲娜贝儿",
                 "repeat_index": 2,
-                "question_text": "情解释阿弥陀佛是什么意思？",
-                "recognized_text": "情解释阿弥陀佛是什么意思？",
+                "question_text": "请介绍玲娜贝尔？",
+                "recognized_text": "请介绍玲娜贝尔？",
                 "term_hit": True,
                 "asr_final_abs_ms": 6000,
                 "provider_start_duration_ms": 80,
@@ -1748,10 +1756,10 @@ class V5AsrOnlyRepeatEvalScriptTests(unittest.TestCase):
             },
             {
                 "provider": "volcengine",
-                "term": "阿弥陀佛",
+                "term": "玲娜贝儿",
                 "repeat_index": 1,
-                "question_text": "请解释阿弥陀佛是什么意思？",
-                "recognized_text": "请解释阿弥陀佛是什么意思？",
+                "question_text": "请介绍玲娜贝儿？",
+                "recognized_text": "请介绍玲娜贝儿？",
                 "term_hit": True,
                 "asr_final_abs_ms": 4300,
                 "provider_start_duration_ms": 1800,
@@ -1759,7 +1767,9 @@ class V5AsrOnlyRepeatEvalScriptTests(unittest.TestCase):
                 "error_code": None,
             },
         ]
-        output_path = Path(tempfile.mkstemp(suffix=".md")[1])
+        output_fd, output_name = tempfile.mkstemp(suffix=".md")
+        os.close(output_fd)
+        output_path = Path(output_name)
         try:
             module.write_markdown(records, output_path)
             content = output_path.read_text(encoding="utf-8")
@@ -1810,7 +1820,7 @@ class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
             return {
                 "type": "done",
                 "asr_provider": "volcengine",
-                "question_text": "请解释阿弥陀佛是什么意思？",
+                "question_text": "请介绍玲娜贝儿？",
                 "asr_final_abs_ms": 4300,
                 "first_provider_result_abs_ms": 3900,
                 "provider_start_duration_ms": 1500,
@@ -1820,8 +1830,8 @@ class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
                 "error_code": None,
                 "session_status": {
                     "session_id": "session-1",
-                    "question_text": "请解释阿弥陀佛是什么意思？",
-                    "answer_text": "阿弥陀佛是无量光寿。念佛是归向净土的核心方便。",
+                    "question_text": "请介绍玲娜贝儿？",
+                    "answer_text": "玲娜贝儿是一只爱探索的粉色小狐狸。她喜欢用放大镜发现新线索。",
                     "error_code": None,
                     "trace": {
                         "retrieval_done_abs_ms": 5200,
@@ -1836,8 +1846,8 @@ class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
 
         with mock.patch.object(module, "run_stream_smoke", side_effect=_fake_run_stream_smoke):
             record = module.run_full_chain_case(
-                term="阿弥陀佛",
-                audio_path=Path("/tmp/volc_asr_eval/amitabha.wav"),
+                term="玲娜贝儿",
+                audio_path=Path("/tmp/volc_asr_eval/linabell.wav"),
                 repeat_index=1,
                 provider="volcengine",
                 base_url="http://127.0.0.1:8010",
@@ -1866,8 +1876,8 @@ class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
 
         with mock.patch.object(module, "run_stream_smoke", side_effect=RuntimeError("connection refused")):
             record = module.run_full_chain_case(
-                term="慧远",
-                audio_path=Path("/tmp/volc_asr_eval/huiyuan.wav"),
+                term="达菲",
+                audio_path=Path("/tmp/volc_asr_eval/duffy.wav"),
                 repeat_index=2,
                 provider="dashscope",
                 base_url="http://127.0.0.1:8010",
@@ -1881,7 +1891,7 @@ class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
             )
 
         self.assertEqual(record["provider"], "dashscope")
-        self.assertEqual(record["term"], "慧远")
+        self.assertEqual(record["term"], "达菲")
         self.assertEqual(record["repeat_index"], 2)
         self.assertEqual(record["error_code"], "smoke_failed")
         self.assertIn("connection refused", record["error_message"])
@@ -1891,10 +1901,10 @@ class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
         records = [
             {
                 "provider": "dashscope",
-                "term": "阿弥陀佛",
+                "term": "玲娜贝儿",
                 "repeat_index": 1,
-                "question_text": "情解释阿弥陀佛是什么意思？",
-                "recognized_text": "情解释阿弥陀佛是什么意思？",
+                "question_text": "请介绍玲娜贝尔？",
+                "recognized_text": "请介绍玲娜贝尔？",
                 "term_hit": True,
                 "asr_final_abs_ms": 5000,
                 "first_audio_byte_abs_ms": 9000,
@@ -1905,10 +1915,10 @@ class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
             },
             {
                 "provider": "volcengine",
-                "term": "阿弥陀佛",
+                "term": "玲娜贝儿",
                 "repeat_index": 1,
-                "question_text": "请解释阿弥陀佛是什么意思？",
-                "recognized_text": "请解释阿弥陀佛是什么意思？",
+                "question_text": "请介绍玲娜贝儿？",
+                "recognized_text": "请介绍玲娜贝儿？",
                 "term_hit": True,
                 "asr_final_abs_ms": 4300,
                 "first_audio_byte_abs_ms": 8200,
@@ -1918,7 +1928,9 @@ class V5FullChainRepeatEvalScriptTests(unittest.TestCase):
                 "error_code": None,
             },
         ]
-        output_path = Path(tempfile.mkstemp(suffix=".md")[1])
+        output_fd, output_name = tempfile.mkstemp(suffix=".md")
+        os.close(output_fd)
+        output_path = Path(output_name)
         try:
             module.write_markdown(records, output_path)
             content = output_path.read_text(encoding="utf-8")
@@ -1946,9 +1958,9 @@ class V5RealVoiceEvalScriptTests(unittest.TestCase):
         module = _load_v5_real_voice_eval_script()
         tmp_dir = Path(tempfile.mkdtemp())
         try:
-            (tmp_dir / "amitabha_01.wav").write_bytes(b"wav")
-            (tmp_dir / "amitabha_02.wav").write_bytes(b"wav")
-            (tmp_dir / "huiyuan_01.wav").write_bytes(b"wav")
+            (tmp_dir / "linabell_01.wav").write_bytes(b"wav")
+            (tmp_dir / "linabell_02.wav").write_bytes(b"wav")
+            (tmp_dir / "duffy_01.wav").write_bytes(b"wav")
 
             cases = module.discover_real_voice_cases(tmp_dir)
         finally:
@@ -1959,8 +1971,8 @@ class V5RealVoiceEvalScriptTests(unittest.TestCase):
         self.assertEqual(
             [(case["term"], case["speaker_index"], case["audio_path"].name) for case in cases],
             [
-                ("阿弥陀佛", 1, "amitabha_01.wav"),
-                ("阿弥陀佛", 2, "amitabha_02.wav"),
-                ("慧远", 1, "huiyuan_01.wav"),
+                ("玲娜贝儿", 1, "linabell_01.wav"),
+                ("玲娜贝儿", 2, "linabell_02.wav"),
+                ("达菲", 1, "duffy_01.wav"),
             ],
         )

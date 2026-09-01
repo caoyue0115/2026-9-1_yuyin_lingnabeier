@@ -21,37 +21,37 @@ class LlmProviderTests(unittest.TestCase):
 
         self.assertEqual(Settings().llm_model, "qwen3.5-flash-2026-02-23")
 
-    def test_build_messages_instructs_definition_and_core_idea_style(self) -> None:
+    def test_build_messages_ground_disney_answers_in_references(self) -> None:
         from src.providers.llm import _build_messages
 
         messages = _build_messages(
-            "什么是无相",
-            [{"source_title": "金刚经", "snippet": "凡所有相，皆是虚妄"}],
+            "玲娜贝儿是谁",
+            [{"source_title": "玲娜贝儿角色介绍", "snippet": "玲娜贝儿是一只爱探索的粉色小狐狸。"}],
         )
 
         self.assertEqual(messages[0]["role"], "system")
-        self.assertIn("定义", messages[0]["content"])
-        self.assertIn("核心思想", messages[0]["content"])
+        self.assertIn("只能依据", messages[0]["content"])
+        self.assertIn("不要编造", messages[0]["content"])
         self.assertIn("40字", messages[0]["content"])
-        self.assertIn("不要把“根据某法师", messages[0]["content"])
+        self.assertIn("不要声称自己代表迪士尼官方", messages[0]["content"])
         self.assertEqual(messages[1]["role"], "user")
-        self.assertIn("先给一句定义", messages[1]["content"])
-        self.assertIn("第二句补核心思想", messages[1]["content"])
-        self.assertIn("问题：什么是无相", messages[1]["content"])
-        self.assertIn("金刚经", messages[1]["content"])
+        self.assertIn("先直接回答", messages[1]["content"])
+        self.assertIn("第二句补充最有用的信息", messages[1]["content"])
+        self.assertIn("问题：玲娜贝儿是谁", messages[1]["content"])
+        self.assertIn("玲娜贝儿角色介绍", messages[1]["content"])
 
     def test_short_answer_mode_uses_stricter_length_prompt(self) -> None:
         from src.providers.llm import _build_messages
 
         messages = _build_messages(
-            "什么是阿弥陀佛",
-            [{"source_title": "阿弥陀佛", "snippet": "无量光寿"}],
+            "达菲是谁",
+            [{"source_title": "达菲角色介绍", "snippet": "达菲是米奇的泰迪熊。"}],
             answer_mode="short",
         )
 
         self.assertIn("两句话内", messages[0]["content"])
         self.assertIn("不超过70字", messages[0]["content"])
-        self.assertIn("先给直接解释", messages[0]["content"])
+        self.assertIn("先直接回答", messages[0]["content"])
         self.assertIn("不要长篇解释", messages[0]["content"])
         self.assertIn("不超过70字", messages[1]["content"])
 
@@ -64,7 +64,7 @@ class LlmProviderTests(unittest.TestCase):
             def create(self, **kwargs):
                 captured_kwargs.update(kwargs)
                 chunk = SimpleNamespace(
-                    choices=[SimpleNamespace(delta=SimpleNamespace(content="无相即离相。"))]
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="玲娜贝儿爱探索。"))]
                 )
                 return iter([chunk])
 
@@ -73,9 +73,9 @@ class LlmProviderTests(unittest.TestCase):
         )
 
         with patch.object(llm, "_build_client", return_value=fake_client):
-            chunks = list(llm.stream_answer_text("什么是无相", []))
+            chunks = list(llm.stream_answer_text("你好呀", []))
 
-        self.assertEqual(chunks, ["无相即离相。"])
+        self.assertEqual(chunks, ["玲娜贝儿爱探索。"])
         self.assertEqual(captured_kwargs["model"], "qwen3.5-flash-2026-02-23")
         self.assertEqual(captured_kwargs["extra_body"], {"enable_thinking": False})
         self.assertTrue(captured_kwargs["stream"])
@@ -89,7 +89,7 @@ class LlmProviderTests(unittest.TestCase):
             def create(self, **kwargs):
                 captured_kwargs.update(kwargs)
                 chunk = SimpleNamespace(
-                    choices=[SimpleNamespace(delta=SimpleNamespace(content="无相即离相。"))]
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="达菲是米奇的泰迪熊。"))]
                 )
                 return iter([chunk])
 
@@ -98,9 +98,9 @@ class LlmProviderTests(unittest.TestCase):
         )
 
         with patch.object(llm, "_build_client", return_value=fake_client):
-            chunks = list(llm.stream_answer_text("什么是无相", [], answer_mode="short"))
+            chunks = list(llm.stream_answer_text("达菲是谁", [], answer_mode="short"))
 
-        self.assertEqual(chunks, ["无相即离相。"])
+        self.assertEqual(chunks, ["达菲是米奇的泰迪熊。"])
         self.assertLessEqual(captured_kwargs["max_tokens"], 96)
         self.assertIn("不超过70字", captured_kwargs["messages"][0]["content"])
 

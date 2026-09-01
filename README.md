@@ -52,7 +52,7 @@ pip install -r requirements.txt
 cp .env.example .env
 python scripts/crawl_disney_knowledge.py
 python -m src.rag.ingest
-uvicorn src.app:app --host 0.0.0.0 --port 18120
+uvicorn src.app:app --host 0.0.0.0 --port 18124
 ```
 
 没有 `DASHSCOPE_API_KEY` 时可以完成代码、爬虫、索引和接口结构验证，但不能完成真实 ASR/LLM/TTS 闭环。
@@ -104,7 +104,7 @@ python scripts/create_realtime_tts_voice.py
 ssh -p 2223 intern2@210.22.71.130
 ```
 
-部署目录默认为 `/home/intern2/projects/disney-voice-assistant`，服务端口默认为 `18120`，不需要 sudo 或 Docker 权限。详情见 [deploy/intern2/README.md](deploy/intern2/README.md)。
+部署目录默认为 `/home/intern2/projects/disney-voice-assistant`，服务端口默认为 `18124`，不需要 sudo 或 Docker 权限。详情见 [deploy/intern2/README.md](deploy/intern2/README.md)。
 
 ## 尚需用户提供
 

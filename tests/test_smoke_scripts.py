@@ -94,7 +94,7 @@ class SmokeScriptTests(unittest.TestCase):
 
     def test_create_asr_vocabulary_loads_hotwords_json(self) -> None:
         hotwords = create_asr_vocabulary.load_hotwords(
-            str(ROOT / "config" / "asr_hotwords.buddhism.json")
+            str(ROOT / "config" / "asr_hotwords.disney.json")
         )
 
         self.assertGreaterEqual(len(hotwords), 5)
@@ -103,32 +103,32 @@ class SmokeScriptTests(unittest.TestCase):
 
     def test_create_asr_vocabulary_builds_prefix_summary(self) -> None:
         summary = create_asr_vocabulary.build_summary(
-            vocabulary_id="vocab-buddha-001",
+            vocabulary_id="vocab-disney-001",
             target_model="paraformer-realtime-v2",
-            hotwords=[{"text": "无相", "weight": 4, "lang": "zh"}],
+            hotwords=[{"text": "玲娜贝儿", "weight": 5, "lang": "zh"}],
         )
 
-        self.assertEqual(summary["vocabulary_id"], "vocab-buddha-001")
+        self.assertEqual(summary["vocabulary_id"], "vocab-disney-001")
         self.assertEqual(summary["target_model"], "paraformer-realtime-v2")
         self.assertEqual(summary["count"], 1)
-        self.assertEqual(summary["sample_terms"], ["无相"])
+        self.assertEqual(summary["sample_terms"], ["玲娜贝儿"])
 
     def test_create_realtime_tts_voice_encodes_local_wav_as_data_uri(self) -> None:
         data_uri = create_realtime_tts_voice.encode_audio_data_uri(str(self.audio_path))
 
-        self.assertTrue(data_uri.startswith("data:audio/x-wav;base64,"))
+        self.assertTrue(data_uri.startswith("data:audio/wav;base64,"))
 
     def test_create_realtime_tts_voice_builds_summary_from_sample(self) -> None:
         summary = create_realtime_tts_voice.build_summary(
             voice_id="voice-123",
             target_model="qwen3-tts-vc-realtime-2026-01-15",
             sample_path=str(self.audio_path),
-            prefix="rulaivcrt",
+            prefix="judydemo",
         )
 
         self.assertEqual(summary["voice_id"], "voice-123")
         self.assertEqual(summary["target_model"], "qwen3-tts-vc-realtime-2026-01-15")
-        self.assertEqual(summary["prefix"], "rulaivcrt")
+        self.assertEqual(summary["prefix"], "judydemo")
         self.assertEqual(summary["audio_info"]["sample_rate"], 16000)
         self.assertEqual(summary["audio_info"]["channels"], 1)
 
@@ -136,14 +136,14 @@ class SmokeScriptTests(unittest.TestCase):
         payload = create_realtime_tts_voice.build_create_voice_payload(
             str(self.audio_path),
             target_model="qwen3-tts-vc-realtime-2026-01-15",
-            prefix="rulaivcrt",
+            prefix="judydemo",
         )
 
         self.assertEqual(payload["model"], "qwen-voice-enrollment")
         self.assertEqual(payload["input"]["action"], "create")
         self.assertEqual(payload["input"]["target_model"], "qwen3-tts-vc-realtime-2026-01-15")
-        self.assertEqual(payload["input"]["preferred_name"], "rulaivcrt")
-        self.assertTrue(payload["input"]["audio"]["data"].startswith("data:audio/x-wav;base64,"))
+        self.assertEqual(payload["input"]["preferred_name"], "judydemo")
+        self.assertTrue(payload["input"]["audio"]["data"].startswith("data:audio/wav;base64,"))
 
 
 if __name__ == "__main__":

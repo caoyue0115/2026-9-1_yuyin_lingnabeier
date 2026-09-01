@@ -40,6 +40,5 @@ def test_runtime_uses_disney_brand_and_neutral_prompt_assets() -> None:
     cmake = _read(ESP_MAIN / "CMakeLists.txt")
     assert 'ssid_prefix = "DisneyDemo"' in network
     assert '"DisneyDemo-%08lx-%08lx"' in conversation
-    assert "boot_amitabha" not in cmake
     assert "network_required_1.pcm" not in cmake
     assert "conversation_done_1.pcm" not in cmake

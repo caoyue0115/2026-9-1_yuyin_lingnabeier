@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from http import HTTPStatus
 import os
 from pathlib import Path
@@ -74,6 +75,19 @@ def _run_with_timeout(recognition: Any, audio_path: str) -> Any:
     if not _is_main_thread():
         return recognition.call(audio_path)
     timeout_seconds = max(float(settings.asr_timeout_seconds), 0.001)
+    signal_timeout_supported = all(
+        hasattr(signal, name) for name in ("SIGALRM", "ITIMER_REAL", "setitimer")
+    )
+    if not signal_timeout_supported:
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr-timeout")
+        future = executor.submit(recognition.call, audio_path)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(f"ASR timed out after {timeout_seconds:.3f}s") from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
     previous_handler = signal.getsignal(signal.SIGALRM)
     try:
         signal.signal(signal.SIGALRM, _alarm_handler)
