@@ -5,8 +5,10 @@
 #include "config.h"
 
 #include "freertos/event_groups.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -31,10 +33,20 @@ static QueueHandle_t s_playback_reaper_queue_handle;
 static TaskHandle_t s_playback_reaper_task_handle;
 static bool s_playback_reaper_initializing;
 
+static void playback_log_internal_heap(const char *stage)
+{
+    ESP_LOGI(TAG,
+             "playback_heap stage=%s free_internal=%u largest_internal=%u",
+             stage != NULL ? stage : "unknown",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
+
 struct playback_session {
     char url[DEMO_CLOUD_AUDIO_URL_MAX_LEN];
     EventGroupHandle_t events;
     TaskHandle_t task;
+    bool task_stack_with_caps;
     volatile bool cancel_requested;
     bool completion_published;
     int cancel_reason;
@@ -62,6 +74,7 @@ static esp_err_t playback_session_pcm_sink(const uint8_t *pcm,
 static void playback_session_owner(void *arg)
 {
     playback_session_t *session = (playback_session_t *)arg;
+    playback_log_internal_heap("owner_start");
     esp_err_t ret = audio_out_open_pcm_stream(DEMO_AUDIO_SAMPLE_RATE,
                                               DEMO_AUDIO_CHANNELS,
                                               DEMO_AUDIO_BITS_PER_SAMPLE);
@@ -83,6 +96,8 @@ static void playback_session_owner(void *arg)
                  esp_err_to_name(stream_ret),
                  esp_err_to_name(close_ret),
                  esp_err_to_name(ret));
+    } else {
+        ESP_LOGE(TAG, "playback_owner_audio_open_failed result=%s", esp_err_to_name(ret));
     }
     session->result = ret;
     xEventGroupSetBits(session->events, PLAYBACK_SESSION_DONE_BIT);
@@ -151,35 +166,60 @@ esp_err_t playback_session_start(const char *url, playback_session_t **out)
         return ESP_ERR_INVALID_ARG;
     }
     *out = NULL;
+    ESP_LOGI(TAG, "playback_start url_len=%u", (unsigned)strlen(url));
+    playback_log_internal_heap("start_before_reaper");
     esp_err_t ret = playback_session_ensure_reaper();
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "playback_start reaper_failed result=%s", esp_err_to_name(ret));
         return ret;
     }
     playback_session_t *session = calloc(1, sizeof(*session));
     if (session == NULL) {
+        ESP_LOGE(TAG, "playback_start session_alloc_failed");
         return ESP_ERR_NO_MEM;
     }
     const int written = snprintf(session->url, sizeof(session->url), "%s", url);
     if (written < 0 || (size_t)written >= sizeof(session->url)) {
+        ESP_LOGE(TAG, "playback_start url_invalid_size written=%d capacity=%u",
+                 written, (unsigned)sizeof(session->url));
         free(session);
         return ESP_ERR_INVALID_SIZE;
     }
     session->events = xEventGroupCreate();
     if (session->events == NULL) {
+        ESP_LOGE(TAG, "playback_start event_group_alloc_failed");
         free(session);
         return ESP_ERR_NO_MEM;
     }
     session->last_progress_us = esp_timer_get_time();
-    if (xTaskCreate(playback_session_owner,
-                    "playback_owner",
-                    DEMO_REALTIME_AUDIO_PARALLEL_TASK_STACK_SIZE,
-                    session,
-                    DEMO_PIPELINE_TASK_PRIORITY,
-                    &session->task) != pdPASS) {
+    BaseType_t task_ret = pdFAIL;
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    task_ret = xTaskCreateWithCaps(playback_session_owner,
+                                   "playback_owner",
+                                   DEMO_REALTIME_AUDIO_PARALLEL_TASK_STACK_SIZE,
+                                   session,
+                                   DEMO_PIPELINE_TASK_PRIORITY,
+                                   &session->task,
+                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    session->task_stack_with_caps = task_ret == pdPASS;
+#else
+    task_ret = xTaskCreate(playback_session_owner,
+                           "playback_owner",
+                           DEMO_REALTIME_AUDIO_PARALLEL_TASK_STACK_SIZE,
+                           session,
+                           DEMO_PIPELINE_TASK_PRIORITY,
+                           &session->task);
+#endif
+    if (task_ret != pdPASS) {
+        playback_log_internal_heap("owner_task_create_failed");
+        ESP_LOGE(TAG, "playback_start owner_task_create_failed stack_bytes=%u",
+                 (unsigned)DEMO_REALTIME_AUDIO_PARALLEL_TASK_STACK_SIZE);
         vEventGroupDelete(session->events);
         free(session);
         return ESP_ERR_NO_MEM;
     }
+    ESP_LOGI(TAG, "playback_start owner_task_created stack_bytes=%u",
+             (unsigned)DEMO_REALTIME_AUDIO_PARALLEL_TASK_STACK_SIZE);
     *out = session;
     return ESP_OK;
 }
@@ -270,7 +310,11 @@ esp_err_t playback_session_join(playback_session_t **session,
         if (eTaskGetState(task) != eSuspended) {
             return ESP_ERR_TIMEOUT;
         }
-        vTaskDelete(task);
+        if (owned->task_stack_with_caps) {
+            vTaskDeleteWithCaps(task);
+        } else {
+            vTaskDelete(task);
+        }
         owned->task = NULL;
     }
     vEventGroupDelete(owned->events);

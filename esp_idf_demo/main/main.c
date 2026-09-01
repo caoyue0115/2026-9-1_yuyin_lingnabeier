@@ -472,6 +472,19 @@ static esp_err_t app_v6_play_prompt(prompt_id_t prompt, const char *key)
     return ret;
 }
 
+static void app_wait_until_ms(int64_t deadline_ms)
+{
+    while (true) {
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        if (now_ms >= deadline_ms) {
+            return;
+        }
+        const int64_t remaining_ms = deadline_ms - now_ms;
+        TickType_t wait_ticks = pdMS_TO_TICKS((uint32_t)remaining_ms);
+        vTaskDelay(wait_ticks > 0 ? wait_ticks : 1);
+    }
+}
+
 static esp_err_t run_v6_conversation(app_state_t *state)
 {
     if (!app_network_is_connected()) {
@@ -540,10 +553,7 @@ static esp_err_t run_v6_conversation(app_state_t *state)
                 continue;
             }
             if (timeout.action != CONVERSATION_ACTION_PLAY_DONE) {
-                const int64_t now_ms = esp_timer_get_time() / 1000;
-                if (timeout.deadline_ms > now_ms) {
-                    vTaskDelay(pdMS_TO_TICKS((uint32_t)(timeout.deadline_ms - now_ms)));
-                }
+                app_wait_until_ms(timeout.deadline_ms);
                 timeout = conversation_controller_handle(
                     &controller, CONVERSATION_EVENT_TIMER,
                     esp_timer_get_time() / 1000);
@@ -551,7 +561,7 @@ static esp_err_t run_v6_conversation(app_state_t *state)
                     goto technical_close;
                 }
             }
-            ret = app_v6_play_prompt(PROMPT_CONVERSATION_DONE, "conversation:done");
+            ret = ESP_OK;
             (void)conversation_controller_handle(&controller,
                                                  CONVERSATION_EVENT_PROMPT_DONE,
                                                  esp_timer_get_time() / 1000);
@@ -619,7 +629,10 @@ static esp_err_t run_v6_conversation(app_state_t *state)
                                                      esp_timer_get_time() / 1000);
                 continue;
             }
-            ret = app_v6_play_prompt(PROMPT_CONVERSATION_DONE, "conversation:done");
+            ret = ESP_OK;
+            (void)conversation_controller_handle(&controller,
+                                                 CONVERSATION_EVENT_PROMPT_DONE,
+                                                 esp_timer_get_time() / 1000);
             (void)cloud_conversation_close(conversation, "asr_empty");
             app_cleanup_pipeline_resources();
             app_set_state(state, APP_STATE_IDLE);
@@ -637,6 +650,7 @@ static esp_err_t run_v6_conversation(app_state_t *state)
         app_set_state(state, APP_STATE_PLAYING);
         playback_session_t *playback = NULL;
         ret = playback_session_start(result.audio_stream_url, &playback);
+        ESP_LOGI(TAG, "v6 playback_start result=%s", esp_err_to_name(ret));
         if (ret == ESP_OK) {
             esp_err_t join_ret = playback_session_join(&playback,
                                                        pdMS_TO_TICKS(DEMO_REALTIME_AUDIO_TASK_JOIN_TIMEOUT_MS),
@@ -658,8 +672,12 @@ static esp_err_t run_v6_conversation(app_state_t *state)
                 }
                 ret = join_ret;
             }
+            ESP_LOGI(TAG,
+                     "v6 playback_join join_result=%s playback_result=%s",
+                     esp_err_to_name(join_ret), esp_err_to_name(ret));
         }
         if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "v6 playback_failed result=%s", esp_err_to_name(ret));
             goto technical_close;
         }
         const int64_t playback_done_ms = esp_timer_get_time() / 1000;
@@ -671,16 +689,6 @@ static esp_err_t run_v6_conversation(app_state_t *state)
             &controller, CONVERSATION_EVENT_PLAYBACK_DONE,
             playback_done_ms);
         if (played.action == CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE) {
-            char followup_cue_key[64];
-            snprintf(followup_cue_key,
-                     sizeof(followup_cue_key),
-                     "conversation:followup-cue:%u",
-                     (unsigned)(played.turn_index + 1));
-            app_set_state(state, APP_STATE_PLAYING_PROMPT);
-            ret = app_v6_play_prompt(PROMPT_FOLLOWUP_CUE, followup_cue_key);
-            if (ret != ESP_OK) {
-                goto technical_close;
-            }
             conversation_transition_t cue_done = conversation_controller_handle(
                 &controller, CONVERSATION_EVENT_PROMPT_DONE,
                 esp_timer_get_time() / 1000);
@@ -690,14 +698,11 @@ static esp_err_t run_v6_conversation(app_state_t *state)
             continue;
         }
         if (played.state == CONVERSATION_STATE_ENDING) {
-            const int64_t now_ms = esp_timer_get_time() / 1000;
-            if (played.deadline_ms > now_ms) {
-                vTaskDelay(pdMS_TO_TICKS((uint32_t)(played.deadline_ms - now_ms)));
-            }
+            app_wait_until_ms(played.deadline_ms);
             (void)conversation_controller_handle(&controller,
                                                  CONVERSATION_EVENT_TIMER,
                                                  esp_timer_get_time() / 1000);
-            ret = app_v6_play_prompt(PROMPT_CONVERSATION_DONE, "conversation:done");
+            ret = ESP_OK;
             (void)conversation_controller_handle(&controller,
                                                  CONVERSATION_EVENT_PROMPT_DONE,
                                                  esp_timer_get_time() / 1000);

@@ -20,6 +20,7 @@
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "mbedtls/sha256.h"
@@ -119,6 +120,40 @@ typedef struct {
     int64_t decode_eof_us;
     volatile bool *cancel_requested;
 } cloud_stream_runtime_t;
+
+static BaseType_t cloud_create_stream_task(TaskFunction_t task_function,
+                                           const char *name,
+                                           configSTACK_DEPTH_TYPE stack_bytes,
+                                           void *arg,
+                                           UBaseType_t priority,
+                                           TaskHandle_t *task_handle)
+{
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    return xTaskCreateWithCaps(task_function,
+                               name,
+                               stack_bytes,
+                               arg,
+                               priority,
+                               task_handle,
+                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    return xTaskCreate(task_function,
+                       name,
+                       stack_bytes,
+                       arg,
+                       priority,
+                       task_handle);
+#endif
+}
+
+static void cloud_delete_stream_task(TaskHandle_t task_handle)
+{
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    vTaskDeleteWithCaps(task_handle);
+#else
+    vTaskDelete(task_handle);
+#endif
+}
 
 struct cloud_opus_uplink {
     esp_websocket_client_handle_t client;
@@ -1275,7 +1310,7 @@ static void cloud_decode_task(void *arg)
     if (runtime == NULL || runtime->encoded_queue == NULL || runtime->pcm_queue == NULL) {
         cloud_log_stack_watermark("cloud_decode_stack", DEMO_REALTIME_AUDIO_DECODE_TASK_STACK_SIZE);
         cloud_log_heap_snapshot("cloud_decode_task_exit");
-        vTaskDelete(NULL);
+        cloud_delete_stream_task(NULL);
         return;
     }
 
@@ -1381,7 +1416,7 @@ static void cloud_decode_task(void *arg)
     runtime->decode_task = NULL;
     cloud_log_stack_watermark("cloud_decode_stack", DEMO_REALTIME_AUDIO_DECODE_TASK_STACK_SIZE);
     cloud_log_heap_snapshot("cloud_decode_task_exit");
-    vTaskDelete(NULL);
+    cloud_delete_stream_task(NULL);
 }
 
 static void cloud_playback_task(void *arg)
@@ -1391,7 +1426,7 @@ static void cloud_playback_task(void *arg)
     if (runtime == NULL || runtime->pcm_queue == NULL || runtime->callback == NULL) {
         cloud_log_stack_watermark("cloud_playback_stack", DEMO_REALTIME_AUDIO_PLAYBACK_TASK_STACK_SIZE);
         cloud_log_heap_snapshot("cloud_playback_task_exit");
-        vTaskDelete(NULL);
+        cloud_delete_stream_task(NULL);
         return;
     }
 
@@ -1441,7 +1476,7 @@ static void cloud_playback_task(void *arg)
     runtime->playback_task = NULL;
     cloud_log_stack_watermark("cloud_playback_stack", DEMO_REALTIME_AUDIO_PLAYBACK_TASK_STACK_SIZE);
     cloud_log_heap_snapshot("cloud_playback_task_exit");
-    vTaskDelete(NULL);
+    cloud_delete_stream_task(NULL);
 }
 
 static void cloud_write_be32(uint8_t *data, uint32_t value)
@@ -2829,24 +2864,32 @@ esp_err_t cloud_client_stream_realtime_audio_cancellable(
     }
     cloud_log_heap_snapshot("headers_validated");
 
-    if (xTaskCreate(cloud_decode_task,
-                    "cloud_decode",
-                    DEMO_REALTIME_AUDIO_DECODE_TASK_STACK_SIZE,
-                    &runtime,
-                    DEMO_PIPELINE_TASK_PRIORITY + 1,
-                    &runtime.decode_task) != pdPASS) {
+    if (cloud_create_stream_task(cloud_decode_task,
+                                 "cloud_decode",
+                                 DEMO_REALTIME_AUDIO_DECODE_TASK_STACK_SIZE,
+                                 &runtime,
+                                 DEMO_PIPELINE_TASK_PRIORITY + 1,
+                                 &runtime.decode_task) != pdPASS) {
         ret = ESP_ERR_NO_MEM;
     }
     if (ret == ESP_OK &&
-        xTaskCreate(cloud_playback_task,
-                    "cloud_playback",
-                    DEMO_REALTIME_AUDIO_PLAYBACK_TASK_STACK_SIZE,
-                    &runtime,
-                    DEMO_PIPELINE_TASK_PRIORITY,
-                    &runtime.playback_task) != pdPASS) {
+        cloud_create_stream_task(cloud_playback_task,
+                                 "cloud_playback",
+                                 DEMO_REALTIME_AUDIO_PLAYBACK_TASK_STACK_SIZE,
+                                 &runtime,
+                                 DEMO_PIPELINE_TASK_PRIORITY,
+                                 &runtime.playback_task) != pdPASS) {
         ret = ESP_ERR_NO_MEM;
     }
     if (ret != ESP_OK) {
+        if (runtime.decode_task != NULL) {
+            cloud_delete_stream_task(runtime.decode_task);
+            runtime.decode_task = NULL;
+        }
+        if (runtime.playback_task != NULL) {
+            cloud_delete_stream_task(runtime.playback_task);
+            runtime.playback_task = NULL;
+        }
         cloud_opus_decoder_cleanup(&runtime.opus_decoder);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
@@ -2994,10 +3037,12 @@ esp_err_t cloud_client_stream_realtime_audio_cancellable(
                  esp_err_to_name(runtime.playback_result));
         stream_result = ESP_ERR_TIMEOUT;
         if (runtime.decode_task != NULL && !runtime.decode_done) {
-            vTaskDelete(runtime.decode_task);
+            cloud_delete_stream_task(runtime.decode_task);
+            runtime.decode_task = NULL;
         }
         if (runtime.playback_task != NULL && !runtime.playback_done) {
-            vTaskDelete(runtime.playback_task);
+            cloud_delete_stream_task(runtime.playback_task);
+            runtime.playback_task = NULL;
         }
     }
 

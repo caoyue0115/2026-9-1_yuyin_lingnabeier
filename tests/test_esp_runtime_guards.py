@@ -153,6 +153,11 @@ class EspRuntimeGuardTests(unittest.TestCase):
 
         self.assertIn("cloud_client_stream_realtime_audio_cancellable", cloud_h)
         self.assertIn("cancel_requested", cloud_c)
+        self.assertIn("cloud_create_stream_task(cloud_decode_task", cloud_c)
+        self.assertIn("cloud_create_stream_task(cloud_playback_task", cloud_c)
+        self.assertIn("xTaskCreateWithCaps", cloud_c)
+        self.assertIn("vTaskDeleteWithCaps", cloud_c)
+        self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", cloud_c)
         self.assertIn('"playback_session.c"', cmake)
         self.assertIn('"cloud_conversation.c"', cmake)
 
@@ -169,7 +174,10 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertIn("vTaskSuspend(NULL)", owner)
         self.assertNotIn("vTaskDelete(NULL)", owner)
         self.assertIn("eTaskGetState(task) != eSuspended", join)
-        self.assertLess(join.index("vTaskDelete(task)"), join.index("vEventGroupDelete"))
+        self.assertIn("vTaskDeleteWithCaps(task)", join)
+        self.assertLess(join.index("vTaskDeleteWithCaps(task)"), join.index("vEventGroupDelete"))
+        self.assertIn("xTaskCreateWithCaps", playback_c)
+        self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", playback_c)
 
     def test_answer_playback_is_not_cancelled_by_an_absolute_duration_limit(self) -> None:
         playback_c = (ESP_MAIN / "playback_session.c").read_text(encoding="utf-8")
@@ -239,7 +247,7 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertIn("s_last_result = ret", owner)
         self.assertIn("completed ? completed_result : ESP_OK", wait_key)
 
-    def test_followup_window_plays_bell_before_full_listening_window(self) -> None:
+    def test_followup_window_enters_listening_without_replaying_fixed_bell(self) -> None:
         main_c = (ESP_MAIN / "main.c").read_text(encoding="utf-8")
         followup_block = main_c.split(
             "conversation_transition_t played = conversation_controller_handle", 1
@@ -249,8 +257,8 @@ class EspRuntimeGuardTests(unittest.TestCase):
             "played.action == CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE",
             followup_block,
         )
-        self.assertIn("PROMPT_FOLLOWUP_CUE", followup_block)
-        self.assertIn('"conversation:followup-cue:', followup_block)
+        self.assertNotIn("PROMPT_FOLLOWUP_CUE", followup_block)
+        self.assertNotIn('"conversation:followup-cue:', followup_block)
         self.assertIn("CONVERSATION_EVENT_PROMPT_DONE", followup_block)
         self.assertIn("CONVERSATION_ACTION_LISTEN_FOLLOWUP", followup_block)
         self.assertNotIn("PROMPT_SPEAK", followup_block)
@@ -316,7 +324,8 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertIn("cloud_conversation_open", main_c)
         self.assertIn("cloud_conversation_send_pcm", main_c)
         self.assertIn("playback_session_start", main_c)
-        self.assertIn("PROMPT_CONVERSATION_DONE", main_c)
+        self.assertNotIn("PROMPT_CONVERSATION_DONE", main_c)
+        self.assertIn("app_wait_until_ms", main_c)
         self.assertIn("prompt_arbiter_wait_key(key, 15000)", main_c)
         self.assertIn("playback_session_join(&playback,", main_c)
         self.assertIn("CONVERSATION_EVENT_PLAYBACK_DONE", main_c)
