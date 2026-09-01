@@ -46,7 +46,7 @@ idf.py build
 idf.py -p COM7 flash monitor
 ```
 
-演示整机默认使用 `http://210.22.71.130:18124` 和设备 ID
+演示整机在 GMT 办公网内默认使用 `http://192.168.2.106:18124` 和设备 ID
 `disney-vocat-demo-001`。
 
 退出 monitor 使用 `Ctrl+]`。刷机前在 `main/config.h` 或编译参数中确认：

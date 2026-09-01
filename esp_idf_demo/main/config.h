@@ -55,7 +55,7 @@
 #endif
 
 #ifndef DEMO_SERVER_BASE_URL
-#define DEMO_SERVER_BASE_URL     "http://210.22.71.130:18124"
+#define DEMO_SERVER_BASE_URL     "http://192.168.2.106:18124"
 #endif
 
 #ifndef DEMO_CLOUD_SUBMIT_TIMEOUT_MS
