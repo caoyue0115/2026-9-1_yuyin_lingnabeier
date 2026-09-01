@@ -199,7 +199,22 @@ esp_err_t display_state_init(void)
     if (s_display_task != NULL) {
         return ESP_OK;
     }
-    if (bsp_display_start() == NULL) {
+    const bsp_display_cfg_t display_cfg = {
+        .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
+        .buffer_size = BSP_LCD_H_RES * DEMO_DISPLAY_BUFFER_HEIGHT,
+        .double_buffer = DEMO_DISPLAY_DOUBLE_BUFFER != 0,
+        .flags = {
+            .buff_dma = true,
+            .buff_spiram = false,
+            .sw_rotate = false,
+        },
+    };
+    ESP_LOGI(TAG,
+             "display_buffer rows=%d double=%d bytes=%u",
+             DEMO_DISPLAY_BUFFER_HEIGHT,
+             DEMO_DISPLAY_DOUBLE_BUFFER,
+             (unsigned)(display_cfg.buffer_size * sizeof(lv_color_t)));
+    if (bsp_display_start_with_config(&display_cfg) == NULL) {
         return ESP_FAIL;
     }
     if (!bsp_display_lock(1000)) {

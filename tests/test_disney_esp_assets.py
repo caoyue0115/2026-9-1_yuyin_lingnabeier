@@ -32,6 +32,14 @@ def test_display_timeout_contract_is_30_and_60_seconds() -> None:
     assert "display_wake source=touch" in display
 
 
+def test_display_uses_bounded_single_dma_buffer() -> None:
+    config = _read(ESP_MAIN / "config.h")
+    display = _read(ESP_MAIN / "display_state.c")
+    assert "#define DEMO_DISPLAY_BUFFER_HEIGHT 40" in config
+    assert "#define DEMO_DISPLAY_DOUBLE_BUFFER 0" in config
+    assert "bsp_display_start_with_config(&display_cfg)" in display
+
+
 def test_touch_is_not_routed_to_the_voice_pipeline() -> None:
     main = _read(ESP_MAIN / "main.c")
     display = _read(ESP_MAIN / "display_state.c")

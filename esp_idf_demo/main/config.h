@@ -55,7 +55,7 @@
 #endif
 
 #ifndef DEMO_SERVER_BASE_URL
-#define DEMO_SERVER_BASE_URL     ""
+#define DEMO_SERVER_BASE_URL     "http://210.22.71.130:18124"
 #endif
 
 #ifndef DEMO_CLOUD_SUBMIT_TIMEOUT_MS
@@ -366,7 +366,7 @@
 #endif
 
 #ifndef DEMO_DEVICE_ID
-#define DEMO_DEVICE_ID           ""
+#define DEMO_DEVICE_ID           "disney-vocat-demo-001"
 #endif
 
 // Board and trigger selection.
@@ -421,6 +421,16 @@
 
 #ifndef DEMO_DISPLAY_TASK_STACK_SIZE
 #define DEMO_DISPLAY_TASK_STACK_SIZE 4096
+#endif
+
+// Keep the LVGL DMA allocation below the contiguous internal-RAM budget left
+// by the audio and networking tasks. Forty rows is more than 1/10 of 360 px.
+#ifndef DEMO_DISPLAY_BUFFER_HEIGHT
+#define DEMO_DISPLAY_BUFFER_HEIGHT 40
+#endif
+
+#ifndef DEMO_DISPLAY_DOUBLE_BUFFER
+#define DEMO_DISPLAY_DOUBLE_BUFFER 0
 #endif
 
 #ifndef DEMO_WAKE_WORD_ENABLED
@@ -636,6 +646,8 @@ _Static_assert(DEMO_TRIGGER_SOURCE == DEMO_TRIGGER_SOURCE_BUTTON ||
 _Static_assert(DEMO_DISPLAY_DIM_AFTER_MS > 0 &&
                    DEMO_DISPLAY_OFF_AFTER_MS > DEMO_DISPLAY_DIM_AFTER_MS,
                "display off timeout must be greater than dim timeout");
+_Static_assert(DEMO_DISPLAY_BUFFER_HEIGHT >= 36 && DEMO_DISPLAY_BUFFER_HEIGHT <= 240,
+               "display buffer height must cover at least one tenth of the panel");
 _Static_assert(DEMO_AUDIO_MODE == DEMO_AUDIO_MODE_V2_ASYNC ||
                    DEMO_AUDIO_MODE == DEMO_AUDIO_MODE_V3_REALTIME,
                "DEMO_AUDIO_MODE must be v2_async or v3_realtime");
