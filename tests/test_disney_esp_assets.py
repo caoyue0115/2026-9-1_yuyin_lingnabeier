@@ -14,8 +14,11 @@ def _read(path: Path) -> str:
 
 def test_voice_wake_is_the_only_conversation_trigger() -> None:
     config = _read(ESP_MAIN / "config.h")
+    trigger = _read(ESP_MAIN / "trigger_input.c")
     assert "#define DEMO_TRIGGER_SOURCE DEMO_TRIGGER_SOURCE_WAKE_WORD" in config
     assert '#define DEMO_WAKE_WORD_TEXT "小明同学"' in config
+    assert "trigger->initialized = true;" in trigger
+    assert "trigger->configured_source == TRIGGER_EVENT_WAKE_WORD" in trigger
 
 
 def test_default_build_reuses_validated_vocat_lowcost_profile() -> None:

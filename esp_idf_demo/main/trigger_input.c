@@ -183,8 +183,13 @@ esp_err_t trigger_input_init(trigger_input_t *trigger)
         return trigger_input_init_button(trigger);
     case TRIGGER_EVENT_TOUCH:
         return trigger_input_init_touch(trigger);
-    case TRIGGER_EVENT_WAKE_WORD:
-        return trigger_input_start_wake_word(trigger);
+    case TRIGGER_EVENT_WAKE_WORD: {
+        esp_err_t wake_word_ret = trigger_input_start_wake_word(trigger);
+        if (wake_word_ret == ESP_OK) {
+            trigger->initialized = true;
+        }
+        return wake_word_ret;
+    }
     case TRIGGER_EVENT_BUTTON_AND_WAKE_WORD: {
         esp_err_t button_ret = trigger_input_init_button(trigger);
         if (button_ret != ESP_OK) {
@@ -398,6 +403,10 @@ bool trigger_input_poll(trigger_input_t *trigger, trigger_event_t *out_event)
         }
 
         trigger->touch_pressed = pressed;
+        return false;
+    }
+
+    if (trigger->configured_source == TRIGGER_EVENT_WAKE_WORD) {
         return false;
     }
 
