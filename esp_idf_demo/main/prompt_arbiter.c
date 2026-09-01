@@ -16,6 +16,10 @@ extern const uint8_t prompt_intro_start[] asm("_binary_intro_1_pcm_start");
 extern const uint8_t prompt_intro_end[] asm("_binary_intro_1_pcm_end");
 extern const uint8_t prompt_followup_bell_start[] asm("_binary_followup_bell_1_pcm_start");
 extern const uint8_t prompt_followup_bell_end[] asm("_binary_followup_bell_1_pcm_end");
+extern const uint8_t prompt_speak_start[] asm("_binary_speak_1_pcm_start");
+extern const uint8_t prompt_speak_end[] asm("_binary_speak_1_pcm_end");
+extern const uint8_t prompt_followup_start[] asm("_binary_followup_1_pcm_start");
+extern const uint8_t prompt_followup_end[] asm("_binary_followup_1_pcm_end");
 
 static const char *TAG = "prompt_arbiter";
 
@@ -77,11 +81,14 @@ static esp_err_t prompt_arbiter_play(prompt_id_t id)
         end = prompt_followup_bell_end;
         break;
     case PROMPT_FOLLOWUP_CUE:
-        start = prompt_followup_bell_start;
-        end = prompt_followup_bell_end;
+        start = prompt_followup_start;
+        end = prompt_followup_end;
         break;
     case PROMPT_SPEAK:
     case PROMPT_REPROMPT:
+        start = prompt_speak_start;
+        end = prompt_speak_end;
+        break;
     case PROMPT_TECHNICAL_ERROR:
         start = prompt_followup_bell_start;
         end = prompt_followup_bell_end;

@@ -689,6 +689,16 @@ static esp_err_t run_v6_conversation(app_state_t *state)
             &controller, CONVERSATION_EVENT_PLAYBACK_DONE,
             playback_done_ms);
         if (played.action == CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE) {
+            char followup_cue_key[64];
+            snprintf(followup_cue_key,
+                     sizeof(followup_cue_key),
+                     "conversation:followup-cue:%u",
+                     (unsigned)(played.turn_index + 1));
+            app_set_state(state, APP_STATE_PLAYING_PROMPT);
+            ret = app_v6_play_prompt(PROMPT_FOLLOWUP_CUE, followup_cue_key);
+            if (ret != ESP_OK) {
+                goto technical_close;
+            }
             conversation_transition_t cue_done = conversation_controller_handle(
                 &controller, CONVERSATION_EVENT_PROMPT_DONE,
                 esp_timer_get_time() / 1000);

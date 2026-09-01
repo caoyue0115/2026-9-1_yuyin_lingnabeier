@@ -247,7 +247,7 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertIn("s_last_result = ret", owner)
         self.assertIn("completed ? completed_result : ESP_OK", wait_key)
 
-    def test_followup_window_enters_listening_without_replaying_fixed_bell(self) -> None:
+    def test_followup_window_plays_distinct_prompt_before_listening(self) -> None:
         main_c = (ESP_MAIN / "main.c").read_text(encoding="utf-8")
         followup_block = main_c.split(
             "conversation_transition_t played = conversation_controller_handle", 1
@@ -257,8 +257,8 @@ class EspRuntimeGuardTests(unittest.TestCase):
             "played.action == CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE",
             followup_block,
         )
-        self.assertNotIn("PROMPT_FOLLOWUP_CUE", followup_block)
-        self.assertNotIn('"conversation:followup-cue:', followup_block)
+        self.assertIn("PROMPT_FOLLOWUP_CUE", followup_block)
+        self.assertIn('"conversation:followup-cue:', followup_block)
         self.assertIn("CONVERSATION_EVENT_PROMPT_DONE", followup_block)
         self.assertIn("CONVERSATION_ACTION_LISTEN_FOLLOWUP", followup_block)
         self.assertNotIn("PROMPT_SPEAK", followup_block)
