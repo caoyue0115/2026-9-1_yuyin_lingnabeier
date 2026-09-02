@@ -435,6 +435,38 @@
 #define DEMO_DISPLAY_TASK_STACK_SIZE 4096
 #endif
 
+#ifndef DEMO_IDLE_VIDEO_ENABLED
+#define DEMO_IDLE_VIDEO_ENABLED 1
+#endif
+
+#ifndef DEMO_IDLE_VIDEO_PATH
+#define DEMO_IDLE_VIDEO_PATH "/spiffs/idle_judy.avi"
+#endif
+
+#ifndef DEMO_IDLE_VIDEO_WIDTH
+#define DEMO_IDLE_VIDEO_WIDTH 360
+#endif
+
+#ifndef DEMO_IDLE_VIDEO_HEIGHT
+#define DEMO_IDLE_VIDEO_HEIGHT 360
+#endif
+
+#ifndef DEMO_IDLE_VIDEO_FRAME_INTERVAL_MS
+#define DEMO_IDLE_VIDEO_FRAME_INTERVAL_MS 167
+#endif
+
+#ifndef DEMO_IDLE_VIDEO_MAX_BYTES
+#define DEMO_IDLE_VIDEO_MAX_BYTES (512 * 1024)
+#endif
+
+#ifndef DEMO_IDLE_VIDEO_MAX_FRAMES
+#define DEMO_IDLE_VIDEO_MAX_FRAMES 64
+#endif
+
+#ifndef DEMO_IDLE_VIDEO_TASK_STACK_SIZE
+#define DEMO_IDLE_VIDEO_TASK_STACK_SIZE 8192
+#endif
+
 // Keep the LVGL DMA allocation below the contiguous internal-RAM budget left
 // by the audio and networking tasks. Forty rows is more than 1/10 of 360 px.
 #ifndef DEMO_DISPLAY_BUFFER_HEIGHT

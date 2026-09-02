@@ -35,6 +35,57 @@ def test_display_timeout_contract_is_30_and_60_seconds() -> None:
     assert "display_wake source=touch" in display
 
 
+def _jpeg_dimensions(jpeg: bytes) -> tuple[int, int]:
+    cursor = 2
+    while cursor + 8 <= len(jpeg):
+        if jpeg[cursor] != 0xFF:
+            cursor += 1
+            continue
+        marker = jpeg[cursor + 1]
+        cursor += 2
+        if marker in {0xD8, 0xD9}:
+            continue
+        segment_size = int.from_bytes(jpeg[cursor : cursor + 2], "big")
+        if marker in {0xC0, 0xC1, 0xC2}:
+            height = int.from_bytes(jpeg[cursor + 3 : cursor + 5], "big")
+            width = int.from_bytes(jpeg[cursor + 5 : cursor + 7], "big")
+            return width, height
+        cursor += segment_size
+    raise AssertionError("JPEG dimensions not found")
+
+
+def test_idle_ready_uses_circle_safe_silent_mjpeg_avi() -> None:
+    asset = ESP_DIR / "spiffs" / "idle_judy.avi"
+    config = _read(ESP_MAIN / "config.h")
+    display = _read(ESP_MAIN / "display_state.c")
+    decoder = _read(ESP_MAIN / "idle_video.c")
+    cmake = _read(ESP_MAIN / "CMakeLists.txt")
+    manifest = _read(ESP_MAIN / "idf_component.yml")
+
+    data = asset.read_bytes()
+    assert data[:4] == b"RIFF"
+    assert data[8:12] == b"AVI "
+    assert b"MJPG" in data
+    assert b"auds" not in data
+    assert len(data) <= 256 * 1024
+    assert data.count(b"\xff\xd8") == 42
+    assert data.count(b"\xff\xd9") == 42
+    first_start = data.index(b"\xff\xd8")
+    first_end = data.index(b"\xff\xd9", first_start) + 2
+    assert _jpeg_dimensions(data[first_start:first_end]) == (360, 360)
+
+    assert '#define DEMO_IDLE_VIDEO_ENABLED 1' in config
+    assert '#define DEMO_IDLE_VIDEO_PATH "/spiffs/idle_judy.avi"' in config
+    assert "DISPLAY_UI_IDLE" in display
+    assert "lv_image_set_src(s_idle_image" in display
+    assert "esp_jpeg_decode" in decoder
+    assert '"idle_video.c"' in cmake
+    assert "espressif/esp_jpeg" in manifest
+    assert 'version: "4.2.0"' in manifest
+    assert 'version: "1.1.1~1"' in manifest
+    assert 'version: "2.8.0~1"' in manifest
+
+
 def test_display_uses_bounded_single_dma_buffer() -> None:
     config = _read(ESP_MAIN / "config.h")
     display = _read(ESP_MAIN / "display_state.c")
