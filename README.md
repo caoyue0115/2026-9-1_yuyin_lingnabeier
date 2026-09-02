@@ -1,6 +1,6 @@
 # Disney Voice Assistant Demo
 
-基于 ESP32-S3 与 ESP-VoCat V1.0 圆屏整机的内部演示版 Disney 语音助手。项目沿用原仓库已经验证过的录音、唤醒、WebSocket、OTA 和音频播放框架，只替换产品人设、知识库、问答路由、显示交互与部署方式。
+基于 ESP32-S3 与 ESP-VoCat V1.0 圆屏整机的内部演示版兔朱迪语音助手。项目沿用原仓库已经验证过的录音、唤醒、WebSocket、OTA 和音频播放框架，只替换产品人设、知识库、问答路由、显示交互与部署方式。
 
 > 本项目是内部技术 Demo，不是 Disney 官方产品，也不应对外发布角色声音或受版权保护的视觉素材。
 
@@ -10,7 +10,9 @@
 - 语音交互只由唤醒词“小明同学”启动。
 - 触摸只在熄屏时点亮屏幕；亮屏状态下触摸不执行任何动作，也不会开始录音。
 - 无操作 30 秒降为 20% 亮度，60 秒背光关闭；触摸或唤醒词立即恢复亮度。
-- Disney 角色、达菲和朋友们、乐园基础常识走本地 RAG。
+- 角色身份固定为兔朱迪（朱迪·霍普斯），不会切换或冒充玲娜贝儿、米奇等其他角色。
+- 《疯狂动物城》人物、城市与案件按朱迪亲历的核心设定回答；尼克固定称为警察搭档，不扩写未经官方确认的关系。
+- 其他迪士尼角色和故事走本地 RAG，并使用“我听说过”或“好像有这么个故事”等听闻语气介绍，不假装亲历。
 - 普通静态闲聊由文本千问回答。
 - 天气、实时票价、营业时间、排队和客流等动态问题在首版友好拒绝，并提示查看官方 App 或官网。
 - 会话只保留当前连接内的短期上下文：最多 4 轮，重连或服务重启后清空。
@@ -35,7 +37,8 @@
 ## 目录
 
 - `src/`：FastAPI、ASR、RAG、文本 LLM、TTS 与 v6 会话服务。
-- `data/disney/`：从 Disney 官方允许抓取的页面产生的原始资料，以及带来源链接的中文整理资料。
+- `data/disney/crawled/`：从 Disney 官方允许抓取的页面保存的原始溯源资料，不直接进入线上索引。
+- `data/disney/curated/`：核验后、带来源链接和人设范围标记的中文事实，是线上 RAG 的知识来源。
 - `config/disney_sources.json`：官方来源白名单。
 - `config/asr_hotwords.disney.json`：Disney 角色 ASR 热词。
 - `esp_idf_demo/`：ESP32-S3 / ESP-VoCat V1.0 固件。
@@ -66,7 +69,7 @@ python scripts/crawl_disney_knowledge.py
 python -m src.rag.ingest
 ```
 
-爬虫仅允许访问 `config/disney_sources.json` 中配置的 Disney 官方域名并检查 robots.txt。动态渲染或禁止抓取的页面不会被绕过；必要的中文摘要保存在 `data/disney/curated/`，每条都保留官方来源 URL。
+爬虫仅允许访问 `config/disney_sources.json` 中配置的 Disney 官方域名并检查 robots.txt。动态渲染或禁止抓取的页面不会被绕过。抓取原文只用于溯源，不直接建立线上索引；核验后的中文事实保存在 `data/disney/curated/`，每条都保留官方来源 URL，并标记为 `zootopia_core` 或 `disney_hearsay`。
 
 创建 ASR 热词表：
 
@@ -105,11 +108,3 @@ ssh -p 2223 intern2@210.22.71.130
 ```
 
 部署目录默认为 `/home/intern2/projects/disney-voice-assistant`，服务端口默认为 `18124`，不需要 sudo 或 Docker 权限。详情见 [deploy/intern2/README.md](deploy/intern2/README.md)。
-
-## 尚需用户提供
-
-- `DASHSCOPE_API_KEY`
-- 兔朱迪 WAV 声音样本
-- 玲娜贝儿开机与状态动画素材
-
-这些输入只阻塞最终声音、画面和整机闭环验收，不阻塞首版框架、RAG、路由、显示状态机与服务器骨架部署。

@@ -35,6 +35,8 @@ def _extract_json_units(fp: Path) -> list[dict[str, Any]]:
     for record in records:
         if not isinstance(record, dict):
             continue
+        if record.get("index_enabled") is False:
+            continue
         text = clean_text(str(record.get("text") or ""))
         if not text:
             continue
@@ -44,6 +46,7 @@ def _extract_json_units(fp: Path) -> list[dict[str, Any]]:
                 "source_title": str(record.get("title") or fp.stem),
                 "source_url": str(record.get("url") or ""),
                 "fetched_at": str(record.get("fetched_at") or ""),
+                "knowledge_scope": str(record.get("knowledge_scope") or "disney_hearsay"),
                 "page_no": record.get("page_no"),
                 "text": text,
             }
@@ -71,6 +74,7 @@ def collect_doc_units(base: Path | None = None) -> list[dict[str, Any]]:
                     "source_title": fp.name,
                     "source_url": "",
                     "fetched_at": "",
+                    "knowledge_scope": "disney_hearsay",
                     "page_no": None,
                     "text": text,
                 }
@@ -93,6 +97,7 @@ def ingest_disney_docs() -> dict[str, Any]:
                     "source_title": unit["source_title"],
                     "source_url": unit.get("source_url", ""),
                     "fetched_at": unit.get("fetched_at", ""),
+                    "knowledge_scope": unit.get("knowledge_scope", "disney_hearsay"),
                     "page_no": unit["page_no"],
                     "part": i,
                     "text": indexed_text,

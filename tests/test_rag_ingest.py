@@ -33,6 +33,7 @@ class RagIngestTests(unittest.TestCase):
                         "title": "玲娜贝儿官方角色介绍",
                         "url": "https://example.disney/linabell",
                         "fetched_at": "2026-09-01T00:00:00Z",
+                        "knowledge_scope": "disney_hearsay",
                         "text": "玲娜贝儿是一只爱探索的粉色小狐狸。",
                     },
                     ensure_ascii=False,
@@ -50,6 +51,26 @@ class RagIngestTests(unittest.TestCase):
         official = next(unit for unit in units if unit["source_title"] == "玲娜贝儿官方角色介绍")
         self.assertEqual(official["source_url"], "https://example.disney/linabell")
         self.assertEqual(official["fetched_at"], "2026-09-01T00:00:00Z")
+        self.assertEqual(official["knowledge_scope"], "disney_hearsay")
+
+    def test_collect_doc_units_skips_unreviewed_raw_crawl_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kb_dir = Path(tmpdir)
+            (kb_dir / "raw.json").write_text(
+                json.dumps(
+                    {
+                        "title": "raw page",
+                        "url": "https://movies.disney.com/zootopia",
+                        "index_enabled": False,
+                        "text": "navigation products prices and unrelated page chrome",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            units = ingest.collect_doc_units(kb_dir)
+
+        self.assertEqual(units, [])
 
 
 if __name__ == "__main__":

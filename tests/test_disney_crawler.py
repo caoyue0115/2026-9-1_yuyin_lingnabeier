@@ -19,6 +19,8 @@ def test_extract_html_omits_script_and_keeps_visible_text() -> None:
 
 def test_source_allowlist_accepts_official_domains_only() -> None:
     _validate_source_url("https://movies.disney.com/zootopia")
+    _validate_source_url("https://disneyanimation.com/films/zootopia/")
+    _validate_source_url("https://d23.com/a-to-z/mickey-mouse/")
     _validate_source_url("https://www.shanghaidisneyresort.com/zh-cn/characters")
     with pytest.raises(ValueError):
         _validate_source_url("https://example.com/copied-disney-content")

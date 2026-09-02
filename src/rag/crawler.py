@@ -17,6 +17,8 @@ USER_AGENT = "DisneyVoiceAssistantDemo/1.0 (+internal RAG prototype)"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ALLOWED_HOST_SUFFIXES = (
     "disney.com",
+    "disneyanimation.com",
+    "d23.com",
     "shanghaidisneyresort.com",
     "hongkongdisneyland.com",
     "tokyodisneyresort.jp",
@@ -124,6 +126,10 @@ def crawl_source(session: requests.Session, source: dict, *, timeout: float = 20
         "page_title": extracted_title,
         "url": url,
         "fetched_at": datetime.now(UTC).isoformat(),
+        "knowledge_scope": str(source.get("knowledge_scope") or "disney_hearsay"),
+        # Raw pages are retained as source evidence.  Only the reviewed Chinese
+        # facts in data/disney/curated are allowed into the live RAG index.
+        "index_enabled": bool(source.get("index_enabled", False)),
         "text": text,
     }
 

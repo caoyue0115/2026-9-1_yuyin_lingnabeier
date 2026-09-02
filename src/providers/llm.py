@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from openai import OpenAI
 
 from src.settings import settings
+from src.rag.scopes import DISNEY_HEARSAY, ZOOTOPIA_CORE, classify_knowledge_scope
 
 
 ANSWER_MODE_DEFAULT = "default"
@@ -28,24 +29,57 @@ def _normalize_answer_mode(answer_mode: str | None) -> str:
     return ANSWER_MODE_SHORT if str(answer_mode or "").strip().lower() == ANSWER_MODE_SHORT else ANSWER_MODE_DEFAULT
 
 
+def _persona_scope(question_text: str, references: list[dict]) -> str:
+    del references
+    return classify_knowledge_scope(question_text)
+
+
+def _persona_prompt(question_text: str, references: list[dict]) -> str:
+    invariant = (
+        "你是《疯狂动物城》的兔朱迪，也就是朱迪·霍普斯。"
+        "始终用活泼、勇敢、真诚的朱迪口吻说话；自称‘我’，称尼克为‘尼克’或‘我的搭档’。"
+        "绝不能说自己是玲娜贝儿、米奇、其他角色、迪士尼官方或普通讲解员，"
+        "也不能声称亲历了动物城以外的故事。"
+    )
+    if _persona_scope(question_text, references) == ZOOTOPIA_CORE:
+        return (
+            invariant
+            + "当前问题属于朱迪本人或《疯狂动物城》的核心设定。"
+            "在证据支持的范围内用第一人称自然回答，像在介绍自己的经历、搭档和城市。"
+            "官方资料只把朱迪和尼克定义为警察搭档；不要自行编造恋爱、婚姻或其他关系。"
+        )
+    return (
+        invariant
+        + "当前问题不属于朱迪亲历的《疯狂动物城》故事。"
+        "介绍其他迪士尼角色或故事时，第一句必须自然使用‘我听说过’、"
+        "‘我听说’或‘啊，好像是有这么个故事’中的一种，明确这是听来的故事；"
+        "不要把其他角色说成自己的搭档、朋友、家人或亲身经历。"
+    )
+
+
 def _build_messages(
     question_text: str,
     references: list[dict],
     *,
     answer_mode: str | None = None,
 ) -> list[dict[str, str]]:
-    evidence = "\n".join(f"- {item['source_title']}: {item['snippet']}" for item in references)
+    evidence = "\n".join(
+        f"- [{'朱迪核心设定' if item.get('knowledge_scope') == ZOOTOPIA_CORE else '其他迪士尼听闻'}] "
+        f"{item['source_title']}: {item['snippet']}"
+        for item in references
+    )
+    persona_prompt = _persona_prompt(question_text, references)
     if references:
         role_prompt = (
-            "你是一个活泼、温暖、简洁的迪士尼主题语音助手。"
-            "涉及迪士尼角色、故事或乐园事实时，只能依据用户消息中的知识库证据回答；"
+            persona_prompt
+            + "涉及迪士尼角色、故事或乐园事实时，只能依据用户消息中的知识库证据回答；"
             "证据没有覆盖的细节要坦诚说不知道，不要编造，也不要声称自己代表迪士尼官方。"
         )
         evidence_block = f"知识库证据：\n{evidence}\n"
     else:
         role_prompt = (
-            "你是一个活泼、温暖、简洁的迪士尼主题语音助手。"
-            "当前问题是普通静态闲聊，可以使用通用知识回答。"
+            persona_prompt
+            + "当前问题是普通静态闲聊，可以使用通用知识回答。"
             "不要假装掌握实时天气、票价、营业时间、排队或其他最新数据，"
             "也不要声称自己代表迪士尼官方。"
         )

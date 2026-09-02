@@ -12,6 +12,7 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 from src.settings import settings
+from src.rag.scopes import DISNEY_HEARSAY, classify_knowledge_scope
 
 def tokenize_zh(text: str) -> list[str]:
     return [t.strip() for t in jieba.cut(text) if t.strip()]
@@ -148,6 +149,13 @@ def retrieve_references(question_text: str, top_k: int | None = None) -> tuple[l
         fused.append((idx, alpha * b + (1.0 - alpha) * v, b, v))
     fused.sort(key=lambda x: (-x[1], x[0]))
 
+    expected_scope = classify_knowledge_scope(question_text)
+    fused = [
+        item
+        for item in fused
+        if chunks[item[0]].get("knowledge_scope", DISNEY_HEARSAY) == expected_scope
+    ]
+
     refs: list[dict[str, Any]] = []
     for rank, (idx, score, bm_s, vec_s) in enumerate(fused[: top_k or settings.top_k], start=1):
         ch = chunks[idx]
@@ -161,6 +169,7 @@ def retrieve_references(question_text: str, top_k: int | None = None) -> tuple[l
                 "source_title": ch["source_title"],
                 "source_url": ch.get("source_url"),
                 "fetched_at": ch.get("fetched_at"),
+                "knowledge_scope": ch.get("knowledge_scope", "disney_hearsay"),
                 "page_no": ch["page_no"],
                 "chunk_id": ch["chunk_id"],
                 "snippet": build_snippet(question_text, ch["text"]),

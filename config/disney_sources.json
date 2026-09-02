@@ -1,30 +1,146 @@
 [
   {
-    "id": "hong_kong_disney_lina_bell_character",
-    "title": "香港迪士尼玲娜贝儿官方介绍",
-    "url": "https://www.hongkongdisneyland.com/zh-hk/attractions/linabell-at-duffy-and-friends-play-house/",
+    "id": "disney_zootopia",
+    "title": "Disney《疯狂动物城》官方电影介绍",
+    "url": "https://movies.disney.com/zootopia",
     "format": "html",
+    "knowledge_scope": "zootopia_core",
     "max_chars": 20000
   },
   {
-    "id": "tokyo_disney_duffy",
-    "title": "东京迪士尼达菲与朋友们官方介绍",
-    "url": "https://www.tokyodisneyresort.jp/en/tds/shop/duffy_goods",
+    "id": "disney_animation_zootopia",
+    "title": "华特迪士尼动画工作室《疯狂动物城》介绍",
+    "url": "https://disneyanimation.com/films/zootopia/",
     "format": "html",
+    "knowledge_scope": "zootopia_core",
+    "max_chars": 16000
+  },
+  {
+    "id": "disney_zootopia_2",
+    "title": "Disney《疯狂动物城2》官方电影介绍",
+    "url": "https://movies.disney.com/zootopia-2",
+    "format": "html",
+    "knowledge_scope": "zootopia_core",
     "max_chars": 20000
+  },
+  {
+    "id": "disney_animation_zootopia_plus",
+    "title": "华特迪士尼动画工作室《疯狂动物城+》介绍",
+    "url": "https://disneyanimation.com/disney-plus-originals/zootopia/",
+    "format": "html",
+    "knowledge_scope": "zootopia_core",
+    "max_chars": 12000
+  },
+  {
+    "id": "d23_zootopia_characters",
+    "title": "D23《疯狂动物城2》角色介绍",
+    "url": "https://d23.com/meet-the-characters-of-walt-disney-animation-studios-zootopia-2/",
+    "format": "html",
+    "knowledge_scope": "zootopia_core",
+    "max_chars": 24000
+  },
+  {
+    "id": "d23_zootopia_world",
+    "title": "D23疯狂动物城世界与分区介绍",
+    "url": "https://d23.com/how-the-world-of-zootopia-is-expanding-on-and-off-screen/",
+    "format": "html",
+    "knowledge_scope": "zootopia_core",
+    "max_chars": 24000
+  },
+  {
+    "id": "d23_zootopia_work",
+    "title": "D23疯狂动物城角色职业介绍",
+    "url": "https://d23.com/celebrate-employee-appreciation-day-with-zootopia/",
+    "format": "html",
+    "knowledge_scope": "zootopia_core",
+    "max_chars": 18000
+  },
+  {
+    "id": "shanghai_zootopia_hot_pursuit",
+    "title": "上海迪士尼疯狂动物城热力追踪官方介绍",
+    "url": "https://www.shanghaidisneyresort.com/zh-cn/experience/attraction/zootopia-hot-pursuit",
+    "format": "html",
+    "knowledge_scope": "zootopia_core",
+    "max_chars": 16000
   },
   {
     "id": "shanghai_disney_resort_facts",
     "title": "上海迪士尼度假区官方概况",
     "url": "https://shcorporate.shanghaidisneyresort.com/wp-content/uploads/2024/05/fact_sheet_shanghai_disney_resort_CHN_2024_Q2.pdf",
     "format": "pdf",
+    "knowledge_scope": "disney_hearsay",
     "max_chars": 30000
   },
   {
-    "id": "disney_zootopia",
-    "title": "迪士尼《疯狂动物城》朱迪与尼克官方电影介绍",
-    "url": "https://movies.disney.com/zootopia",
+    "id": "tokyo_disney_duffy",
+    "title": "东京迪士尼达菲与朋友们官方介绍",
+    "url": "https://www.tokyodisneyresort.jp/en/tds/shop/duffy_goods",
     "format": "html",
+    "knowledge_scope": "disney_hearsay",
     "max_chars": 20000
+  },
+  {
+    "id": "d23_mickey_mouse",
+    "title": "D23米奇官方历史介绍",
+    "url": "https://d23.com/a-to-z/mickey-mouse/",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 22000
+  },
+  {
+    "id": "disney_frozen",
+    "title": "Disney《冰雪奇缘》官方电影介绍",
+    "url": "https://movies.disney.com/frozen",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 16000
+  },
+  {
+    "id": "disney_toy_story",
+    "title": "Disney·Pixar《玩具总动员》官方电影介绍",
+    "url": "https://movies.disney.com/toy-story",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 16000
+  },
+  {
+    "id": "disney_moana",
+    "title": "Disney《海洋奇缘》官方电影介绍",
+    "url": "https://movies.disney.com/moana",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 16000
+  },
+  {
+    "id": "disney_encanto",
+    "title": "Disney《魔法满屋》官方电影介绍",
+    "url": "https://movies.disney.com/encanto",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 16000
+  },
+  {
+    "id": "disney_lion_king",
+    "title": "Disney动画版《狮子王》官方电影介绍",
+    "url": "https://movies.disney.com/the-lion-king",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_lilo_stitch",
+    "title": "Disney动画版《星际宝贝》官方电影介绍",
+    "url": "https://movies.disney.com/lilo-stitch",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 16000
+  },
+  {
+    "id": "disney_coco",
+    "title": "Disney·Pixar《寻梦环游记》官方电影介绍",
+    "url": "https://movies.disney.com/coco",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 16000
   }
 ]
