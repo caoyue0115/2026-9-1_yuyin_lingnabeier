@@ -116,6 +116,19 @@ def test_display_uses_bounded_single_dma_buffer() -> None:
     assert "bsp_display_start_with_config(&display_cfg)" in display
 
 
+def test_websocket_task_stack_uses_psram_for_repeat_conversations() -> None:
+    websocket = _read(
+        ESP_DIR
+        / "components"
+        / "espressif__esp_websocket_client"
+        / "esp_websocket_client.c"
+    )
+    assert "xTaskCreatePinnedToCoreWithCaps" in websocket
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in websocket
+    assert "vTaskDeleteWithCaps(NULL)" in websocket
+    assert "CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM" in websocket
+
+
 def test_touch_is_not_routed_to_the_voice_pipeline() -> None:
     main = _read(ESP_MAIN / "main.c")
     display = _read(ESP_MAIN / "display_state.c")
