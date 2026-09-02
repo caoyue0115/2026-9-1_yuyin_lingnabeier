@@ -443,6 +443,14 @@
 #define DEMO_IDLE_VIDEO_PATH "/spiffs/idle_judy.avi"
 #endif
 
+#ifndef DEMO_LISTENING_THINKING_VIDEO_PATH
+#define DEMO_LISTENING_THINKING_VIDEO_PATH "/spiffs/listening_thinking.avi"
+#endif
+
+#ifndef DEMO_SPEAKING_VIDEO_PATH
+#define DEMO_SPEAKING_VIDEO_PATH "/spiffs/speaking_judy.avi"
+#endif
+
 #ifndef DEMO_IDLE_VIDEO_WIDTH
 #define DEMO_IDLE_VIDEO_WIDTH 360
 #endif
@@ -453,6 +461,10 @@
 
 #ifndef DEMO_IDLE_VIDEO_FRAME_INTERVAL_MS
 #define DEMO_IDLE_VIDEO_FRAME_INTERVAL_MS 167
+#endif
+
+#ifndef DEMO_STATE_VIDEO_FRAME_INTERVAL_MS
+#define DEMO_STATE_VIDEO_FRAME_INTERVAL_MS 250
 #endif
 
 #ifndef DEMO_IDLE_VIDEO_MAX_BYTES

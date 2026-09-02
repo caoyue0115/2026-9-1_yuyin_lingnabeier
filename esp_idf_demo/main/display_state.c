@@ -21,25 +21,97 @@ typedef enum {
     DISPLAY_POWER_OFF,
 } display_power_state_t;
 
+typedef enum {
+    DISPLAY_VIDEO_NONE = -1,
+    DISPLAY_VIDEO_IDLE = 0,
+    DISPLAY_VIDEO_LISTENING_THINKING,
+    DISPLAY_VIDEO_SPEAKING,
+    DISPLAY_VIDEO_COUNT,
+} display_video_asset_t;
+
 static const char *TAG = "disney_display";
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static display_ui_state_t s_ui_state = DISPLAY_UI_BOOT;
 static display_ui_state_t s_rendered_state = (display_ui_state_t)-1;
 static display_power_state_t s_power_state = DISPLAY_POWER_ACTIVE;
+static display_video_asset_t s_published_video_asset = DISPLAY_VIDEO_NONE;
+static display_video_asset_t s_rendered_video_asset = DISPLAY_VIDEO_NONE;
 static bool s_initialized;
 static int64_t s_last_activity_us;
 static TaskHandle_t s_display_task;
-static TaskHandle_t s_idle_video_task;
-static lv_obj_t *s_idle_image;
+static TaskHandle_t s_state_video_task;
+static lv_obj_t *s_state_image;
 static lv_obj_t *s_orb;
 static lv_obj_t *s_title;
 static lv_obj_t *s_subtitle;
-static lv_image_dsc_t s_idle_image_dsc;
-static idle_video_t *s_idle_video;
-static uint8_t *s_idle_frame_buffers[2];
-static int s_idle_displayed_buffer;
-static bool s_idle_video_ready;
-static bool s_rendered_video_ready;
+static lv_image_dsc_t s_state_image_dsc;
+static idle_video_t *s_state_videos[DISPLAY_VIDEO_COUNT];
+static idle_video_decoder_t *s_video_decoder;
+static uint8_t *s_video_frame_buffers[2];
+static int s_video_displayed_buffer;
+
+static display_video_asset_t display_video_asset_for_state(display_ui_state_t state)
+{
+    switch (state) {
+    case DISPLAY_UI_IDLE:
+        return DISPLAY_VIDEO_IDLE;
+    case DISPLAY_UI_LISTENING:
+    case DISPLAY_UI_THINKING:
+        return DISPLAY_VIDEO_LISTENING_THINKING;
+    case DISPLAY_UI_SPEAKING:
+        return DISPLAY_VIDEO_SPEAKING;
+    default:
+        return DISPLAY_VIDEO_NONE;
+    }
+}
+
+static const char *display_video_path(display_video_asset_t asset)
+{
+    switch (asset) {
+    case DISPLAY_VIDEO_IDLE:
+        return DEMO_IDLE_VIDEO_PATH;
+    case DISPLAY_VIDEO_LISTENING_THINKING:
+        return DEMO_LISTENING_THINKING_VIDEO_PATH;
+    case DISPLAY_VIDEO_SPEAKING:
+        return DEMO_SPEAKING_VIDEO_PATH;
+    default:
+        return "";
+    }
+}
+
+static const char *display_video_name(display_video_asset_t asset)
+{
+    switch (asset) {
+    case DISPLAY_VIDEO_IDLE:
+        return "idle";
+    case DISPLAY_VIDEO_LISTENING_THINKING:
+        return "listening_thinking";
+    case DISPLAY_VIDEO_SPEAKING:
+        return "speaking";
+    default:
+        return "none";
+    }
+}
+
+static int display_video_frame_interval_ms(display_video_asset_t asset)
+{
+    return asset == DISPLAY_VIDEO_IDLE ? DEMO_IDLE_VIDEO_FRAME_INTERVAL_MS
+                                       : DEMO_STATE_VIDEO_FRAME_INTERVAL_MS;
+}
+
+static display_video_asset_t display_desired_video_asset(void)
+{
+    display_ui_state_t state;
+    display_power_state_t power;
+    taskENTER_CRITICAL(&s_lock);
+    state = s_ui_state;
+    power = s_power_state;
+    taskEXIT_CRITICAL(&s_lock);
+    if (power == DISPLAY_POWER_OFF) {
+        return DISPLAY_VIDEO_NONE;
+    }
+    return display_video_asset_for_state(state);
+}
 
 static void display_orb_size_anim(void *object, int32_t size)
 {
@@ -54,10 +126,10 @@ static void display_create_ui(void)
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x17112A), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
-    s_idle_image = lv_image_create(screen);
-    lv_obj_remove_flag(s_idle_image, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_align(s_idle_image, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_flag(s_idle_image, LV_OBJ_FLAG_HIDDEN);
+    s_state_image = lv_image_create(screen);
+    lv_obj_remove_flag(s_state_image, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align(s_state_image, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_state_image, LV_OBJ_FLAG_HIDDEN);
 
     s_orb = lv_obj_create(screen);
     lv_obj_remove_flag(s_orb, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
@@ -95,16 +167,16 @@ static void display_set_standard_ui_visible(bool visible)
         lv_obj_remove_flag(s_orb, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_title, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_subtitle, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_idle_image, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_state_image, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_orb, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_title, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_subtitle, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(s_idle_image, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_state_image, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
-static void display_render_state(display_ui_state_t state, bool idle_video_ready)
+static void display_render_state(display_ui_state_t state, display_video_asset_t published_asset)
 {
     const char *title = "DISNEY DEMO";
     const char *subtitle = "STARTING";
@@ -146,9 +218,10 @@ static void display_render_state(display_ui_state_t state, bool idle_video_ready
         break;
     }
 
-    const bool show_idle_video = state == DISPLAY_UI_IDLE && idle_video_ready;
-    display_set_standard_ui_visible(!show_idle_video);
-    if (show_idle_video) {
+    const display_video_asset_t desired_asset = display_video_asset_for_state(state);
+    const bool show_video = desired_asset != DISPLAY_VIDEO_NONE && desired_asset == published_asset;
+    display_set_standard_ui_visible(!show_video);
+    if (show_video) {
         return;
     }
 
@@ -160,56 +233,83 @@ static void display_render_state(display_ui_state_t state, bool idle_video_ready
     lv_obj_align(s_subtitle, LV_ALIGN_CENTER, 0, 86);
 }
 
-static bool display_idle_video_is_active(void)
+static void display_close_video_set(idle_video_t **videos,
+                                    idle_video_decoder_t *decoder,
+                                    uint8_t **buffers)
 {
-    bool active;
-    taskENTER_CRITICAL(&s_lock);
-    active = s_ui_state == DISPLAY_UI_IDLE && s_power_state != DISPLAY_POWER_OFF;
-    taskEXIT_CRITICAL(&s_lock);
-    return active;
+    idle_video_decoder_close(decoder);
+    for (size_t index = 0; index < DISPLAY_VIDEO_COUNT; ++index) {
+        idle_video_close(videos[index]);
+    }
+    free(buffers[0]);
+    free(buffers[1]);
 }
 
-static esp_err_t display_prepare_idle_video(void)
+static esp_err_t display_prepare_state_videos(void)
 {
-    idle_video_t *video = NULL;
-    esp_err_t result = idle_video_open(DEMO_IDLE_VIDEO_PATH,
-                                       DEMO_IDLE_VIDEO_MAX_BYTES,
-                                       DEMO_IDLE_VIDEO_MAX_FRAMES,
-                                       &video);
-    if (result != ESP_OK) {
-        return result;
+    idle_video_t *videos[DISPLAY_VIDEO_COUNT] = {0};
+    idle_video_decoder_t *decoder = NULL;
+    uint8_t *buffers[2] = {0};
+    size_t max_jpeg_bytes = 0;
+    esp_err_t result = ESP_OK;
+
+    for (display_video_asset_t asset = DISPLAY_VIDEO_IDLE; asset < DISPLAY_VIDEO_COUNT; ++asset) {
+        result = idle_video_open(display_video_path(asset),
+                                 DEMO_IDLE_VIDEO_MAX_BYTES,
+                                 DEMO_IDLE_VIDEO_MAX_FRAMES,
+                                 &videos[asset]);
+        if (result != ESP_OK) {
+            goto failed;
+        }
+        if (idle_video_width(videos[asset]) != DEMO_IDLE_VIDEO_WIDTH ||
+            idle_video_height(videos[asset]) != DEMO_IDLE_VIDEO_HEIGHT ||
+            idle_video_frame_count(videos[asset]) == 0) {
+            result = ESP_ERR_INVALID_SIZE;
+            goto failed;
+        }
+        const size_t asset_max_frame = idle_video_max_frame_bytes(videos[asset]);
+        if (asset_max_frame > max_jpeg_bytes) {
+            max_jpeg_bytes = asset_max_frame;
+        }
+        ESP_LOGI(TAG,
+                 "state_video_indexed asset=%s path=%s frames=%u max_jpeg_bytes=%u",
+                 display_video_name(asset),
+                 display_video_path(asset),
+                 (unsigned)idle_video_frame_count(videos[asset]),
+                 (unsigned)asset_max_frame);
     }
-    if (idle_video_width(video) != DEMO_IDLE_VIDEO_WIDTH ||
-        idle_video_height(video) != DEMO_IDLE_VIDEO_HEIGHT ||
-        idle_video_frame_count(video) == 0) {
-        idle_video_close(video);
-        return ESP_ERR_INVALID_SIZE;
+
+    result = idle_video_decoder_create(max_jpeg_bytes, &decoder);
+    if (result != ESP_OK) {
+        goto failed;
     }
 
     const size_t frame_bytes = (size_t)DEMO_IDLE_VIDEO_WIDTH * DEMO_IDLE_VIDEO_HEIGHT * sizeof(uint16_t);
-    uint8_t *buffers[2] = {0};
     for (size_t index = 0; index < 2; ++index) {
         buffers[index] = heap_caps_malloc(frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (buffers[index] == NULL) {
-            free(buffers[0]);
-            free(buffers[1]);
-            idle_video_close(video);
-            return ESP_ERR_NO_MEM;
+            result = ESP_ERR_NO_MEM;
+            goto failed;
         }
     }
-    result = idle_video_decode_frame(video, 0, buffers[0], frame_bytes);
+
+    display_video_asset_t initial_asset = display_desired_video_asset();
+    if (initial_asset == DISPLAY_VIDEO_NONE) {
+        initial_asset = DISPLAY_VIDEO_IDLE;
+    }
+    result = idle_video_decode_frame(videos[initial_asset], decoder, 0, buffers[0], frame_bytes);
     if (result != ESP_OK) {
-        free(buffers[0]);
-        free(buffers[1]);
-        idle_video_close(video);
-        return result;
+        goto failed;
     }
 
-    s_idle_video = video;
-    s_idle_frame_buffers[0] = buffers[0];
-    s_idle_frame_buffers[1] = buffers[1];
-    s_idle_displayed_buffer = 0;
-    s_idle_image_dsc = (lv_image_dsc_t) {
+    for (size_t index = 0; index < DISPLAY_VIDEO_COUNT; ++index) {
+        s_state_videos[index] = videos[index];
+    }
+    s_video_decoder = decoder;
+    s_video_frame_buffers[0] = buffers[0];
+    s_video_frame_buffers[1] = buffers[1];
+    s_video_displayed_buffer = 0;
+    s_state_image_dsc = (lv_image_dsc_t) {
         .header = {
             .magic = LV_IMAGE_HEADER_MAGIC,
             .cf = LV_COLOR_FORMAT_RGB565,
@@ -219,84 +319,114 @@ static esp_err_t display_prepare_idle_video(void)
             .stride = DEMO_IDLE_VIDEO_WIDTH * sizeof(uint16_t),
         },
         .data_size = frame_bytes,
-        .data = s_idle_frame_buffers[0],
+        .data = s_video_frame_buffers[0],
     };
 
     if (!bsp_display_lock(500)) {
-        s_idle_video = NULL;
-        s_idle_frame_buffers[0] = NULL;
-        s_idle_frame_buffers[1] = NULL;
-        free(buffers[0]);
-        free(buffers[1]);
-        idle_video_close(video);
+        for (size_t index = 0; index < DISPLAY_VIDEO_COUNT; ++index) {
+            s_state_videos[index] = NULL;
+        }
+        s_video_decoder = NULL;
+        s_video_frame_buffers[0] = NULL;
+        s_video_frame_buffers[1] = NULL;
+        display_close_video_set(videos, decoder, buffers);
         return ESP_ERR_TIMEOUT;
     }
-    lv_image_set_src(s_idle_image, &s_idle_image_dsc);
-    lv_obj_align(s_idle_image, LV_ALIGN_CENTER, 0, 0);
+    lv_image_set_src(s_state_image, &s_state_image_dsc);
+    lv_obj_align(s_state_image, LV_ALIGN_CENTER, 0, 0);
     bsp_display_unlock();
 
+    const display_video_asset_t current_desired = display_desired_video_asset();
     taskENTER_CRITICAL(&s_lock);
-    s_idle_video_ready = true;
+    s_published_video_asset = current_desired == initial_asset ? initial_asset : DISPLAY_VIDEO_NONE;
     taskEXIT_CRITICAL(&s_lock);
     ESP_LOGI(TAG,
-             "idle_video_ready path=%s frames=%u size=%ux%u frame_interval_ms=%d",
-             DEMO_IDLE_VIDEO_PATH,
-             (unsigned)idle_video_frame_count(s_idle_video),
-             (unsigned)idle_video_width(s_idle_video),
-             (unsigned)idle_video_height(s_idle_video),
-             DEMO_IDLE_VIDEO_FRAME_INTERVAL_MS);
+             "state_video_ready assets=%d size=%ux%u shared_frame_bytes=%u shared_jpeg_bytes=%u",
+             DISPLAY_VIDEO_COUNT,
+             DEMO_IDLE_VIDEO_WIDTH,
+             DEMO_IDLE_VIDEO_HEIGHT,
+             (unsigned)(frame_bytes * 2),
+             (unsigned)max_jpeg_bytes);
     return ESP_OK;
+
+failed:
+    display_close_video_set(videos, decoder, buffers);
+    return result;
 }
 
-static void display_idle_video_task(void *arg)
+static void display_state_video_task(void *arg)
 {
     (void)arg;
-    while (!display_idle_video_is_active()) {
+    while (display_desired_video_asset() == DISPLAY_VIDEO_NONE) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     esp_err_t result;
-    while ((result = display_prepare_idle_video()) != ESP_OK) {
-        ESP_LOGW(TAG, "idle_video_prepare_failed path=%s err=%s",
-                 DEMO_IDLE_VIDEO_PATH,
-                 esp_err_to_name(result));
+    while ((result = display_prepare_state_videos()) != ESP_OK) {
+        ESP_LOGW(TAG, "state_video_prepare_failed err=%s", esp_err_to_name(result));
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
     const size_t frame_bytes = (size_t)DEMO_IDLE_VIDEO_WIDTH * DEMO_IDLE_VIDEO_HEIGHT * sizeof(uint16_t);
-    const size_t frame_count = idle_video_frame_count(s_idle_video);
-    size_t frame_index = frame_count > 1 ? 1 : 0;
+    display_video_asset_t active_asset = DISPLAY_VIDEO_NONE;
+    size_t frame_index = 0;
     while (true) {
-        if (!display_idle_video_is_active()) {
+        const display_video_asset_t desired_asset = display_desired_video_asset();
+        if (desired_asset == DISPLAY_VIDEO_NONE) {
+            active_asset = DISPLAY_VIDEO_NONE;
+            frame_index = 0;
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
+        if (desired_asset != active_asset) {
+            active_asset = desired_asset;
+            frame_index = 0;
+        }
 
         const int64_t frame_started_us = esp_timer_get_time();
-        const int decode_buffer = s_idle_displayed_buffer == 0 ? 1 : 0;
-        result = idle_video_decode_frame(s_idle_video,
+        const int decode_buffer = s_video_displayed_buffer == 0 ? 1 : 0;
+        result = idle_video_decode_frame(s_state_videos[active_asset],
+                                         s_video_decoder,
                                          frame_index,
-                                         s_idle_frame_buffers[decode_buffer],
+                                         s_video_frame_buffers[decode_buffer],
                                          frame_bytes);
         if (result != ESP_OK) {
-            ESP_LOGW(TAG, "idle_video_decode_failed frame=%u err=%s",
+            ESP_LOGW(TAG,
+                     "state_video_decode_failed asset=%s frame=%u err=%s",
+                     display_video_name(active_asset),
                      (unsigned)frame_index,
                      esp_err_to_name(result));
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
-        if (display_idle_video_is_active() && bsp_display_lock(100)) {
-            s_idle_image_dsc.data = s_idle_frame_buffers[decode_buffer];
-            lv_image_set_src(s_idle_image, &s_idle_image_dsc);
-            lv_obj_invalidate(s_idle_image);
-            s_idle_displayed_buffer = decode_buffer;
+        if (display_desired_video_asset() == active_asset && bsp_display_lock(100)) {
+            const bool publish = display_desired_video_asset() == active_asset;
+            if (publish) {
+                s_state_image_dsc.data = s_video_frame_buffers[decode_buffer];
+                lv_image_set_src(s_state_image, &s_state_image_dsc);
+                lv_obj_invalidate(s_state_image);
+                s_video_displayed_buffer = decode_buffer;
+
+                bool switched;
+                taskENTER_CRITICAL(&s_lock);
+                switched = s_published_video_asset != active_asset;
+                s_published_video_asset = active_asset;
+                taskEXIT_CRITICAL(&s_lock);
+                if (switched) {
+                    ESP_LOGI(TAG,
+                             "state_video_switch asset=%s frames=%u",
+                             display_video_name(active_asset),
+                             (unsigned)idle_video_frame_count(s_state_videos[active_asset]));
+                }
+            }
             bsp_display_unlock();
         }
-        frame_index = (frame_index + 1) % frame_count;
 
+        const size_t frame_count = idle_video_frame_count(s_state_videos[active_asset]);
+        frame_index = (frame_index + 1) % frame_count;
         const int elapsed_ms = (int)((esp_timer_get_time() - frame_started_us) / 1000);
-        const int remaining_ms = DEMO_IDLE_VIDEO_FRAME_INTERVAL_MS - elapsed_ms;
+        const int remaining_ms = display_video_frame_interval_ms(active_asset) - elapsed_ms;
         if (remaining_ms > 0) {
             vTaskDelay(pdMS_TO_TICKS(remaining_ms));
         } else {
@@ -332,7 +462,8 @@ static void display_apply_power(display_power_state_t power)
         brightness = 0;
     }
     (void)bsp_display_brightness_set(brightness);
-    ESP_LOGI(TAG, "display_power=%s brightness=%d",
+    ESP_LOGI(TAG,
+             "display_power=%s brightness=%d",
              power == DISPLAY_POWER_ACTIVE ? "active" :
              power == DISPLAY_POWER_DIMMED ? "dimmed" : "off",
              brightness);
@@ -344,13 +475,13 @@ static void display_task(void *arg)
     while (true) {
         display_ui_state_t ui_state;
         display_power_state_t current_power;
+        display_video_asset_t published_asset;
         int64_t last_activity_us;
-        bool idle_video_ready;
         taskENTER_CRITICAL(&s_lock);
         ui_state = s_ui_state;
         current_power = s_power_state;
         last_activity_us = s_last_activity_us;
-        idle_video_ready = s_idle_video_ready;
+        published_asset = s_published_video_asset;
         taskEXIT_CRITICAL(&s_lock);
 
         display_power_state_t desired_power = DISPLAY_POWER_ACTIVE;
@@ -370,11 +501,11 @@ static void display_task(void *arg)
             display_apply_power(desired_power);
         }
 
-        if ((ui_state != s_rendered_state || idle_video_ready != s_rendered_video_ready) &&
+        if ((ui_state != s_rendered_state || published_asset != s_rendered_video_asset) &&
             bsp_display_lock(100)) {
-            display_render_state(ui_state, idle_video_ready);
+            display_render_state(ui_state, published_asset);
             s_rendered_state = ui_state;
-            s_rendered_video_ready = idle_video_ready;
+            s_rendered_video_asset = published_asset;
             bsp_display_unlock();
         }
         vTaskDelay(pdMS_TO_TICKS(DEMO_DISPLAY_POLL_MS));
@@ -429,23 +560,23 @@ esp_err_t display_state_init(void)
     }
 #if DEMO_IDLE_VIDEO_ENABLED
 #if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
-    BaseType_t video_created = xTaskCreateWithCaps(display_idle_video_task,
-                                                   "judy_idle_video",
+    BaseType_t video_created = xTaskCreateWithCaps(display_state_video_task,
+                                                   "judy_state_video",
                                                    DEMO_IDLE_VIDEO_TASK_STACK_SIZE,
                                                    NULL,
                                                    tskIDLE_PRIORITY + 1,
-                                                   &s_idle_video_task,
+                                                   &s_state_video_task,
                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 #else
-    BaseType_t video_created = xTaskCreate(display_idle_video_task,
-                                           "judy_idle_video",
+    BaseType_t video_created = xTaskCreate(display_state_video_task,
+                                           "judy_state_video",
                                            DEMO_IDLE_VIDEO_TASK_STACK_SIZE,
                                            NULL,
                                            tskIDLE_PRIORITY + 1,
-                                           &s_idle_video_task);
+                                           &s_state_video_task);
 #endif
     if (video_created != pdPASS) {
-        ESP_LOGW(TAG, "idle_video_task_start_failed; READY text fallback remains active");
+        ESP_LOGW(TAG, "state_video_task_start_failed; text fallback remains active");
     }
 #endif
     return ESP_OK;
@@ -457,6 +588,9 @@ void display_state_set(display_ui_state_t state)
         return;
     }
     taskENTER_CRITICAL(&s_lock);
+    if (display_video_asset_for_state(s_ui_state) != display_video_asset_for_state(state)) {
+        s_published_video_asset = DISPLAY_VIDEO_NONE;
+    }
     s_ui_state = state;
     s_last_activity_us = esp_timer_get_time();
     s_power_state = DISPLAY_POWER_ACTIVE;

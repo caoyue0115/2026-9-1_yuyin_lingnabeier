@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 typedef struct idle_video idle_video_t;
+typedef struct idle_video_decoder idle_video_decoder_t;
 
 esp_err_t idle_video_open(const char *path,
                           size_t max_file_bytes,
@@ -18,10 +19,16 @@ esp_err_t idle_video_open(const char *path,
 void idle_video_close(idle_video_t *video);
 
 size_t idle_video_frame_count(const idle_video_t *video);
+size_t idle_video_max_frame_bytes(const idle_video_t *video);
 uint16_t idle_video_width(const idle_video_t *video);
 uint16_t idle_video_height(const idle_video_t *video);
 
+esp_err_t idle_video_decoder_create(size_t max_jpeg_bytes,
+                                    idle_video_decoder_t **out_decoder);
+void idle_video_decoder_close(idle_video_decoder_t *decoder);
+
 esp_err_t idle_video_decode_frame(idle_video_t *video,
+                                  idle_video_decoder_t *decoder,
                                   size_t frame_index,
                                   uint8_t *rgb565_out,
                                   size_t rgb565_out_size);

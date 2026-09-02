@@ -279,7 +279,10 @@ static esp_err_t app_mount_spiffs(void)
 
 static bool app_needs_spiffs_audio(void)
 {
-    return (DEMO_IDLE_VIDEO_ENABLED && DEMO_IDLE_VIDEO_PATH[0] != '\0') ||
+    return (DEMO_IDLE_VIDEO_ENABLED &&
+            (DEMO_IDLE_VIDEO_PATH[0] != '\0' ||
+             DEMO_LISTENING_THINKING_VIDEO_PATH[0] != '\0' ||
+             DEMO_SPEAKING_VIDEO_PATH[0] != '\0')) ||
            (DEMO_REALTIME_INTRO_ENABLED && DEMO_REALTIME_INTRO_PATH[0] != '\0') ||
            (DEMO_RECORD_PROMPT_ENABLED && DEMO_RECORD_PROMPT_PATH[0] != '\0') ||
            DEMO_RECORD_RETRY_REARM_PROMPT_PATH[0] != '\0' ||

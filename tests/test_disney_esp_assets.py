@@ -54,35 +54,53 @@ def _jpeg_dimensions(jpeg: bytes) -> tuple[int, int]:
     raise AssertionError("JPEG dimensions not found")
 
 
-def test_idle_ready_uses_circle_safe_silent_mjpeg_avi() -> None:
-    asset = ESP_DIR / "spiffs" / "idle_judy.avi"
+def _assert_silent_mjpeg_asset(name: str, expected_frames: int, max_bytes: int) -> None:
+    asset = ESP_DIR / "spiffs" / name
+    data = asset.read_bytes()
+    assert data[:4] == b"RIFF"
+    assert data[8:12] == b"AVI "
+    assert b"MJPG" in data
+    assert b"auds" not in data
+    assert len(data) <= max_bytes
+    assert data.count(b"\xff\xd8") == expected_frames
+    assert data.count(b"\xff\xd9") == expected_frames
+    first_start = data.index(b"\xff\xd8")
+    first_end = data.index(b"\xff\xd9", first_start) + 2
+    assert _jpeg_dimensions(data[first_start:first_end]) == (360, 360)
+
+
+def test_state_ui_uses_circle_safe_silent_mjpeg_avis() -> None:
     config = _read(ESP_MAIN / "config.h")
     display = _read(ESP_MAIN / "display_state.c")
     decoder = _read(ESP_MAIN / "idle_video.c")
     cmake = _read(ESP_MAIN / "CMakeLists.txt")
     manifest = _read(ESP_MAIN / "idf_component.yml")
 
-    data = asset.read_bytes()
-    assert data[:4] == b"RIFF"
-    assert data[8:12] == b"AVI "
-    assert b"MJPG" in data
-    assert b"auds" not in data
-    assert len(data) <= 256 * 1024
-    assert data.count(b"\xff\xd8") == 42
-    assert data.count(b"\xff\xd9") == 42
-    first_start = data.index(b"\xff\xd8")
-    first_end = data.index(b"\xff\xd9", first_start) + 2
-    assert _jpeg_dimensions(data[first_start:first_end]) == (360, 360)
+    _assert_silent_mjpeg_asset("idle_judy.avi", expected_frames=42, max_bytes=256 * 1024)
+    _assert_silent_mjpeg_asset("listening_thinking.avi", expected_frames=28, max_bytes=192 * 1024)
+    _assert_silent_mjpeg_asset("speaking_judy.avi", expected_frames=32, max_bytes=192 * 1024)
 
     assert '#define DEMO_IDLE_VIDEO_ENABLED 1' in config
     assert '#define DEMO_IDLE_VIDEO_PATH "/spiffs/idle_judy.avi"' in config
-    assert "DISPLAY_UI_IDLE" in display
-    assert "lv_image_set_src(s_idle_image" in display
+    assert '#define DEMO_LISTENING_THINKING_VIDEO_PATH "/spiffs/listening_thinking.avi"' in config
+    assert '#define DEMO_SPEAKING_VIDEO_PATH "/spiffs/speaking_judy.avi"' in config
+    assert "case DISPLAY_UI_LISTENING:\n    case DISPLAY_UI_THINKING:" in display
+    assert "return DISPLAY_VIDEO_LISTENING_THINKING;" in display
+    assert "case DISPLAY_UI_SPEAKING:" in display
+    assert "return DISPLAY_VIDEO_SPEAKING;" in display
+    assert "lv_image_set_src(s_state_image" in display
     assert "esp_jpeg_decode" in decoder
-    assert "xTaskCreateWithCaps(display_idle_video_task" in display
+    assert "xTaskCreateWithCaps(display_state_video_task" in display
     assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in display
     assert "heap_caps_calloc" in decoder
     assert "MALLOC_CAP_INTERNAL" not in decoder
+    assert "fopen(path, \"rb\")" in decoder
+    assert "fseek(video->file" in decoder
+    assert "fread(buffer" in decoder
+    assert "avi_data" not in decoder
+    assert "idle_video_decoder_create" in decoder
+    assert "idle_video_decoder_t *s_video_decoder" in display
+    assert "static uint8_t *s_video_frame_buffers[2]" in display
     assert '"idle_video.c"' in cmake
     assert "espressif/esp_jpeg" in manifest
     assert 'version: "4.2.0"' in manifest
