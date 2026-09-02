@@ -58,7 +58,7 @@ def normalize_inline(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def build_snippet(question: str, text: str, max_chars: int = 60) -> str:
+def build_snippet(question: str, text: str, max_chars: int = 160) -> str:
     line = normalize_inline(text)
     if len(line) <= max_chars:
         return line

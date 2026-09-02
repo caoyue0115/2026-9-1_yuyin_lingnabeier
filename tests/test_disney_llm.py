@@ -33,6 +33,8 @@ def test_zootopia_prompt_keeps_judy_first_person_and_partner_boundary() -> None:
     assert "不要自行编造恋爱" in prompt
     assert "最佳搭档" in prompt
     assert "无数案件" in prompt
+    assert "许多案件" in prompt
+    assert "许多冒险" in prompt
     assert "[朱迪核心设定]" in messages[1]["content"]
 
 

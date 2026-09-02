@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     realtime_tts_warmup_enabled: bool = True
     realtime_tts_tail_silence_ms: int = 500
     realtime_llm_compact_top_k: int = 1
-    realtime_llm_compact_snippet_chars: int = 36
+    realtime_llm_compact_snippet_chars: int = 120
     conversation_v6_audio_queue_bytes: int = 256 * 1024
     conversation_v6_cancel_timeout_seconds: float = 2.0
     conversation_v6_close_timeout_seconds: float = 2.0

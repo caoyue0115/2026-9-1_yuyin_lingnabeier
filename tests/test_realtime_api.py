@@ -149,7 +149,7 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertEqual(settings.realtime_tts_first_segment_max_chars, 10)
         self.assertTrue(settings.realtime_tts_warmup_enabled)
         self.assertEqual(settings.realtime_llm_compact_top_k, 1)
-        self.assertEqual(settings.realtime_llm_compact_snippet_chars, 36)
+        self.assertEqual(settings.realtime_llm_compact_snippet_chars, 120)
 
     def test_realtime_text_segmenter_prefers_sentence_punctuation(self) -> None:
         from src.services.realtime_session import split_realtime_answer_text
