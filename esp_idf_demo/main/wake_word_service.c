@@ -23,10 +23,10 @@ static const char *const s_expected_spike_model = "wn9_xiaomingtongxue_tts2";
 typedef struct {
     bool initialized;
     bool unavailable;
-    bool running;
-    bool stop_requested;
-    bool event_pending;
-    bool mic_opened;
+    volatile bool running;
+    volatile bool stop_requested;
+    volatile bool event_pending;
+    volatile bool mic_opened;
     esp_codec_dev_handle_t mic_handle;
     srmodel_list_t *models;
     const esp_afe_sr_iface_t *afe_iface;
@@ -227,6 +227,7 @@ static void wake_word_feed_task(void *arg)
         esp_err_t ret = esp_codec_dev_read(s_wake.mic_handle, buffer, (int)buffer_bytes);
         if (ret != ESP_CODEC_DEV_OK) {
             ESP_LOGW(TAG, "wake_word_mic_read_failed err=%s", esp_err_to_name(ret));
+            s_wake.stop_requested = true;
             break;
         }
         if (s_wake.afe_iface != NULL && s_wake.afe_data != NULL) {
@@ -281,7 +282,10 @@ esp_err_t wake_word_service_start(void)
         return ESP_OK;
     }
     if (s_wake.feed_task != NULL || s_wake.fetch_task != NULL) {
-        return ESP_OK;
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_wake.event_pending) {
+        return ESP_ERR_INVALID_STATE;
     }
 
     esp_err_t ret = wake_word_init_once();
@@ -326,6 +330,7 @@ esp_err_t wake_word_service_start(void)
     if (ok != pdPASS) {
         s_wake.stop_requested = true;
         ESP_LOGE(TAG, "wake_word_fetch_task_start_failed");
+        (void)wake_word_service_stop_and_wait(DEMO_WAKE_WORD_STOP_TIMEOUT_MS);
         return ESP_ERR_NO_MEM;
     }
 
@@ -346,13 +351,42 @@ void wake_word_service_stop(void)
     ESP_LOGI(TAG, "wake_word_service_stop model=%s", DEMO_WAKE_WORD_MODEL_NAME);
 }
 
+esp_err_t wake_word_service_stop_and_wait(uint32_t timeout_ms)
+{
+    wake_word_service_stop();
+    const TickType_t start_tick = xTaskGetTickCount();
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+    while (wake_word_service_is_active()) {
+        if ((xTaskGetTickCount() - start_tick) >= timeout_ticks) {
+            ESP_LOGW(TAG,
+                     "wake_word_stop_timeout timeout_ms=%u running=%d feed_task=%p fetch_task=%p mic_opened=%d",
+                     (unsigned)timeout_ms,
+                     s_wake.running,
+                     s_wake.feed_task,
+                     s_wake.fetch_task,
+                     s_wake.mic_opened);
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    ESP_LOGI(TAG, "wake_word_service_stopped");
+    return ESP_OK;
+}
+
 esp_err_t wake_word_service_set_accepting(bool accepting)
 {
     if (accepting) {
         return wake_word_service_start();
     }
-    wake_word_service_stop();
-    return ESP_OK;
+    return wake_word_service_stop_and_wait(DEMO_WAKE_WORD_STOP_TIMEOUT_MS);
+}
+
+bool wake_word_service_is_active(void)
+{
+    return s_wake.running ||
+           s_wake.feed_task != NULL ||
+           s_wake.fetch_task != NULL ||
+           s_wake.mic_opened;
 }
 
 bool wake_word_service_poll(wake_word_detection_t *out_detection)

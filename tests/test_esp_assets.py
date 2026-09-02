@@ -148,6 +148,12 @@ class EspAssetTests(unittest.TestCase):
         self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_BOOT_SWITCH_ENABLED"))
         self.assertEqual("0", _read_macro_value(config, "DEMO_OTA_ROLLBACK_VALIDATION_ENABLED"))
 
+    def test_build_rejects_stale_sdkconfig_without_vocat_wake_profile(self) -> None:
+        config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
+        self.assertIn("#if !CONFIG_DEMO_TARGET_PROFILE_VOCAT_LOWCOST_16M8M", config)
+        self.assertIn("!CONFIG_DEMO_AUDIO_PCB_ESP_VOCAT_V1_0", config)
+        self.assertIn("#if !CONFIG_SR_WN_WN9_XIAOMINGTONGXUE_TTS2", config)
+
     def test_lowcost_default_trigger_is_xiaoming_wake_word(self) -> None:
         config = (ESP_DIR / "main" / "config.h").read_text(encoding="utf-8")
 
@@ -742,6 +748,8 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("#define DEMO_WIFI_RECONFIG_GPIO  GPIO_NUM_0", config)
         self.assertIn("#define DEMO_WAKE_WORD_ENABLED 1", config)
         self.assertIn('#define DEMO_WAKE_WORD_MODEL_NAME "wn9_xiaomingtongxue_tts2"', config)
+        self.assertIn("#define DEMO_WAKE_WORD_STOP_TIMEOUT_MS 1500", config)
+        self.assertIn("#define DEMO_WAKE_WORD_RETRY_INTERVAL_MS 1000", config)
         self.assertIn("CONFIG_SR_WN_WN9_XIAOMINGTONGXUE_TTS2=y", lowcost_profile)
 
         self.assertIn("Button trigger event", trigger_source)
@@ -753,6 +761,8 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("TRIGGER_EVENT_WAKE_WORD", trigger_header)
         self.assertIn("trigger_input_set_accepting", trigger_header)
         self.assertIn("wake_word_service_set_accepting", wake_header)
+        self.assertIn("wake_word_service_stop_and_wait", wake_header)
+        self.assertIn("wake_word_service_is_active", wake_header)
 
         for marker in (
             "wake_word_enabled",
@@ -764,7 +774,11 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("wn9_xiaomingtongxue_tts2", wake_source)
         self.assertIn("esp_srmodel_init(\"model\")", wake_source)
         self.assertIn("wake_word_service_stop", wake_source)
+        self.assertIn("wake_word_service_stop_and_wait", wake_source)
+        self.assertIn("volatile bool stop_requested", wake_source)
         self.assertIn("wake_word_detected", wake_source)
+        self.assertIn("wake_word_listener_stopped_without_event", trigger_source)
+        self.assertIn("wake_word_listener_ready detector=wakenet", trigger_source)
 
         self.assertIn("ota_0,app,ota_0,0x20000,3M", partitions)
         self.assertIn("ota_1,app,ota_1,,3M", partitions)

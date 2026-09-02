@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -13,5 +14,7 @@ typedef struct {
 
 esp_err_t wake_word_service_start(void);
 void wake_word_service_stop(void);
+esp_err_t wake_word_service_stop_and_wait(uint32_t timeout_ms);
 esp_err_t wake_word_service_set_accepting(bool accepting);
+bool wake_word_service_is_active(void);
 bool wake_word_service_poll(wake_word_detection_t *out_detection);

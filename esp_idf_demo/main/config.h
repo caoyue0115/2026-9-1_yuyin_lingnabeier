@@ -2,6 +2,18 @@
 
 #include "sdkconfig.h"
 
+// This product targets the complete ESP-VoCat v1.0 unit. Reject a stale local
+// sdkconfig instead of silently compiling the v1.2 GPIO3 audio mapping; COM7's
+// microphone has been electrically verified on the v1.0 GPIO15 input.
+#if !CONFIG_DEMO_TARGET_PROFILE_VOCAT_LOWCOST_16M8M || \
+    !CONFIG_DEMO_AUDIO_PCB_ESP_VOCAT_V1_0
+#error "Build with the vocat_lowcost_16m8m / ESP-VoCat v1.0 profile"
+#endif
+
+#if !CONFIG_SR_WN_WN9_XIAOMINGTONGXUE_TTS2
+#error "Include the wn9_xiaomingtongxue_tts2 wake-word model"
+#endif
+
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
 
@@ -447,6 +459,14 @@
 
 #ifndef DEMO_WAKE_WORD_TASK_STACK_SIZE
 #define DEMO_WAKE_WORD_TASK_STACK_SIZE 8192
+#endif
+
+#ifndef DEMO_WAKE_WORD_STOP_TIMEOUT_MS
+#define DEMO_WAKE_WORD_STOP_TIMEOUT_MS 1500
+#endif
+
+#ifndef DEMO_WAKE_WORD_RETRY_INTERVAL_MS
+#define DEMO_WAKE_WORD_RETRY_INTERVAL_MS 1000
 #endif
 
 #if DEMO_BOARD_PROFILE == DEMO_BOARD_PROFILE_ESP_VOCAT_V1_0_AUDIO

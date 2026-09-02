@@ -21,6 +21,8 @@ typedef struct {
     bool warned_unsupported;
     bool accepting_events;
     bool wake_word_fallback_logged;
+    bool wake_word_ready;
+    TickType_t wake_word_next_retry_tick;
     int active_level;
     int debounced_level;
     int last_sample_level;
@@ -50,5 +52,5 @@ typedef struct {
 const char *trigger_input_source_name(trigger_event_type_t type);
 trigger_event_type_t trigger_input_configured_source(void);
 esp_err_t trigger_input_init(trigger_input_t *trigger);
-void trigger_input_set_accepting(trigger_input_t *trigger, bool accepting);
+esp_err_t trigger_input_set_accepting(trigger_input_t *trigger, bool accepting);
 bool trigger_input_poll(trigger_input_t *trigger, trigger_event_t *out_event);

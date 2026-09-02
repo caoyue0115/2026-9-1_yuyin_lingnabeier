@@ -150,10 +150,26 @@ static esp_err_t trigger_input_start_wake_word(trigger_input_t *trigger)
 {
 #if DEMO_WAKE_WORD_ENABLED
     esp_err_t ret = wake_word_service_start();
-    if (ret != ESP_OK && !trigger->wake_word_fallback_logged) {
+    if (ret == ESP_OK) {
+        if (!trigger->wake_word_ready) {
+            ESP_LOGI(TAG,
+                     "wake_word_listener_ready detector=wakenet retry_interval_ms=%d",
+                     DEMO_WAKE_WORD_RETRY_INTERVAL_MS);
+        }
+        trigger->wake_word_ready = true;
+        trigger->wake_word_next_retry_tick = 0;
+        trigger->wake_word_fallback_logged = false;
+        return ESP_OK;
+    }
+
+    trigger->wake_word_ready = false;
+    trigger->wake_word_next_retry_tick =
+        xTaskGetTickCount() + pdMS_TO_TICKS(DEMO_WAKE_WORD_RETRY_INTERVAL_MS);
+    if (!trigger->wake_word_fallback_logged) {
         ESP_LOGW(TAG,
-                 "wake_word_start_failed err=%s; keeping GPIO7 button fallback active",
-                 esp_err_to_name(ret));
+                 "wake_word_start_failed err=%s retry_ms=%d; keeping GPIO7 button fallback active",
+                 esp_err_to_name(ret),
+                 DEMO_WAKE_WORD_RETRY_INTERVAL_MS);
         trigger->wake_word_fallback_logged = true;
     }
     return ret;
@@ -184,11 +200,10 @@ esp_err_t trigger_input_init(trigger_input_t *trigger)
     case TRIGGER_EVENT_TOUCH:
         return trigger_input_init_touch(trigger);
     case TRIGGER_EVENT_WAKE_WORD: {
-        esp_err_t wake_word_ret = trigger_input_start_wake_word(trigger);
-        if (wake_word_ret == ESP_OK) {
-            trigger->initialized = true;
-        }
-        return wake_word_ret;
+        trigger->initialized = true;
+        (void)trigger_input_start_wake_word(trigger);
+        ESP_LOGI(TAG, "Initialized WakeNet wake trigger with startup retry");
+        return ESP_OK;
     }
     case TRIGGER_EVENT_BUTTON_AND_WAKE_WORD: {
         esp_err_t button_ret = trigger_input_init_button(trigger);
@@ -205,27 +220,37 @@ esp_err_t trigger_input_init(trigger_input_t *trigger)
     }
 }
 
-void trigger_input_set_accepting(trigger_input_t *trigger, bool accepting)
+esp_err_t trigger_input_set_accepting(trigger_input_t *trigger, bool accepting)
 {
     if (trigger == NULL) {
-        return;
+        return ESP_ERR_INVALID_ARG;
     }
 
     if (trigger->accepting_events == accepting) {
-        return;
+        return ESP_OK;
     }
 
     trigger->accepting_events = accepting;
     if (!trigger_input_is_wake_word_enabled(trigger)) {
-        return;
+        return ESP_OK;
     }
 
     if (accepting) {
-        (void)trigger_input_start_wake_word(trigger);
-    } else {
-        wake_word_service_stop();
-        ESP_LOGI(TAG, "wake_word_paused_for_pipeline; button fallback remains active");
+        return trigger_input_start_wake_word(trigger);
     }
+
+    trigger->wake_word_ready = false;
+    trigger->wake_word_next_retry_tick = 0;
+    esp_err_t ret = wake_word_service_stop_and_wait(DEMO_WAKE_WORD_STOP_TIMEOUT_MS);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "wake_word_paused_for_pipeline; button fallback remains active");
+    } else {
+        ESP_LOGE(TAG,
+                 "wake_word_pause_failed err=%s timeout_ms=%d",
+                 esp_err_to_name(ret),
+                 DEMO_WAKE_WORD_STOP_TIMEOUT_MS);
+    }
+    return ret;
 }
 
 static bool trigger_input_poll_wifi_reconfig_button(trigger_input_t *trigger, trigger_event_t *out_event)
@@ -376,6 +401,20 @@ bool trigger_input_poll(trigger_input_t *trigger, trigger_event_t *out_event)
                      detection.word,
                      detection.model);
             return true;
+        }
+
+        if (!wake_word_service_is_active()) {
+            if (trigger->wake_word_ready) {
+                trigger->wake_word_ready = false;
+                trigger->wake_word_next_retry_tick = xTaskGetTickCount();
+                ESP_LOGW(TAG, "wake_word_listener_stopped_without_event; scheduling restart");
+            }
+
+            const TickType_t now = xTaskGetTickCount();
+            if (trigger->wake_word_next_retry_tick == 0 ||
+                (int32_t)(now - trigger->wake_word_next_retry_tick) >= 0) {
+                (void)trigger_input_start_wake_word(trigger);
+            }
         }
     }
 
