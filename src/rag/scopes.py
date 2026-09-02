@@ -4,6 +4,14 @@ from __future__ import annotations
 ZOOTOPIA_CORE = "zootopia_core"
 DISNEY_HEARSAY = "disney_hearsay"
 
+IDENTITY_TERMS = (
+    "你是谁",
+    "你的名字",
+    "你叫什么",
+    "你是做什么的",
+    "你是干什么的",
+)
+
 ZOOTOPIA_TERMS = (
     "朱迪",
     "Judy",
@@ -36,9 +44,7 @@ ZOOTOPIA_TERMS = (
     "雨林区",
     "湿地市场",
     "热力追踪",
-    "你是谁",
-    "你的名字",
-    "你叫什么",
+    *IDENTITY_TERMS,
 )
 
 
@@ -47,3 +53,10 @@ def classify_knowledge_scope(question_text: str) -> str:
     if any(term in question for term in ZOOTOPIA_TERMS):
         return ZOOTOPIA_CORE
     return DISNEY_HEARSAY
+
+
+def expand_retrieval_query(question_text: str) -> str:
+    question = str(question_text or "")
+    if any(term in question for term in IDENTITY_TERMS):
+        return f"{question} 兔朱迪 朱迪·霍普斯 身份 兔子警官 务农家庭 梦想"
+    return question

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.providers.llm import _build_messages
-from src.rag.scopes import DISNEY_HEARSAY, ZOOTOPIA_CORE, classify_knowledge_scope
+from src.rag.scopes import DISNEY_HEARSAY, ZOOTOPIA_CORE, classify_knowledge_scope, expand_retrieval_query
 
 
 def test_disney_rag_prompt_requires_evidence() -> None:
@@ -31,6 +31,8 @@ def test_zootopia_prompt_keeps_judy_first_person_and_partner_boundary() -> None:
     assert "第一人称" in prompt
     assert "警察搭档" in prompt
     assert "不要自行编造恋爱" in prompt
+    assert "最佳搭档" in prompt
+    assert "无数案件" in prompt
     assert "[朱迪核心设定]" in messages[1]["content"]
 
 
@@ -61,6 +63,9 @@ def test_knowledge_scope_classifier_separates_personal_and_hearsay_topics() -> N
     assert classify_knowledge_scope("尼克是你的男朋友吗？") == ZOOTOPIA_CORE
     assert classify_knowledge_scope("艾莎是谁？") == DISNEY_HEARSAY
     assert classify_knowledge_scope("玲娜贝儿是谁？") == DISNEY_HEARSAY
+    expanded = expand_retrieval_query("你是谁？")
+    assert "朱迪·霍普斯" in expanded
+    assert "兔子警官" in expanded
 
 
 def test_general_prompt_allows_static_chat_but_not_realtime_claims() -> None:

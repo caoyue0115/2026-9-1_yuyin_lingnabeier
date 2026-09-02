@@ -12,7 +12,7 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 from src.settings import settings
-from src.rag.scopes import DISNEY_HEARSAY, classify_knowledge_scope
+from src.rag.scopes import DISNEY_HEARSAY, classify_knowledge_scope, expand_retrieval_query
 
 def tokenize_zh(text: str) -> list[str]:
     return [t.strip() for t in jieba.cut(text) if t.strip()]
@@ -120,12 +120,13 @@ def retrieve_references(question_text: str, top_k: int | None = None) -> tuple[l
     bm25 = BM25Okapi(tokenized_corpus)
     embedder = HashingEmbedder(dim=settings.embedding_dim)
 
-    q_tokens = tokenize_zh(question_text)
+    retrieval_query = expand_retrieval_query(question_text)
+    q_tokens = tokenize_zh(retrieval_query)
     bm_scores = bm25.get_scores(q_tokens)
     bm_top_n = min(max((top_k or settings.top_k) * 3, 8), len(chunks))
     bm_ranked = sorted(enumerate(bm_scores), key=lambda x: x[1], reverse=True)[:bm_top_n]
 
-    q_arr = to_float32_matrix(embedder.encode([question_text], normalize_embeddings=True, show_progress_bar=False))
+    q_arr = to_float32_matrix(embedder.encode([retrieval_query], normalize_embeddings=True, show_progress_bar=False))
     vec_top_n = min(max((top_k or settings.top_k) * 3, 8), len(chunks))
     vec_scores, vec_ids = index.search(q_arr, vec_top_n)
 
