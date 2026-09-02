@@ -112,9 +112,11 @@ esp_err_t idle_video_open(const char *path,
         return ESP_ERR_NO_MEM;
     }
     video->frame_capacity = max_frames;
-    video->frames = calloc(max_frames, sizeof(*video->frames));
+    video->frames = heap_caps_calloc(max_frames,
+                                     sizeof(*video->frames),
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     video->jpeg_working_buffer = heap_caps_malloc(IDLE_VIDEO_JPEG_WORK_BYTES,
-                                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (video->frames == NULL || video->jpeg_working_buffer == NULL) {
         idle_video_close(video);
         return ESP_ERR_NO_MEM;

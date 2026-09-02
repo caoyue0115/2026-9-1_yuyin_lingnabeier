@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "lvgl.h"
 
@@ -427,12 +428,22 @@ esp_err_t display_state_init(void)
         return ESP_ERR_NO_MEM;
     }
 #if DEMO_IDLE_VIDEO_ENABLED
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    BaseType_t video_created = xTaskCreateWithCaps(display_idle_video_task,
+                                                   "judy_idle_video",
+                                                   DEMO_IDLE_VIDEO_TASK_STACK_SIZE,
+                                                   NULL,
+                                                   tskIDLE_PRIORITY + 1,
+                                                   &s_idle_video_task,
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
     BaseType_t video_created = xTaskCreate(display_idle_video_task,
                                            "judy_idle_video",
                                            DEMO_IDLE_VIDEO_TASK_STACK_SIZE,
                                            NULL,
                                            tskIDLE_PRIORITY + 1,
                                            &s_idle_video_task);
+#endif
     if (video_created != pdPASS) {
         ESP_LOGW(TAG, "idle_video_task_start_failed; READY text fallback remains active");
     }

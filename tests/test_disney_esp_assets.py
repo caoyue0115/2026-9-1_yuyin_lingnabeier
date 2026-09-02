@@ -79,6 +79,10 @@ def test_idle_ready_uses_circle_safe_silent_mjpeg_avi() -> None:
     assert "DISPLAY_UI_IDLE" in display
     assert "lv_image_set_src(s_idle_image" in display
     assert "esp_jpeg_decode" in decoder
+    assert "xTaskCreateWithCaps(display_idle_video_task" in display
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in display
+    assert "heap_caps_calloc" in decoder
+    assert "MALLOC_CAP_INTERNAL" not in decoder
     assert '"idle_video.c"' in cmake
     assert "espressif/esp_jpeg" in manifest
     assert 'version: "4.2.0"' in manifest
