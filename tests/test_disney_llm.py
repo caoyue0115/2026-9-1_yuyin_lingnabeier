@@ -32,6 +32,7 @@ def test_zootopia_prompt_keeps_judy_first_person_and_partner_boundary() -> None:
     assert "警察搭档" in prompt
     assert "不编造恋爱、婚姻" in prompt
     assert "最佳搭档" in prompt
+    assert "最重要的朋友" in prompt
     assert "无数案件" in prompt
     assert "许多冒险" in prompt
     assert "[朱迪核心设定]" in messages[1]["content"]
@@ -102,6 +103,23 @@ def test_reference_scope_wins_over_old_conversation_words() -> None:
         ],
     )
     assert "本题不属于朱迪亲历" in messages[0]["content"]
+
+
+def test_prompt_separates_real_park_from_judys_story_city_and_keeps_dates_absolute() -> None:
+    messages = _build_messages(
+        "上海迪士尼有几个园区？",
+        [
+            {
+                "source_title": "上海迪士尼主题园区",
+                "snippet": "疯狂动物城主题园区于2023年开放。",
+                "knowledge_scope": "disney_hearsay",
+            }
+        ],
+    )
+    prompt = messages[0]["content"]
+    assert "不是朱迪生活的故事城市" in prompt
+    assert "绝不能称为‘我老家’" in prompt
+    assert "年份保持绝对日期" in prompt
 
 
 def test_identity_question_is_treated_as_judy_core_persona() -> None:
