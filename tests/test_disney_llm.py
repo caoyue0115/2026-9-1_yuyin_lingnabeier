@@ -156,6 +156,10 @@ def test_knowledge_scope_classifier_separates_personal_and_hearsay_topics() -> N
     family_query = expand_retrieval_query("你爸爸妈妈是谁？")
     assert "斯图" in family_query
     assert "邦妮" in family_query
+    nick_identity_query = expand_retrieval_query("尼克是谁？")
+    assert "第一位狐狸警官" in nick_identity_query
+    nick_relation_query = expand_retrieval_query("尼克和你是什么关系？")
+    assert "重要朋友" in nick_relation_query
 
 
 def test_general_prompt_allows_static_chat_but_not_realtime_claims() -> None:
