@@ -823,7 +823,7 @@ class RealtimeSchemaTests(unittest.TestCase):
         updated = store.get_session(session["session_id"])
         self.assertEqual(updated["status"], "done")
         self.assertEqual(updated["final_reason"], "completed_reject")
-        self.assertEqual(updated["answer_text"], "这件事我还没有找到可靠线索，不能乱下结论。你可以问我动物城、尼克、牛局长，或已经收录的其他迪士尼故事。")
+        self.assertEqual(updated["answer_text"], "这条线索我还没查清，先不乱猜啦。换个说法，或者告诉我它出自哪部作品？")
 
     def test_realtime_session_returns_friendly_miss_when_index_is_absent(self) -> None:
         from src.services import realtime_session as realtime_session_service
@@ -848,7 +848,7 @@ class RealtimeSchemaTests(unittest.TestCase):
         self.assertEqual(updated["status"], "done")
         self.assertEqual(updated["step"], "done")
         self.assertEqual(updated["final_reason"], "completed_reject")
-        self.assertIn("还没有找到可靠线索", updated["answer_text"])
+        self.assertIn("线索我还没查清", updated["answer_text"])
 
     def test_realtime_session_uses_stream_answer_text_for_non_reject_path(self) -> None:
         from src.services import realtime_session as realtime_session_service

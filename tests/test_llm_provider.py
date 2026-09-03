@@ -32,11 +32,11 @@ class LlmProviderTests(unittest.TestCase):
         self.assertEqual(messages[0]["role"], "system")
         self.assertIn("只能依据", messages[0]["content"])
         self.assertIn("不要编造", messages[0]["content"])
-        self.assertIn("40字", messages[0]["content"])
+        self.assertIn("一到两句自然口语", messages[0]["content"])
         self.assertIn("不要声称自己代表迪士尼官方", messages[0]["content"])
         self.assertEqual(messages[1]["role"], "user")
-        self.assertIn("先直接回答", messages[1]["content"])
-        self.assertIn("第二句补充最有用的信息", messages[1]["content"])
+        self.assertIn("像面对面聊天一样", messages[1]["content"])
+        self.assertIn("必要时再补一句", messages[1]["content"])
         self.assertIn("问题：玲娜贝儿是谁", messages[1]["content"])
         self.assertIn("玲娜贝儿角色介绍", messages[1]["content"])
 
@@ -49,9 +49,9 @@ class LlmProviderTests(unittest.TestCase):
             answer_mode="short",
         )
 
-        self.assertIn("两句话内", messages[0]["content"])
+        self.assertIn("一到两句", messages[0]["content"])
         self.assertIn("不超过70字", messages[0]["content"])
-        self.assertIn("先直接回答", messages[0]["content"])
+        self.assertIn("第一句就给答案", messages[0]["content"])
         self.assertIn("不要长篇解释", messages[0]["content"])
         self.assertIn("不超过70字", messages[1]["content"])
 

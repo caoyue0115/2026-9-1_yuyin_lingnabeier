@@ -8,6 +8,11 @@ def test_routes_disney_questions_to_rag() -> None:
     assert route_question("朱迪在疯狂动物城里做什么？") == QuestionRoute.DISNEY_KNOWLEDGE
     assert route_question("给我讲讲冰雪奇缘") == QuestionRoute.DISNEY_KNOWLEDGE
     assert route_question("史迪奇是谁？") == QuestionRoute.DISNEY_KNOWLEDGE
+    assert route_question("大白是机器人吗？") == QuestionRoute.DISNEY_KNOWLEDGE
+    assert route_question("毛怪和大眼仔是什么关系？") == QuestionRoute.DISNEY_KNOWLEDGE
+    assert route_question("创极速光轮有什么身高要求？") == QuestionRoute.DISNEY_KNOWLEDGE
+    assert route_question("你爸爸妈妈是谁？") == QuestionRoute.DISNEY_KNOWLEDGE
+    assert route_question("你为什么要当警察？") == QuestionRoute.DISNEY_KNOWLEDGE
     assert route_question("你是谁？") == QuestionRoute.DISNEY_KNOWLEDGE
 
 

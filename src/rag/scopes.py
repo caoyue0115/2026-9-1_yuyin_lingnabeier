@@ -12,6 +12,27 @@ IDENTITY_TERMS = (
     "你是干什么的",
 )
 
+FAMILY_TERMS = (
+    "你爸爸",
+    "你妈妈",
+    "你的爸爸",
+    "你的妈妈",
+    "你的父母",
+    "你父母",
+    "你的家人",
+    "你家人",
+    "你的家乡",
+    "你从哪里来",
+    "你从哪来",
+)
+
+PERSONAL_STORY_TERMS = (
+    "你的梦想",
+    "你为什么当警察",
+    "你为什么要当警察",
+    "你怎么当上警察",
+)
+
 ZOOTOPIA_TERMS = (
     "朱迪",
     "Judy",
@@ -36,6 +57,12 @@ ZOOTOPIA_TERMS = (
     "大先生",
     "夏奇羊",
     "盖瑞",
+    "蛇盖瑞",
+    "尼布尔斯",
+    "弗兹比",
+    "林克斯利",
+    "宝伯特",
+    "风舞马",
     "爪爪冰棍",
     "午夜嚎叫",
     "兔窝镇",
@@ -45,6 +72,8 @@ ZOOTOPIA_TERMS = (
     "湿地市场",
     "热力追踪",
     *IDENTITY_TERMS,
+    *FAMILY_TERMS,
+    *PERSONAL_STORY_TERMS,
 )
 
 
@@ -57,6 +86,10 @@ def classify_knowledge_scope(question_text: str) -> str:
 
 def expand_retrieval_query(question_text: str) -> str:
     question = str(question_text or "")
+    if any(term in question for term in FAMILY_TERMS):
+        return f"{question} 兔朱迪 朱迪·霍普斯 父母 爸爸斯图 妈妈邦妮 兔窝镇 胡萝卜农场 家庭"
     if any(term in question for term in IDENTITY_TERMS):
         return f"{question} 兔朱迪 朱迪·霍普斯 身份 兔子警官 务农家庭 梦想"
+    if any(term in question for term in PERSONAL_STORY_TERMS):
+        return f"{question} 兔朱迪 朱迪·霍普斯 梦想 第一位兔子警官 努力"
     return question

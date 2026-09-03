@@ -142,5 +142,181 @@
     "format": "html",
     "knowledge_scope": "disney_hearsay",
     "max_chars": 16000
+  },
+  {
+    "id": "d23_minnie_mouse",
+    "title": "D23米妮官方历史介绍",
+    "url": "https://d23.com/a-to-z/minnie-mouse/",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 16000
+  },
+  {
+    "id": "d23_donald_duck",
+    "title": "D23唐老鸭官方历史介绍",
+    "url": "https://d23.com/a-to-z/donald-duck/",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 16000
+  },
+  {
+    "id": "d23_goofy",
+    "title": "D23高飞官方历史介绍",
+    "url": "https://d23.com/a-to-z/goofy/",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 16000
+  },
+  {
+    "id": "d23_pluto",
+    "title": "D23布鲁托官方历史介绍",
+    "url": "https://d23.com/a-to-z/pluto/",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 16000
+  },
+  {
+    "id": "disney_tangled",
+    "title": "Disney《魔发奇缘》官方电影介绍",
+    "url": "https://movies.disney.com/tangled",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_little_mermaid",
+    "title": "Disney动画版《小美人鱼》官方电影介绍",
+    "url": "https://movies.disney.com/the-little-mermaid",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_beauty_beast",
+    "title": "Disney动画版《美女与野兽》官方电影介绍",
+    "url": "https://movies.disney.com/beauty-and-the-beast",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_mulan",
+    "title": "Disney动画版《花木兰》官方电影介绍",
+    "url": "https://movies.disney.com/mulan",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_aladdin",
+    "title": "Disney动画版《阿拉丁》官方电影介绍",
+    "url": "https://movies.disney.com/aladdin",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_cinderella_1950",
+    "title": "Disney动画版《灰姑娘》官方电影介绍",
+    "url": "https://movies.disney.com/cinderella-1950",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_peter_pan",
+    "title": "Disney动画版《小飞侠》官方电影介绍",
+    "url": "https://movies.disney.com/peter-pan",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_winnie_pooh",
+    "title": "Disney《小熊维尼》官方电影介绍",
+    "url": "https://movies.disney.com/winnie-the-pooh",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_big_hero_6",
+    "title": "Disney《超能陆战队》官方电影介绍",
+    "url": "https://movies.disney.com/big-hero-6",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_finding_nemo",
+    "title": "Disney·Pixar《海底总动员》官方电影介绍",
+    "url": "https://movies.disney.com/finding-nemo",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_monsters_inc",
+    "title": "Disney·Pixar《怪兽电力公司》官方电影介绍",
+    "url": "https://movies.disney.com/monsters-inc",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_inside_out",
+    "title": "Disney·Pixar《头脑特工队》官方电影介绍",
+    "url": "https://movies.disney.com/inside-out",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_inside_out_2",
+    "title": "Disney·Pixar《头脑特工队2》官方电影介绍",
+    "url": "https://movies.disney.com/inside-out-2",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_up",
+    "title": "Disney·Pixar《飞屋环游记》官方电影介绍",
+    "url": "https://movies.disney.com/up",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_ratatouille",
+    "title": "Disney·Pixar《料理鼠王》官方电影介绍",
+    "url": "https://movies.disney.com/ratatouille",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_cars",
+    "title": "Disney·Pixar《赛车总动员》官方电影介绍",
+    "url": "https://movies.disney.com/cars",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "disney_incredibles",
+    "title": "Disney·Pixar《超人总动员》官方电影介绍",
+    "url": "https://movies.disney.com/the-incredibles",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 18000
+  },
+  {
+    "id": "shanghai_disney_attractions",
+    "title": "上海迪士尼乐园游乐项目官方目录",
+    "url": "https://www.shanghaidisneyresort.com/zh-cn/experience?group=attraction",
+    "format": "html",
+    "knowledge_scope": "disney_hearsay",
+    "max_chars": 24000
   }
 ]
