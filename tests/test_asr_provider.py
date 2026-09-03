@@ -58,8 +58,31 @@ class _FakeSlowRecognition(_FakeRecognition):
         return super().call(audio_path)
 
 
+class _FakeQwenSuccessResult:
+    status_code = HTTPStatus.OK
+    output = {
+        "choices": [
+            {"message": {"content": [{"text": "你是谁？"}]}}
+        ]
+    }
+
+
+class _FakeMultiModalConversation:
+    last_kwargs: dict | None = None
+
+    @classmethod
+    def call(cls, **kwargs):
+        cls.last_kwargs = kwargs
+        return _FakeQwenSuccessResult()
+
+
 class TranscribeWavTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.model_patcher = mock.patch.object(
+            asr.settings, "asr_model", "paraformer-realtime-v2"
+        )
+        self.model_patcher.start()
+        self.addCleanup(self.model_patcher.stop)
         self.audio_path = ROOT / "data" / "incoming" / "unit-test.wav"
         self.audio_path.parent.mkdir(parents=True, exist_ok=True)
         self.audio_path.write_bytes(b"RIFF")
@@ -87,11 +110,44 @@ class TranscribeWavTests(unittest.TestCase):
         ), mock.patch.object(asr, "_load_recognition_class", side_effect=AssertionError("dashscope not used")):
             self.assertTrue(asr.asr_health())
 
+    def test_asr_health_uses_multimodal_sdk_for_qwen3_asr_flash(self) -> None:
+        with mock.patch.object(asr.settings, "dashscope_api_key", "key"), mock.patch.object(
+            asr.settings, "asr_model", "qwen3-asr-flash"
+        ), mock.patch.object(asr.settings, "asr_provider", "dashscope"), mock.patch.object(
+            asr, "_load_multimodal_conversation_class", return_value=_FakeMultiModalConversation
+        ) as load_multimodal, mock.patch.object(
+            asr, "_load_recognition_class", side_effect=AssertionError("Recognition not used")
+        ):
+            self.assertTrue(asr.asr_health())
+
+        load_multimodal.assert_called_once_with()
+
+    def test_transcribe_wav_uses_qwen3_asr_flash_for_completed_audio(self) -> None:
+        with mock.patch.object(asr, "_is_asr_configured", return_value=True), mock.patch.object(
+            asr.settings, "asr_model", "qwen3-asr-flash"
+        ), mock.patch.object(
+            asr, "_load_multimodal_conversation_class", return_value=_FakeMultiModalConversation
+        ), mock.patch.object(asr, "_configure_dashscope_sdk") as configure_sdk:
+            text, error_code = asr.transcribe_wav(self.audio_path)
+
+        self.assertEqual(text, "你是谁？")
+        self.assertIsNone(error_code)
+        self.assertEqual(_FakeMultiModalConversation.last_kwargs["model"], "qwen3-asr-flash")
+        self.assertEqual(
+            _FakeMultiModalConversation.last_kwargs["asr_options"],
+            {"enable_itn": False, "language": "zh"},
+        )
+        audio_uri = _FakeMultiModalConversation.last_kwargs["messages"][0]["content"][0]["audio"]
+        self.assertEqual(audio_uri, self.audio_path.resolve().as_uri())
+        configure_sdk.assert_called_once_with()
+
     def test_transcribe_wav_uses_dashscope_recognition_and_returns_sentence(self) -> None:
         _FakeRecognition.result = _FakeSuccessResult()
         with mock.patch.object(asr, "_is_asr_configured", return_value=True), mock.patch.object(
             asr, "_load_recognition_class", return_value=_FakeRecognition
-        ), mock.patch.object(asr, "_configure_dashscope_sdk") as configure_sdk:
+        ), mock.patch.object(asr, "_configure_dashscope_sdk") as configure_sdk, mock.patch.object(
+            asr.settings, "asr_model", "paraformer-realtime-v2"
+        ):
             text, error_code = asr.transcribe_wav(self.audio_path)
 
         self.assertEqual(text, "玲娜贝儿是谁")

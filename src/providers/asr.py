@@ -38,7 +38,10 @@ def asr_health() -> bool:
     if (settings.asr_provider or "dashscope").strip().lower() == "volcengine":
         return True
     try:
-        _load_recognition_class()
+        if _uses_qwen3_asr_flash():
+            _load_multimodal_conversation_class()
+        else:
+            _load_recognition_class()
     except ImportError:
         return False
     return True
@@ -49,13 +52,29 @@ def _configure_dashscope_sdk() -> None:
 
     dashscope.api_key = settings.dashscope_api_key
     if hasattr(dashscope, "base_http_api_url") and settings.dashscope_base_url:
-        dashscope.base_http_api_url = settings.dashscope_base_url.rstrip("/")
+        base_url = settings.dashscope_base_url.rstrip("/")
+        dashscope.base_http_api_url = (
+            base_url if base_url.endswith("/api/v1") else f"{base_url}/api/v1"
+        )
 
 
 def _load_recognition_class():
     from dashscope.audio.asr import Recognition
 
     return Recognition
+
+
+def _load_multimodal_conversation_class():
+    from dashscope import MultiModalConversation
+
+    return MultiModalConversation
+
+
+def _uses_qwen3_asr_flash() -> bool:
+    model = (settings.asr_model or "").strip().lower()
+    if model == "qwen3-asr-flash":
+        return True
+    return model.startswith("qwen3-asr-flash-20")
 
 
 class _ASRTimeout(Exception):
@@ -100,6 +119,29 @@ def _run_with_timeout(recognition: Any, audio_path: str) -> Any:
         signal.signal(signal.SIGALRM, previous_handler)
 
 
+class _Qwen3ASRFlashRecognition:
+    def __init__(self, multimodal_conversation: Any) -> None:
+        self._multimodal_conversation = multimodal_conversation
+
+    def call(self, audio_path: str) -> Any:
+        language_hints = settings.asr_language_hints_list
+        asr_options: dict[str, Any] = {"enable_itn": False}
+        if language_hints:
+            asr_options["language"] = language_hints[0]
+        return self._multimodal_conversation.call(
+            api_key=settings.dashscope_api_key,
+            model=settings.asr_model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"audio": Path(audio_path).resolve().as_uri()}],
+                }
+            ],
+            result_format="message",
+            asr_options=asr_options,
+        )
+
+
 def _build_recognition_kwargs() -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "model": settings.asr_model,
@@ -123,7 +165,7 @@ def _collect_text_parts(value: Any) -> list[str]:
         parts: list[str] = []
         for key in ("sentence", "text", "transcript", "content"):
             parts.extend(_collect_text_parts(value.get(key)))
-        for key in ("sentences", "results", "output", "data"):
+        for key in ("sentences", "results", "output", "data", "choices", "message"):
             parts.extend(_collect_text_parts(value.get(key)))
         return parts
     if isinstance(value, (list, tuple)):
@@ -133,7 +175,18 @@ def _collect_text_parts(value: Any) -> list[str]:
         return parts
 
     parts: list[str] = []
-    for attr in ("sentence", "text", "transcript", "content", "sentences", "results", "output", "data"):
+    for attr in (
+        "sentence",
+        "text",
+        "transcript",
+        "content",
+        "sentences",
+        "results",
+        "output",
+        "data",
+        "choices",
+        "message",
+    ):
         if hasattr(value, attr):
             parts.extend(_collect_text_parts(getattr(value, attr)))
     return parts
@@ -186,8 +239,11 @@ def transcribe_wav_result(wav_path: str | Path) -> ASRResult:
 
     try:
         _configure_dashscope_sdk()
-        recognition_class = _load_recognition_class()
-        recognition = recognition_class(**_build_recognition_kwargs())
+        if _uses_qwen3_asr_flash():
+            recognition = _Qwen3ASRFlashRecognition(_load_multimodal_conversation_class())
+        else:
+            recognition_class = _load_recognition_class()
+            recognition = recognition_class(**_build_recognition_kwargs())
         result = _run_with_timeout(recognition, str(path))
     except ImportError as exc:
         return ASRResult(None, "asr_sdk_unavailable", _error_message_from_exception(exc))

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 import threading
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, WebSocket
@@ -41,6 +43,7 @@ from src.storage.files import save_pcm_as_wav
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 KEEPALIVE_INTERVAL_SECONDS = 15.0
 KEEPALIVE_MISSED_INTERVALS = 2
 AUDIO_TOKEN_TTL_SECONDS = 120.0
@@ -450,10 +453,29 @@ class ConversationSocket:
         )
         result = transcribe_wav_result(wav_path)
         if result.error_code == "asr_empty_text":
+            logger.info(
+                "conversation_asr_final conversation_id=%s turn_id=%s turn_index=%s model=%s audio=%s text=%r",
+                self.session.conversation_id,
+                turn_id,
+                self.session._require_turn(turn_id).turn_index,
+                settings.asr_model,
+                Path(wav_path).name,
+                "",
+            )
             return ""
         if result.error_code:
             raise RuntimeError(result.error_code)
-        return str(result.text or "").strip()
+        text = str(result.text or "").strip()
+        logger.info(
+            "conversation_asr_final conversation_id=%s turn_id=%s turn_index=%s model=%s audio=%s text=%r",
+            self.session.conversation_id,
+            turn_id,
+            self.session._require_turn(turn_id).turn_index,
+            settings.asr_model,
+            Path(wav_path).name,
+            text,
+        )
+        return text
 
     async def _send(self, event: Any) -> None:
         payload = event.to_payload() if hasattr(event, "to_payload") else event

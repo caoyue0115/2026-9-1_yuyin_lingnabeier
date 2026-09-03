@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     asr_fallback_provider: str = ""
     asr_provider_override_device_ids: str = ""
     asr_provider_override_provider: str = ""
-    asr_model: str = "paraformer-realtime-v2"
+    asr_model: str = "qwen3-asr-flash"
     asr_timeout_seconds: float = 30.0
     asr_language_hints: str = "zh"
     asr_vocabulary_id: str = ""
