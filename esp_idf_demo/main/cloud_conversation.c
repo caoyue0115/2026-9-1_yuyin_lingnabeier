@@ -9,6 +9,7 @@
 #include "esp_opus_enc.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -19,6 +20,8 @@
 #include <string.h>
 
 static const char *TAG = "cloud_conversation";
+static volatile int s_start_sound_direction_degrees = 90;
+static volatile bool s_start_sound_direction_valid;
 
 #define V6_WAIT_MS 30000
 #define V6_CLOSE_WAIT_MS 2000
@@ -55,6 +58,18 @@ struct cloud_conversation {
     bool conversation_done;
     bool error_received;
 };
+
+void cloud_conversation_set_start_telemetry(int sound_direction_degrees,
+                                            bool sound_direction_valid)
+{
+    if (sound_direction_degrees < 0) {
+        sound_direction_degrees = 0;
+    } else if (sound_direction_degrees > 180) {
+        sound_direction_degrees = 180;
+    }
+    s_start_sound_direction_degrees = sound_direction_degrees;
+    s_start_sound_direction_valid = sound_direction_valid;
+}
 
 static void v6_flag_set(bool *flag)
 {
@@ -422,13 +437,25 @@ esp_err_t cloud_conversation_open(cloud_conversation_t **out)
         v6_destroy(conversation);
         return ret;
     }
-    char start[384];
+    wifi_ap_record_t access_point = {0};
+    const int wifi_rssi = esp_wifi_sta_get_ap_info(&access_point) == ESP_OK ? access_point.rssi : 0;
+    char start[640];
     const int written = snprintf(
         start, sizeof(start),
         "{\"type\":\"conversation_start\",\"client_conversation_id\":\"%s\","
         "\"device_id\":\"%s\",\"audio_format\":\"opus\","
-        "\"protocol_version\":\"v6\",\"answer_mode\":\"streaming\"}",
-        conversation->client_conversation_id, DEMO_DEVICE_ID);
+        "\"protocol_version\":\"v6\",\"answer_mode\":\"streaming\","
+        "\"direction_valid\":%s,\"direction_degrees\":%d,\"wifi_rssi\":%d,"
+        "\"free_internal_ram\":%u,\"largest_internal_block\":%u,"
+        "\"restart_reason\":\"%d\"}",
+        conversation->client_conversation_id,
+        DEMO_DEVICE_ID,
+        s_start_sound_direction_valid ? "true" : "false",
+        s_start_sound_direction_degrees,
+        wifi_rssi,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (int)esp_reset_reason());
     if (written <= 0 || (size_t)written >= sizeof(start) || v6_send_text(conversation, start) != written) {
         v6_destroy(conversation);
         return ESP_FAIL;

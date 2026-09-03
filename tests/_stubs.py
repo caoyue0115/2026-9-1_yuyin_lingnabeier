@@ -81,7 +81,15 @@ def install_dependency_stubs() -> None:
                 self.headers = headers or {}
                 self.status_code = status_code
 
+        class HTMLResponse:
+            def __init__(self, content, media_type="text/html", headers=None, status_code=200) -> None:
+                self.body = str(content).encode("utf-8")
+                self.media_type = media_type
+                self.headers = headers or {}
+                self.status_code = status_code
+
         module.FileResponse = FileResponse
+        module.HTMLResponse = HTMLResponse
         module.StreamingResponse = StreamingResponse
         sys.modules["fastapi.responses"] = module
 

@@ -383,6 +383,33 @@ def test_v6_settings_defaults() -> None:
     assert configured.conversation_v6_close_timeout_seconds == 2.0
     assert configured.conversation_v6_question_chars == 512
     assert configured.conversation_v6_answer_chars == 4096
+    assert configured.conversation_v6_memory_turns == 3
+
+
+def test_retrieval_question_resolves_short_pronoun_followup() -> None:
+    history = [{"question": "狐尼克是谁", "answer": "尼克是我的狐狸搭档。"}]
+
+    query = conversation_service._retrieval_question("他以前做什么", history)
+
+    assert "狐尼克是谁" in query
+    assert "尼克是我的狐狸搭档" in query
+    assert query.endswith("他以前做什么")
+
+
+def test_retrieval_question_does_not_pollute_independent_question() -> None:
+    history = [{"question": "狐尼克是谁", "answer": "尼克是我的狐狸搭档。"}]
+
+    assert conversation_service._retrieval_question("介绍一下冰雪奇缘", history) == "介绍一下冰雪奇缘"
+
+
+def test_session_memory_turn_count_is_configurable(monkeypatch) -> None:
+    monkeypatch.setattr(conversation_service.settings, "conversation_v6_memory_turns", 2)
+    session = ConversationSession.for_test()
+    for index in range(3):
+        turn = session.start_turn(f"t{index}", index)
+        session.commit_turn(turn.turn_id, question=f"q{index}", answer=f"a{index}")
+
+    assert [item["turn_id"] for item in session.history()] == ["t1", "t2"]
 
 
 def test_oversized_audio_chunk_is_rejected_without_waiting() -> None:

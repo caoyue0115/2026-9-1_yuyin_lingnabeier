@@ -38,6 +38,7 @@ from src.providers.opus import (
     pack_framed_v1_packets,
 )
 from src.services.conversation_v6 import ConversationSession
+from src.services.demo_diagnostics import demo_diagnostics
 from src.settings import settings
 from src.storage.files import save_pcm_as_wav
 
@@ -70,7 +71,7 @@ class ConversationRegistry:
         self._lock = threading.RLock()
 
     def create(self, *, device_id: str) -> ConversationSession:
-        session = ConversationSession()
+        session = ConversationSession(device_id=device_id)
         with self._lock:
             self._sessions[session.conversation_id] = session
             self._devices[session.conversation_id] = str(device_id or "")
@@ -305,12 +306,43 @@ class ConversationSocket:
             if self.device_id and payload_device != self.device_id:
                 raise ProtocolError("device_mismatch")
             self.started = True
+            direction_valid = bool(control.data.get("direction_valid"))
+            direction_degrees = control.data.get("direction_degrees")
+            if not isinstance(direction_degrees, int) or isinstance(direction_degrees, bool):
+                direction_degrees = None
+            if direction_degrees is not None:
+                direction_degrees = min(max(direction_degrees, 0), 180)
+            telemetry = {
+                "wifi_rssi": control.data.get("wifi_rssi"),
+                "free_internal_ram": control.data.get("free_internal_ram"),
+                "largest_internal_block": control.data.get("largest_internal_block"),
+                "restart_reason": control.data.get("restart_reason"),
+                "direction_degrees": direction_degrees if direction_valid else None,
+                "direction_label": _direction_label(direction_degrees) if direction_valid else "unknown",
+                "state": "ready",
+            }
+            demo_diagnostics.update_telemetry(
+                self.device_id,
+                {key: value for key, value in telemetry.items() if value is not None},
+            )
+            demo_diagnostics.record(
+                "conversation_ready",
+                device_id=self.device_id,
+                conversation_id=self.session.conversation_id,
+                state="ready",
+            )
             await self._send(conversation_ready_event(control.client_conversation_id or "", self.session.conversation_id))
             return False
         self._require_started()
         if control.conversation_id != self.session.conversation_id:
             raise ProtocolError("conversation_mismatch")
         if control.type == "conversation_end":
+            demo_diagnostics.record(
+                "conversation_end",
+                device_id=self.device_id,
+                conversation_id=self.session.conversation_id,
+                state="ready",
+            )
             await self._send(conversation_done_event(self.session.conversation_id))
             await self.websocket.close(code=1000)
             return True
@@ -318,6 +350,14 @@ class ConversationSocket:
             turn = self.session.start_turn(control.turn_id or "", control.turn_index if control.turn_index is not None else -1)
             self._active_turn_id = turn.turn_id
             self._frames.setdefault(turn.turn_id, {})
+            demo_diagnostics.record(
+                "turn_started",
+                device_id=self.device_id,
+                conversation_id=self.session.conversation_id,
+                turn_id=turn.turn_id,
+                turn_index=turn.turn_index,
+                state="listening",
+            )
             await self._send(ack_event(self.session.conversation_id, turn.turn_id, turn.turn_index, "turn_start"))
             return False
         turn = self.session._require_turn(control.turn_id or "")
@@ -335,6 +375,15 @@ class ConversationSocket:
             task.add_done_callback(self._tasks.discard)
         elif control.type == "turn_playback_complete":
             transition = turn.state_machine.on_turn_playback_complete(control)
+            demo_diagnostics.record(
+                "playback_complete",
+                device_id=self.device_id,
+                conversation_id=self.session.conversation_id,
+                turn_id=turn.turn_id,
+                turn_index=turn.turn_index,
+                state="ready",
+                memory=self.session.history(),
+            )
             await self._send(build_turn_event(
                 transition,
                 conversation_id=self.session.conversation_id,
@@ -363,13 +412,25 @@ class ConversationSocket:
 
     async def _finish_turn(self, turn_id: str) -> None:
         turn = self.session._require_turn(turn_id)
+        asr_started = time.perf_counter()
         try:
             question = await asyncio.to_thread(self._transcribe_turn, turn_id)
+            asr_ms = round((time.perf_counter() - asr_started) * 1000)
             if turn.cancel_event.is_set():
                 return
             if not question:
                 transition = turn.state_machine.on_asr_empty()
                 self.session.complete_asr_empty(turn.turn_id)
+                demo_diagnostics.record(
+                    "asr_empty",
+                    device_id=self.device_id,
+                    conversation_id=self.session.conversation_id,
+                    turn_id=turn.turn_id,
+                    turn_index=turn.turn_index,
+                    state="ready",
+                    asr_text="",
+                    asr_ms=asr_ms,
+                )
                 await self._send(build_turn_event(
                     transition,
                     conversation_id=self.session.conversation_id,
@@ -378,6 +439,17 @@ class ConversationSocket:
                 ))
                 return
             transition = turn.state_machine.on_asr_final(question)
+            demo_diagnostics.record(
+                "asr_final",
+                device_id=self.device_id,
+                conversation_id=self.session.conversation_id,
+                turn_id=turn.turn_id,
+                turn_index=turn.turn_index,
+                state="thinking",
+                asr_text=question,
+                text=question,
+                asr_ms=asr_ms,
+            )
             await self._send(asr_final_event(
                 self.session.conversation_id,
                 turn.turn_id,
@@ -405,14 +477,48 @@ class ConversationSocket:
                 session_id=f"{self.session.conversation_id}:{turn.turn_id}",
                 audio_stream_url=audio_url,
             ))
-            await asyncio.wrap_future(future)
+            result = await asyncio.wrap_future(future)
+            demo_diagnostics.record(
+                "answer_ready",
+                device_id=self.device_id,
+                conversation_id=self.session.conversation_id,
+                turn_id=turn.turn_id,
+                turn_index=turn.turn_index,
+                state="speaking",
+                answer=result.answer,
+                memory=self.session.history(),
+                processing_ms=round((time.perf_counter() - asr_started) * 1000) - asr_ms,
+            )
         except asyncio.CancelledError:
             raise
         except ProtocolError as exc:
             if not turn.cancel_event.is_set():
+                demo_diagnostics.record(
+                    "turn_error",
+                    device_id=self.device_id,
+                    conversation_id=self.session.conversation_id,
+                    turn_id=turn.turn_id,
+                    turn_index=turn.turn_index,
+                    state="error",
+                    error=exc.code,
+                )
                 await self._send_error(exc.code)
-        except Exception:
+        except Exception as exc:
             if not turn.cancel_event.is_set():
+                logger.exception(
+                    "conversation_turn_failed conversation_id=%s turn_id=%s",
+                    self.session.conversation_id,
+                    turn.turn_id,
+                )
+                demo_diagnostics.record(
+                    "turn_error",
+                    device_id=self.device_id,
+                    conversation_id=self.session.conversation_id,
+                    turn_id=turn.turn_id,
+                    turn_index=turn.turn_index,
+                    state="error",
+                    error=_error_code(exc),
+                )
                 try:
                     transition = turn.state_machine.on_technical_error()
                     await asyncio.to_thread(
@@ -519,6 +625,16 @@ def _error_code(exc: BaseException) -> str:
     return value or "protocol_error"
 
 
+def _direction_label(degrees: int | None) -> str:
+    if degrees is None:
+        return "unknown"
+    if degrees < 60:
+        return f"左侧 {degrees}°"
+    if degrees > 120:
+        return f"右侧 {degrees}°"
+    return f"正前方 {degrees}°"
+
+
 @router.websocket("/api/v6/realtime/conversation/opus-stream")
 async def conversation_opus_stream(
     websocket: WebSocket,
@@ -526,9 +642,11 @@ async def conversation_opus_stream(
 ) -> None:
     await websocket.accept()
     session = conversation_registry.create(device_id=x_device_id)
+    demo_diagnostics.set_connected(x_device_id, session.conversation_id)
     try:
         await ConversationSocket(websocket, session, device_id=x_device_id).run()
     finally:
+        demo_diagnostics.set_disconnected(x_device_id, session.conversation_id)
         conversation_registry.remove(session.conversation_id)
 
 

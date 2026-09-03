@@ -28,6 +28,7 @@ from src.services.question_router import (
     QuestionRoute,
     route_question,
 )
+from src.services.park_navigation import answer_navigation_question
 from src.services.realtime_session import (
     _split_stream_buffer,
     _stream_answer_audio,
@@ -90,6 +91,7 @@ class ConversationSession:
         self,
         *,
         conversation_id: str | None = None,
+        device_id: str = "",
         max_audio_queue_bytes: int | None = None,
         cancel_timeout_seconds: float | None = None,
         close_timeout_seconds: float | None = None,
@@ -100,6 +102,7 @@ class ConversationSession:
         worker: Callable[[ConversationTurn], Any] | None = None,
     ) -> None:
         self.conversation_id = conversation_id or str(uuid.uuid4())
+        self.device_id = str(device_id or "")
         self._max_audio_queue_bytes = (
             settings.conversation_v6_audio_queue_bytes
             if max_audio_queue_bytes is None
@@ -279,8 +282,11 @@ class ConversationSession:
             return dict(self._commit_context(turn, interrupted=turn.interrupted))
 
     def history(self) -> list[dict[str, Any]]:
+        memory_turns = min(max(int(settings.conversation_v6_memory_turns), 0), 5)
+        if memory_turns == 0:
+            return []
         with self._lock:
-            return [dict(item) for item in self._context[-3:]]
+            return [dict(item) for item in self._context[-memory_turns:]]
 
     def context_status(self, turn_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -353,6 +359,7 @@ class ConversationSession:
                 turn.cancel_event,
                 turn.audio,
                 answer_chars=self._answer_chars,
+                device_id=self.device_id,
             )
         except TurnCancelled as exc:
             turn.answer, turn.answer_truncated = _truncate_text(
@@ -420,18 +427,22 @@ def run_turn(
     audio_queue: BoundedAudioQueue,
     *,
     answer_chars: int | None = None,
+    device_id: str = "",
 ) -> TurnRunResult:
     """Adapt the v5 retrieval, LLM, and TTS providers to an owned v6 turn."""
     answer_parts: list[str] = []
     _check_cancel(cancel_event, answer_parts)
-    route = route_question(question)
+    retrieval_question = _retrieval_question(question, history)
+    route = route_question(retrieval_question)
     references: list[dict] = []
-    canned_answer: str | None = None
-    if route == QuestionRoute.DYNAMIC_CURRENT:
+    canned_answer = answer_navigation_question(question, device_id)
+    if canned_answer is not None:
+        pass
+    elif route == QuestionRoute.DYNAMIC_CURRENT:
         canned_answer = DYNAMIC_REFUSAL
     elif route == QuestionRoute.DISNEY_KNOWLEDGE:
         try:
-            references, top_score = retrieve_references(question, top_k=settings.top_k)
+            references, top_score = retrieve_references(retrieval_question, top_k=settings.top_k)
         except FileNotFoundError:
             references, top_score = [], 0.0
         _check_cancel(cancel_event, answer_parts)
@@ -453,7 +464,7 @@ def run_turn(
         audio_queue.finish()
         return TurnRunResult(answer=answer, answer_truncated=answer_truncated)
 
-    llm_question = _question_with_history(question, history[-3:])
+    llm_question = _question_with_history(question, history)
     llm_stream = stream_answer_text(llm_question, references)
     _register_close_hook(audio_queue, llm_stream)
     llm_iterator = iter(llm_stream)
@@ -603,6 +614,43 @@ def _question_with_history(question: str, history: list[Mapping[str, Any]]) -> s
         lines.append(f"A (interrupted={interrupted}): {item.get('answer', '')}")
     lines.append(f"Current question: {question}")
     return "\n".join(lines)
+
+
+_FOLLOWUP_MARKERS = (
+    "他",
+    "她",
+    "它",
+    "他们",
+    "她们",
+    "它们",
+    "这个",
+    "那个",
+    "这位",
+    "那位",
+    "刚才",
+    "前面",
+    "上一个",
+    "后来呢",
+    "然后呢",
+)
+
+
+def _retrieval_question(question: str, history: list[Mapping[str, Any]]) -> str:
+    """Attach only the latest turn when a short follow-up needs entity resolution."""
+    normalized = str(question or "").strip()
+    if not normalized or not history:
+        return normalized
+    is_followup = len(normalized) <= 18 and (
+        any(marker in normalized for marker in _FOLLOWUP_MARKERS)
+        or normalized.endswith("呢")
+    )
+    if not is_followup:
+        return normalized
+    previous = history[-1]
+    previous_question = str(previous.get("question") or "").strip()
+    previous_answer = str(previous.get("answer") or "").strip()[:120]
+    context = " ".join(part for part in (previous_question, previous_answer) if part)
+    return f"{context} {normalized}".strip()
 
 
 def _truncate_text(value: str, limit: int) -> tuple[str, bool]:

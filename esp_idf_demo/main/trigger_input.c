@@ -381,6 +381,8 @@ bool trigger_input_poll(trigger_input_t *trigger, trigger_event_t *out_event)
     out_event->type = TRIGGER_EVENT_NONE;
     out_event->x = 0;
     out_event->y = 0;
+    out_event->sound_direction_valid = false;
+    out_event->sound_direction_degrees = 90;
 
     if (!trigger->initialized) {
         if (trigger_input_init(trigger) != ESP_OK) {
@@ -396,10 +398,14 @@ bool trigger_input_poll(trigger_input_t *trigger, trigger_event_t *out_event)
         wake_word_detection_t detection = {0};
         if (wake_word_service_poll(&detection)) {
             out_event->type = TRIGGER_EVENT_WAKE_WORD;
+            out_event->sound_direction_valid = detection.direction_valid;
+            out_event->sound_direction_degrees = detection.direction_degrees;
             ESP_LOGI(TAG,
-                     "Wake word trigger event: word=%s model=%s; GPIO7 button fallback remains active",
+                     "Wake word trigger event: word=%s model=%s direction_valid=%d direction_degrees=%d; GPIO7 button fallback remains active",
                      detection.word,
-                     detection.model);
+                     detection.model,
+                     detection.direction_valid ? 1 : 0,
+                     detection.direction_degrees);
             return true;
         }
 

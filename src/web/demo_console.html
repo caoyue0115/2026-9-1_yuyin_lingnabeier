@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>朱迪语音助手 · 演示台</title>
+  <style>
+    :root{color-scheme:dark;--ink:#fff8fb;--muted:#c8bcca;--pink:#ff7eb3;--violet:#9d83ff;--cyan:#6fe7e1;--panel:rgba(39,27,50,.78);--line:rgba(255,255,255,.12)}
+    *{box-sizing:border-box} body{margin:0;min-height:100vh;font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink);background:radial-gradient(circle at 10% 5%,#632c58 0,transparent 34%),radial-gradient(circle at 92% 12%,#294a65 0,transparent 30%),linear-gradient(145deg,#130e1a,#201529 58%,#101923)}
+    body:before{content:"";position:fixed;inset:0;pointer-events:none;background-image:radial-gradient(rgba(255,255,255,.13) 1px,transparent 1px);background-size:22px 22px;mask-image:linear-gradient(to bottom,#000,transparent 70%)}
+    main{width:min(1180px,calc(100% - 28px));margin:auto;padding:34px 0 60px;position:relative} header{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:22px} h1{font-size:clamp(28px,5vw,48px);margin:0;letter-spacing:-.04em} .eyebrow{color:#ffadd1;letter-spacing:.16em;font-size:12px;text-transform:uppercase;margin-bottom:7px}.live{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}.dot{width:9px;height:9px;border-radius:50%;background:#5ee89c;box-shadow:0 0 16px #5ee89c}
+    .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:22px;padding:19px;box-shadow:0 18px 50px rgba(0,0,0,.2);backdrop-filter:blur(16px)}.device{grid-column:span 7}.models{grid-column:span 5}.memory{grid-column:span 5}.events{grid-column:span 7}h2{font-size:14px;color:#e9cfe0;text-transform:uppercase;letter-spacing:.11em;margin:0 0 16px}.hero{display:flex;align-items:center;gap:18px}.avatar{width:88px;height:88px;border-radius:50%;display:grid;place-items:center;font-size:42px;background:linear-gradient(145deg,#ffb5d5,#9d83ff);box-shadow:inset 0 0 0 5px rgba(255,255,255,.16)}.state{font-size:26px;font-weight:750}.sub{color:var(--muted);font-size:13px;margin-top:4px}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:18px}.fact{padding:12px;border-radius:14px;background:rgba(255,255,255,.055)}.fact b{display:block;font-size:17px;margin-top:3px}.fact span{font-size:11px;color:var(--muted)}.models dl{margin:0;display:grid;gap:13px}.models div{padding-bottom:11px;border-bottom:1px solid var(--line)}dt{font-size:11px;color:var(--muted);text-transform:uppercase}dd{margin:5px 0 0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;color:#fff}.bubble{border-radius:15px;padding:12px 14px;margin:9px 0;font-size:13px;line-height:1.55}.q{background:rgba(111,231,225,.1);border-left:3px solid var(--cyan)}.a{background:rgba(255,126,179,.1);border-left:3px solid var(--pink)}.empty{color:var(--muted);font-size:13px;padding:16px 0}.event-list{display:grid;gap:8px;max-height:380px;overflow:auto}.event-row{display:grid;grid-template-columns:78px 128px 1fr;gap:10px;padding:10px 11px;border-radius:12px;background:rgba(255,255,255,.045);font-size:12px;align-items:start}.time,.detail{color:var(--muted)}.tag{color:#fff;font-weight:700}.error{color:#ff9dad}.asr{color:#88f0ea}@media(max-width:780px){header{align-items:flex-start;flex-direction:column}.device,.models,.memory,.events{grid-column:1/-1}.facts{grid-template-columns:1fr 1fr}.event-row{grid-template-columns:64px 105px 1fr}}
+  </style>
+</head>
+<body><main>
+  <header><div><div class="eyebrow">Zootopia field console</div><h1>朱迪语音助手</h1></div><div class="live"><i class="dot"></i><span id="updated">等待服务器数据</span></div></header>
+  <section class="grid">
+    <article class="panel device"><h2>整机状态</h2><div id="device"><div class="empty">尚未发现设备</div></div></article>
+    <article class="panel models"><h2>当前云端模型</h2><dl id="models"></dl></article>
+    <article class="panel memory"><h2>本轮短期记忆</h2><div id="memory"><div class="empty">唤醒后将在这里显示最近三轮</div></div></article>
+    <article class="panel events"><h2>最近事件</h2><div class="event-list" id="events"></div></article>
+  </section>
+</main><script>
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const short=v=>v==null||v===''?'—':esc(v);
+function render(data){
+  document.querySelector('#updated').textContent='刚刚更新 · '+new Date(data.generated_at).toLocaleTimeString();
+  document.querySelector('#models').innerHTML=Object.entries(data.models||{}).map(([k,v])=>`<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('');
+  const d=(data.devices||[])[0];
+  document.querySelector('#device').innerHTML=d?`<div class="hero"><div class="avatar">🐰</div><div><div class="state">${d.online?'在线 · '+short(d.state):'离线'}</div><div class="sub">${esc(d.device_id)} · ${d.conversation_id?'会话进行中':'等待唤醒'}</div></div></div><div class="facts"><div class="fact"><span>当前轮次</span><b>${d.turn_index==null?'—':d.turn_index+1}</b></div><div class="fact"><span>声源方向</span><b>${short(d.direction_label)}</b></div><div class="fact"><span>Wi-Fi RSSI</span><b>${d.wifi_rssi==null?'—':esc(d.wifi_rssi)+' dBm'}</b></div><div class="fact"><span>内部RAM</span><b>${d.free_internal_ram==null?'—':Math.round(d.free_internal_ram/1024)+' KB'}</b></div><div class="fact"><span>最近识别</span><b>${short(d.asr_text)}</b></div><div class="fact"><span>重启原因</span><b>${short(d.restart_reason)}</b></div></div>`:'<div class="empty">尚未发现设备</div>';
+  const mem=d?.memory||[];document.querySelector('#memory').innerHTML=mem.length?mem.map(x=>`<div class="bubble q">你：${esc(x.question)}</div><div class="bubble a">朱迪：${esc(x.answer)}</div>`).join(''):'<div class="empty">当前会话还没有已完成的问答</div>';
+  document.querySelector('#events').innerHTML=(data.recent_events||[]).slice(0,40).map(e=>{const detail=e.text||e.answer||e.error||e.state||'';const cls=e.event.includes('error')?'error':e.event.includes('asr')?'asr':'';return `<div class="event-row"><span class="time">${new Date(e.timestamp).toLocaleTimeString()}</span><span class="tag ${cls}">${esc(e.event)}</span><span class="detail">${esc(detail)}</span></div>`}).join('')||'<div class="empty">暂无事件</div>';
+}
+async function refresh(){try{const r=await fetch('/api/demo/status',{cache:'no-store'});render(await r.json())}catch(e){document.querySelector('#updated').textContent='连接失败'}}
+refresh();setInterval(refresh,1200);
+</script></body></html>

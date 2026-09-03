@@ -179,6 +179,12 @@ static void app_log_runtime_config(void)
              DEMO_WAKE_WORD_ENABLED,
              DEMO_WAKE_WORD_MODEL_NAME,
              DEMO_WAKE_WORD_TEXT);
+    ESP_LOGI(TAG,
+             "  sound_direction_enabled=%d channels=%d spacing_m=%.3f reversed=%d",
+             DEMO_SOUND_DIRECTION_ENABLED,
+             DEMO_WAKE_AUDIO_CHANNELS,
+             (double)DEMO_SOUND_DIRECTION_MIC_SPACING_METERS,
+             DEMO_SOUND_DIRECTION_REVERSED);
     ESP_LOGI(TAG, "  wifi_ssid=%s", DEMO_WIFI_SSID);
     ESP_LOGI(TAG, "  server_base_url=%s", DEMO_SERVER_BASE_URL);
     ESP_LOGI(TAG, "  device_id=%s", DEMO_DEVICE_ID);
@@ -456,6 +462,8 @@ static esp_err_t app_v5_opus_uplink_pcm_sink(const uint8_t *pcm,
 
 typedef struct {
     cloud_conversation_t *conversation;
+    int sound_direction_degrees;
+    bool sound_direction_valid;
     volatile bool done;
     esp_err_t result;
 } app_v6_open_task_t;
@@ -463,6 +471,8 @@ typedef struct {
 static void app_v6_open_task(void *arg)
 {
     app_v6_open_task_t *task = (app_v6_open_task_t *)arg;
+    cloud_conversation_set_start_telemetry(task->sound_direction_degrees,
+                                           task->sound_direction_valid);
     task->result = cloud_conversation_open(&task->conversation);
     task->done = true;
 #if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
@@ -499,7 +509,7 @@ static void app_wait_until_ms(int64_t deadline_ms)
     }
 }
 
-static esp_err_t run_v6_conversation(app_state_t *state)
+static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *trigger_event)
 {
     if (!app_network_is_connected()) {
         return ESP_ERR_INVALID_STATE;
@@ -511,6 +521,10 @@ static esp_err_t run_v6_conversation(app_state_t *state)
                                          esp_timer_get_time() / 1000);
 
     app_v6_open_task_t open_task = {0};
+    open_task.sound_direction_degrees =
+        trigger_event != NULL ? trigger_event->sound_direction_degrees : 90;
+    open_task.sound_direction_valid =
+        trigger_event != NULL && trigger_event->sound_direction_valid;
     cloud_conversation_t *conversation = NULL;
     BaseType_t open_task_created = pdFAIL;
 #if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
@@ -1430,7 +1444,8 @@ static void app_pipeline_task(void *arg)
     }
 
 #if DEMO_V6_CONVERSATION_ENABLED
-    (void)run_v6_conversation(&s_app_state);
+    (void)run_v6_conversation(&s_app_state,
+                              task_args != NULL ? &task_args->event : NULL);
 #else
     (void)run_trigger_pipeline(&s_app_state);
 #endif
@@ -2817,12 +2832,16 @@ static void app_runtime_task(void *arg)
 
             if (s_app_state == APP_STATE_IDLE && s_pipeline_task_handle == NULL) {
                 if (event.type == TRIGGER_EVENT_WAKE_WORD) {
+                    display_state_set_sound_direction(event.sound_direction_degrees,
+                                                      event.sound_direction_valid);
                     display_state_notify_wake_word();
                 }
-                ESP_LOGI(TAG, "trigger source=%s x=%u y=%u -> starting pipeline",
+                ESP_LOGI(TAG, "trigger source=%s x=%u y=%u direction_valid=%d direction_degrees=%d -> starting pipeline",
                          trigger_input_source_name(event.type),
                          (unsigned)event.x,
-                         (unsigned)event.y);
+                         (unsigned)event.y,
+                         event.sound_direction_valid ? 1 : 0,
+                         event.sound_direction_degrees);
                 esp_err_t ret = app_start_pipeline_task(&event);
                 if (ret != ESP_OK) {
                     ESP_LOGE(TAG, "Failed to start pipeline task: %s", esp_err_to_name(ret));

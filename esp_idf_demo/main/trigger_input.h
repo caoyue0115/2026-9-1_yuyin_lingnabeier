@@ -47,6 +47,8 @@ typedef struct {
     trigger_event_type_t type;
     uint16_t x;
     uint16_t y;
+    bool sound_direction_valid;
+    int16_t sound_direction_degrees;
 } trigger_event_t;
 
 const char *trigger_input_source_name(trigger_event_type_t type);

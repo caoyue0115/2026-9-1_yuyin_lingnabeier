@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -8,6 +9,8 @@
 
 typedef struct cloud_conversation cloud_conversation_t;
 
+void cloud_conversation_set_start_telemetry(int sound_direction_degrees,
+                                            bool sound_direction_valid);
 esp_err_t cloud_conversation_open(cloud_conversation_t **out);
 esp_err_t cloud_conversation_start_turn(cloud_conversation_t *conversation, uint8_t turn_index, const char *turn_id);
 esp_err_t cloud_conversation_send_pcm(cloud_conversation_t *conversation, const uint8_t *pcm, size_t pcm_bytes);

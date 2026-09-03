@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     conversation_v6_close_timeout_seconds: float = 2.0
     conversation_v6_question_chars: int = 512
     conversation_v6_answer_chars: int = 4096
+    conversation_v6_memory_turns: int = 3
+    amap_web_service_key: str = ""
+    phone_location_ttl_seconds: int = 120
     project_name: str = "Disney Voice Assistant Demo"
     version: str = "0.1.0"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

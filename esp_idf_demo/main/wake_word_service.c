@@ -10,9 +10,11 @@
 #include "esp_afe_sr_iface.h"
 #include "esp_afe_sr_models.h"
 #include "esp_codec_dev.h"
+#include "esp_doa.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "model_path.h"
@@ -35,11 +37,18 @@ typedef struct {
     TaskHandle_t fetch_task;
     int feed_samples;
     int feed_channels;
+    doa_handle_t *doa;
+    volatile bool latest_direction_valid;
+    volatile int latest_direction_degrees;
+    volatile int64_t latest_direction_us;
     char detected_word[64];
     char detected_model[64];
+    bool detected_direction_valid;
+    int detected_direction_degrees;
 } wake_word_state_t;
 
 static wake_word_state_t s_wake = {0};
+static portMUX_TYPE s_direction_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void wake_word_log_heap(const char *stage)
 {
@@ -56,7 +65,7 @@ static esp_codec_dev_sample_info_t wake_word_sample_info(void)
 {
     esp_codec_dev_sample_info_t fs = {
         .sample_rate = DEMO_AUDIO_SAMPLE_RATE,
-        .channel = DEMO_AUDIO_CHANNELS,
+        .channel = DEMO_WAKE_AUDIO_CHANNELS,
         .channel_mask = 0,
         .bits_per_sample = DEMO_AUDIO_BITS_PER_SAMPLE,
         .mclk_multiple = 0,
@@ -106,7 +115,7 @@ static esp_err_t wake_word_open_mic(void)
     ESP_LOGI(TAG,
              "wake_word_mic_acquired sample_rate=%d channels=%d model=%s",
              DEMO_AUDIO_SAMPLE_RATE,
-             DEMO_AUDIO_CHANNELS,
+             DEMO_WAKE_AUDIO_CHANNELS,
              DEMO_WAKE_WORD_MODEL_NAME);
     return ESP_OK;
 }
@@ -153,7 +162,8 @@ static esp_err_t wake_word_init_once(void)
         return ESP_ERR_NOT_FOUND;
     }
 
-    afe_config_t *afe_config = afe_config_init("M", s_wake.models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    const char *input_format = DEMO_SOUND_DIRECTION_ENABLED ? "MM" : "M";
+    afe_config_t *afe_config = afe_config_init(input_format, s_wake.models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
     if (afe_config == NULL) {
         ESP_LOGE(TAG, "wake_word_afe_config_failed");
         s_wake.unavailable = true;
@@ -197,6 +207,23 @@ static esp_err_t wake_word_init_once(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+#if DEMO_SOUND_DIRECTION_ENABLED
+    s_wake.doa = esp_doa_create(DEMO_AUDIO_SAMPLE_RATE,
+                                DEMO_SOUND_DIRECTION_RESOLUTION_DEGREES,
+                                DEMO_SOUND_DIRECTION_MIC_SPACING_METERS,
+                                DEMO_SOUND_DIRECTION_FRAME_SAMPLES);
+    if (s_wake.doa == NULL) {
+        ESP_LOGW(TAG, "sound_direction_init_failed; wake word remains available");
+    } else {
+        ESP_LOGI(TAG,
+                 "sound_direction_ready channels=%d spacing_m=%.3f frame_samples=%d resolution_deg=%.1f",
+                 s_wake.feed_channels,
+                 (double)DEMO_SOUND_DIRECTION_MIC_SPACING_METERS,
+                 DEMO_SOUND_DIRECTION_FRAME_SAMPLES,
+                 (double)DEMO_SOUND_DIRECTION_RESOLUTION_DEGREES);
+    }
+#endif
+
     s_wake.initialized = true;
     wake_word_log_heap("init_after");
     ESP_LOGI(TAG,
@@ -223,6 +250,25 @@ static void wake_word_feed_task(void *arg)
         s_wake.stop_requested = true;
     }
 
+    int16_t *doa_left = NULL;
+    int16_t *doa_right = NULL;
+    size_t doa_fill = 0;
+#if DEMO_SOUND_DIRECTION_ENABLED
+    if (s_wake.doa != NULL && s_wake.feed_channels >= 2) {
+        const size_t channel_bytes = DEMO_SOUND_DIRECTION_FRAME_SAMPLES * sizeof(int16_t);
+        doa_left = heap_caps_malloc(channel_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        doa_right = heap_caps_malloc(channel_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (doa_left == NULL || doa_right == NULL) {
+            heap_caps_free(doa_left);
+            heap_caps_free(doa_right);
+            doa_left = NULL;
+            doa_right = NULL;
+            ESP_LOGW(TAG, "sound_direction_frame_alloc_failed bytes_per_channel=%u",
+                     (unsigned)channel_bytes);
+        }
+    }
+#endif
+
     while (!s_wake.stop_requested && buffer != NULL) {
         esp_err_t ret = esp_codec_dev_read(s_wake.mic_handle, buffer, (int)buffer_bytes);
         if (ret != ESP_CODEC_DEV_OK) {
@@ -233,8 +279,45 @@ static void wake_word_feed_task(void *arg)
         if (s_wake.afe_iface != NULL && s_wake.afe_data != NULL) {
             (void)s_wake.afe_iface->feed(s_wake.afe_data, buffer);
         }
+#if DEMO_SOUND_DIRECTION_ENABLED
+        if (doa_left != NULL && doa_right != NULL) {
+            for (int sample = 0; sample < s_wake.feed_samples; ++sample) {
+                doa_left[doa_fill] = buffer[(sample * s_wake.feed_channels)];
+                doa_right[doa_fill] = buffer[(sample * s_wake.feed_channels) + 1];
+                doa_fill++;
+                if (doa_fill == DEMO_SOUND_DIRECTION_FRAME_SAMPLES) {
+                    int64_t energy = 0;
+                    for (size_t index = 0; index < doa_fill; ++index) {
+                        const int32_t left = doa_left[index];
+                        const int32_t right = doa_right[index];
+                        energy += ((int64_t)left * left + (int64_t)right * right) / 2;
+                    }
+                    const int64_t minimum_energy =
+                        (int64_t)DEMO_SOUND_DIRECTION_MIN_RMS *
+                        (int64_t)DEMO_SOUND_DIRECTION_MIN_RMS *
+                        (int64_t)doa_fill;
+                    if (energy >= minimum_energy) {
+                        float angle = esp_doa_process(s_wake.doa, doa_left, doa_right);
+                        if (angle >= 0.0f && angle <= 180.0f) {
+#if DEMO_SOUND_DIRECTION_REVERSED
+                            angle = 180.0f - angle;
+#endif
+                            taskENTER_CRITICAL(&s_direction_lock);
+                            s_wake.latest_direction_degrees = (int)(angle + 0.5f);
+                            s_wake.latest_direction_us = esp_timer_get_time();
+                            s_wake.latest_direction_valid = true;
+                            taskEXIT_CRITICAL(&s_direction_lock);
+                        }
+                    }
+                    doa_fill = 0;
+                }
+            }
+        }
+#endif
     }
 
+    heap_caps_free(doa_left);
+    heap_caps_free(doa_right);
     if (buffer != NULL) {
         heap_caps_free(buffer);
     }
@@ -256,14 +339,23 @@ static void wake_word_fetch_task(void *arg)
         if (result->wakeup_state == WAKENET_DETECTED) {
             strlcpy(s_wake.detected_word, DEMO_WAKE_WORD_TEXT, sizeof(s_wake.detected_word));
             strlcpy(s_wake.detected_model, DEMO_WAKE_WORD_MODEL_NAME, sizeof(s_wake.detected_model));
+            taskENTER_CRITICAL(&s_direction_lock);
+            const int64_t direction_age_us = esp_timer_get_time() - s_wake.latest_direction_us;
+            s_wake.detected_direction_valid = s_wake.latest_direction_valid &&
+                                                direction_age_us >= 0 &&
+                                                direction_age_us <= 1500000;
+            s_wake.detected_direction_degrees = s_wake.latest_direction_degrees;
+            taskEXIT_CRITICAL(&s_direction_lock);
             s_wake.event_pending = true;
             s_wake.stop_requested = true;
             ESP_LOGI(TAG,
-                     "wake_word_detected word=%s model=%s wake_word_index=%d wakenet_model_index=%d",
+                     "wake_word_detected word=%s model=%s wake_word_index=%d wakenet_model_index=%d direction_valid=%d direction_degrees=%d",
                      s_wake.detected_word,
                      s_wake.detected_model,
                      result->wake_word_index,
-                     result->wakenet_model_index);
+                     result->wakenet_model_index,
+                     s_wake.detected_direction_valid ? 1 : 0,
+                     s_wake.detected_direction_degrees);
             break;
         }
     }
@@ -305,6 +397,13 @@ esp_err_t wake_word_service_start(void)
     s_wake.event_pending = false;
     s_wake.detected_word[0] = '\0';
     s_wake.detected_model[0] = '\0';
+    s_wake.detected_direction_valid = false;
+    s_wake.detected_direction_degrees = 90;
+    taskENTER_CRITICAL(&s_direction_lock);
+    s_wake.latest_direction_valid = false;
+    s_wake.latest_direction_degrees = 90;
+    s_wake.latest_direction_us = 0;
+    taskEXIT_CRITICAL(&s_direction_lock);
     s_wake.running = true;
 
     BaseType_t ok = xTaskCreate(wake_word_feed_task,
@@ -401,6 +500,8 @@ bool wake_word_service_poll(wake_word_detection_t *out_detection)
     memset(out_detection, 0, sizeof(*out_detection));
     strlcpy(out_detection->word, s_wake.detected_word, sizeof(out_detection->word));
     strlcpy(out_detection->model, s_wake.detected_model, sizeof(out_detection->model));
+    out_detection->direction_valid = s_wake.detected_direction_valid;
+    out_detection->direction_degrees = (int16_t)s_wake.detected_direction_degrees;
     s_wake.event_pending = false;
     return true;
 }

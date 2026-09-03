@@ -10,6 +10,8 @@
 typedef struct {
     char word[64];
     char model[64];
+    bool direction_valid;
+    int16_t direction_degrees;
 } wake_word_detection_t;
 
 esp_err_t wake_word_service_start(void);

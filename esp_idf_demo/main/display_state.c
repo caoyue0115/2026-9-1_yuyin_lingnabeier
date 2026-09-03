@@ -44,6 +44,11 @@ static lv_obj_t *s_state_image;
 static lv_obj_t *s_orb;
 static lv_obj_t *s_title;
 static lv_obj_t *s_subtitle;
+static lv_obj_t *s_direction_marker;
+static bool s_direction_valid;
+static int s_direction_degrees = 90;
+static uint32_t s_direction_revision;
+static uint32_t s_rendered_direction_revision;
 static lv_image_dsc_t s_state_image_dsc;
 static idle_video_t *s_state_videos[DISPLAY_VIDEO_COUNT];
 static idle_video_decoder_t *s_video_decoder;
@@ -150,6 +155,17 @@ static void display_create_ui(void)
     lv_obj_set_style_text_letter_space(s_subtitle, 1, 0);
     lv_obj_align(s_subtitle, LV_ALIGN_CENTER, 0, 86);
 
+    s_direction_marker = lv_obj_create(screen);
+    lv_obj_remove_flag(s_direction_marker, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(s_direction_marker, 18, 18);
+    lv_obj_set_style_radius(s_direction_marker, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_direction_marker, 3, 0);
+    lv_obj_set_style_border_color(s_direction_marker, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_color(s_direction_marker, lv_color_hex(0xFF80B5), 0);
+    lv_obj_set_style_shadow_color(s_direction_marker, lv_color_hex(0xFF80B5), 0);
+    lv_obj_set_style_shadow_width(s_direction_marker, 16, 0);
+    lv_obj_add_flag(s_direction_marker, LV_OBJ_FLAG_HIDDEN);
+
     lv_anim_t animation;
     lv_anim_init(&animation);
     lv_anim_set_var(&animation, s_orb);
@@ -231,6 +247,27 @@ static void display_render_state(display_ui_state_t state, display_video_asset_t
     lv_obj_set_style_shadow_color(s_orb, lv_color_hex(color), 0);
     lv_obj_align(s_title, LV_ALIGN_CENTER, 0, -10);
     lv_obj_align(s_subtitle, LV_ALIGN_CENTER, 0, 86);
+}
+
+static void display_render_sound_direction(display_ui_state_t state, bool valid, int degrees)
+{
+    if (s_direction_marker == NULL || !valid || state == DISPLAY_UI_IDLE ||
+        state == DISPLAY_UI_BOOT || state == DISPLAY_UI_NETWORK_REQUIRED ||
+        state == DISPLAY_UI_ERROR) {
+        if (s_direction_marker != NULL) {
+            lv_obj_add_flag(s_direction_marker, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+    if (degrees < 0) {
+        degrees = 0;
+    } else if (degrees > 180) {
+        degrees = 180;
+    }
+    const int x = ((degrees - 90) * 128) / 90;
+    lv_obj_align(s_direction_marker, LV_ALIGN_CENTER, x, 136);
+    lv_obj_remove_flag(s_direction_marker, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_direction_marker);
 }
 
 static void display_close_video_set(idle_video_t **videos,
@@ -476,12 +513,18 @@ static void display_task(void *arg)
         display_ui_state_t ui_state;
         display_power_state_t current_power;
         display_video_asset_t published_asset;
+        bool direction_valid;
+        int direction_degrees;
+        uint32_t direction_revision;
         int64_t last_activity_us;
         taskENTER_CRITICAL(&s_lock);
         ui_state = s_ui_state;
         current_power = s_power_state;
         last_activity_us = s_last_activity_us;
         published_asset = s_published_video_asset;
+        direction_valid = s_direction_valid;
+        direction_degrees = s_direction_degrees;
+        direction_revision = s_direction_revision;
         taskEXIT_CRITICAL(&s_lock);
 
         display_power_state_t desired_power = DISPLAY_POWER_ACTIVE;
@@ -501,11 +544,14 @@ static void display_task(void *arg)
             display_apply_power(desired_power);
         }
 
-        if ((ui_state != s_rendered_state || published_asset != s_rendered_video_asset) &&
+        if ((ui_state != s_rendered_state || published_asset != s_rendered_video_asset ||
+             direction_revision != s_rendered_direction_revision) &&
             bsp_display_lock(100)) {
             display_render_state(ui_state, published_asset);
+            display_render_sound_direction(ui_state, direction_valid, direction_degrees);
             s_rendered_state = ui_state;
             s_rendered_video_asset = published_asset;
+            s_rendered_direction_revision = direction_revision;
             bsp_display_unlock();
         }
         vTaskDelay(pdMS_TO_TICKS(DEMO_DISPLAY_POLL_MS));
@@ -613,6 +659,24 @@ void display_state_notify_wake_word(void)
 {
     ESP_LOGI(TAG, "display_wake source=wake_word");
     display_state_set(DISPLAY_UI_LISTENING);
+}
+
+void display_state_set_sound_direction(int degrees, bool valid)
+{
+    if (!s_initialized) {
+        return;
+    }
+    if (degrees < 0) {
+        degrees = 0;
+    } else if (degrees > 180) {
+        degrees = 180;
+    }
+    taskENTER_CRITICAL(&s_lock);
+    s_direction_valid = valid;
+    s_direction_degrees = degrees;
+    s_direction_revision++;
+    taskEXIT_CRITICAL(&s_lock);
+    ESP_LOGI(TAG, "sound_direction valid=%d degrees=%d", valid ? 1 : 0, degrees);
 }
 
 bool display_state_is_off(void)

@@ -21,6 +21,7 @@ typedef enum {
 esp_err_t display_state_init(void);
 void display_state_set(display_ui_state_t state);
 void display_state_notify_wake_word(void);
+void display_state_set_sound_direction(int degrees, bool valid);
 bool display_state_is_off(void);
 
 #ifdef __cplusplus

@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from redis import Redis
 
 from src.api.ota import router as ota_router
+from src.api.demo import router as demo_router
 from src.api.realtime import router as realtime_router
 from src.api.realtime_v6 import router as realtime_v6_router
 from src.api.tasks import router as tasks_router
@@ -20,6 +21,7 @@ app.include_router(tasks_router)
 app.include_router(realtime_router)
 app.include_router(realtime_v6_router)
 app.include_router(ota_router)
+app.include_router(demo_router)
 
 
 @app.get("/", tags=["meta"])
