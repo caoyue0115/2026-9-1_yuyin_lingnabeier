@@ -63,6 +63,29 @@ static bool prompt_arbiter_network_prompt_is_relevant(prompt_id_t id)
     return true;
 }
 
+static size_t prompt_arbiter_pcm_bytes_with_tail(const uint8_t *start,
+                                                 size_t bytes,
+                                                 uint32_t tail_ms)
+{
+    if (start == NULL || bytes < sizeof(int16_t) || tail_ms == 0) {
+        return bytes;
+    }
+
+    size_t audible_bytes = bytes;
+    while (audible_bytes >= sizeof(int16_t) &&
+           start[audible_bytes - 1] == 0 && start[audible_bytes - 2] == 0) {
+        audible_bytes -= sizeof(int16_t);
+    }
+    const size_t tail_bytes =
+        ((size_t)DEMO_AUDIO_SAMPLE_RATE * DEMO_AUDIO_CHANNELS *
+         DEMO_AUDIO_BYTES_PER_SAMPLE * tail_ms) /
+        1000U;
+    if (audible_bytes == 0 || audible_bytes + tail_bytes >= bytes) {
+        return bytes;
+    }
+    return (audible_bytes + tail_bytes) & ~(sizeof(int16_t) - 1U);
+}
+
 static esp_err_t prompt_arbiter_play(prompt_id_t id)
 {
     const uint8_t *start = NULL;
@@ -104,9 +127,24 @@ static esp_err_t prompt_arbiter_play(prompt_id_t id)
         return ESP_ERR_NOT_SUPPORTED;
     }
 
-    const size_t bytes = (size_t)(end - start);
+    size_t bytes = (size_t)(end - start);
     if (bytes == 0 || (bytes & 1U) != 0U) {
         return ESP_ERR_INVALID_SIZE;
+    }
+    if (id == PROMPT_FOLLOWUP_CUE) {
+        const size_t source_bytes = bytes;
+        bytes = prompt_arbiter_pcm_bytes_with_tail(start,
+                                                   source_bytes,
+                                                   DEMO_FOLLOWUP_PROMPT_TAIL_MS);
+        ESP_LOGI(TAG,
+                 "followup_prompt_trim source_ms=%u playback_ms=%u retained_tail_ms=%u",
+                 (unsigned)(source_bytes * 1000U /
+                            (DEMO_AUDIO_SAMPLE_RATE * DEMO_AUDIO_CHANNELS *
+                             DEMO_AUDIO_BYTES_PER_SAMPLE)),
+                 (unsigned)(bytes * 1000U /
+                            (DEMO_AUDIO_SAMPLE_RATE * DEMO_AUDIO_CHANNELS *
+                             DEMO_AUDIO_BYTES_PER_SAMPLE)),
+                 (unsigned)DEMO_FOLLOWUP_PROMPT_TAIL_MS);
     }
     return audio_out_play_pcm_buffer(start,
                                      bytes,

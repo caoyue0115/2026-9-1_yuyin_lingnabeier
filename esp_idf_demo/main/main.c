@@ -195,6 +195,9 @@ static void app_log_runtime_config(void)
     ESP_LOGI(TAG, "  record_retry_error_prompt_path=%s", DEMO_RECORD_RETRY_ERROR_PROMPT_PATH);
     ESP_LOGI(TAG, "  wait_for_speech_timeout_ms=%d", DEMO_WAIT_FOR_SPEECH_TIMEOUT_MS);
     ESP_LOGI(TAG, "  waiting_speech_arm_ms=%d", DEMO_WAITING_SPEECH_ARM_MS);
+    ESP_LOGI(TAG, "  followup_waiting_speech_arm_ms=%d", DEMO_FOLLOWUP_WAITING_SPEECH_ARM_MS);
+    ESP_LOGI(TAG, "  followup_prompt_tail_ms=%d", DEMO_FOLLOWUP_PROMPT_TAIL_MS);
+    ESP_LOGI(TAG, "  speech_preroll_ms=%d", DEMO_SPEECH_PREROLL_MS);
     ESP_LOGI(TAG, "  speech_start_hold_ms=%d", DEMO_SPEECH_START_HOLD_MS);
     ESP_LOGI(TAG, "  record_after_speech_max_ms=%d", DEMO_RECORD_AFTER_SPEECH_MAX_MS);
     ESP_LOGI(TAG, "  mic_init_retry_count=%d", DEMO_MIC_INIT_RETRY_COUNT);

@@ -294,8 +294,15 @@ esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
         return ret;
     }
 
+    const size_t prefix_capacity = DEMO_SPEECH_PREROLL_BYTES +
+                                   DEMO_SPEECH_START_HOLD_BYTES;
     uint8_t *chunk = malloc(DEMO_AUDIO_CHUNK_BYTES);
-    uint8_t *speech_prefix = calloc(1, DEMO_SPEECH_START_HOLD_BYTES + DEMO_AUDIO_CHUNK_BYTES);
+    uint8_t *speech_prefix = heap_caps_calloc(1,
+                                              prefix_capacity,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (speech_prefix == NULL) {
+        speech_prefix = calloc(1, prefix_capacity);
+    }
     if (chunk == NULL || speech_prefix == NULL) {
         free(chunk);
         free(speech_prefix);
@@ -339,16 +346,18 @@ esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
             armed_logged = true;
         }
 
+        if (prefix_bytes + DEMO_AUDIO_CHUNK_BYTES > prefix_capacity) {
+            const size_t discard_bytes =
+                prefix_bytes + DEMO_AUDIO_CHUNK_BYTES - prefix_capacity;
+            memmove(speech_prefix,
+                    speech_prefix + discard_bytes,
+                    prefix_bytes - discard_bytes);
+            prefix_bytes -= discard_bytes;
+        }
+        memcpy(speech_prefix + prefix_bytes, chunk, DEMO_AUDIO_CHUNK_BYTES);
+        prefix_bytes += DEMO_AUDIO_CHUNK_BYTES;
+
         if (chunk_level >= start_threshold) {
-            const size_t prefix_capacity = DEMO_SPEECH_START_HOLD_BYTES + DEMO_AUDIO_CHUNK_BYTES;
-            if (prefix_bytes + DEMO_AUDIO_CHUNK_BYTES > prefix_capacity) {
-                memmove(speech_prefix,
-                        speech_prefix + DEMO_AUDIO_CHUNK_BYTES,
-                        prefix_bytes - DEMO_AUDIO_CHUNK_BYTES);
-                prefix_bytes -= DEMO_AUDIO_CHUNK_BYTES;
-            }
-            memcpy(speech_prefix + prefix_bytes, chunk, DEMO_AUDIO_CHUNK_BYTES);
-            prefix_bytes += DEMO_AUDIO_CHUNK_BYTES;
             hold_bytes += DEMO_AUDIO_CHUNK_BYTES;
             if (hold_bytes >= DEMO_SPEECH_START_HOLD_BYTES) {
                 if (out_metrics != NULL) {
@@ -363,7 +372,6 @@ esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
             }
         } else {
             hold_bytes = 0;
-            prefix_bytes = 0;
         }
     }
 

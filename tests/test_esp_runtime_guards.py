@@ -309,6 +309,8 @@ class EspRuntimeGuardTests(unittest.TestCase):
 
         self.assertIn("#define DEMO_FOLLOWUP_VAD_START_THRESHOLD 800", config_h)
         self.assertIn("#define DEMO_FOLLOWUP_WAITING_SPEECH_ARM_MS 0", config_h)
+        self.assertIn("#define DEMO_FOLLOWUP_PROMPT_TAIL_MS 60", config_h)
+        self.assertIn("#define DEMO_SPEECH_PREROLL_MS 256", config_h)
         self.assertIn("uint32_t start_threshold", audio_in_h)
         self.assertIn("uint32_t arm_delay_ms", audio_in_h)
         self.assertIn(
@@ -320,12 +322,22 @@ class EspRuntimeGuardTests(unittest.TestCase):
             audio_in_c,
         )
         self.assertIn("chunk_level >= start_threshold", audio_in_c)
+        self.assertIn("prefix_capacity = DEMO_SPEECH_PREROLL_BYTES", audio_in_c)
+        self.assertIn("heap_caps_calloc(1,", audio_in_c)
+        self.assertNotIn("prefix_bytes = 0;\n        }", audio_in_c)
         self.assertIn(
             "controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW",
             main_c,
         )
         self.assertIn("DEMO_FOLLOWUP_VAD_START_THRESHOLD", main_c)
         self.assertIn("DEMO_FOLLOWUP_WAITING_SPEECH_ARM_MS", main_c)
+        self.assertIn('"  followup_prompt_tail_ms=%d"', main_c)
+        self.assertIn('"  speech_preroll_ms=%d"', main_c)
+
+        prompt_c = (ESP_MAIN / "prompt_arbiter.c").read_text(encoding="utf-8")
+        self.assertIn("prompt_arbiter_pcm_bytes_with_tail", prompt_c)
+        self.assertIn("id == PROMPT_FOLLOWUP_CUE", prompt_c)
+        self.assertIn("DEMO_FOLLOWUP_PROMPT_TAIL_MS", prompt_c)
 
     def test_v6_websocket_json_parser_ignores_control_frames(self) -> None:
         conversation_c = (ESP_MAIN / "cloud_conversation.c").read_text(encoding="utf-8")
