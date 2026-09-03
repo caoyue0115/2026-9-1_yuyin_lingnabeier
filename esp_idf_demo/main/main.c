@@ -554,9 +554,14 @@ static esp_err_t run_v6_conversation(app_state_t *state)
             controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW
                 ? DEMO_FOLLOWUP_VAD_START_THRESHOLD
                 : DEMO_RECORD_VAD_START_THRESHOLD;
+        const uint32_t arm_delay_ms =
+            controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW
+                ? DEMO_FOLLOWUP_WAITING_SPEECH_ARM_MS
+                : DEMO_WAITING_SPEECH_ARM_MS;
         ret = audio_in_wait_for_speech_start(&speech_prefix,
                                              &speech_prefix_bytes,
                                              start_threshold,
+                                             arm_delay_ms,
                                              &wait_metrics);
         if (ret == DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT) {
             conversation_transition_t timeout = conversation_controller_handle(
@@ -940,6 +945,7 @@ static esp_err_t __attribute__((unused)) run_trigger_pipeline(app_state_t *state
             ret = audio_in_wait_for_speech_start(&speech_prefix,
                                                  &speech_prefix_bytes,
                                                  DEMO_RECORD_VAD_START_THRESHOLD,
+                                                 DEMO_WAITING_SPEECH_ARM_MS,
                                                  &wait_metrics);
             if (ret == ESP_OK || ret == DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT) {
                 break;

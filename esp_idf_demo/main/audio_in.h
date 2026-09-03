@@ -34,6 +34,7 @@ esp_err_t audio_in_probe(void);
 esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
                                          size_t *out_speech_prefix_bytes,
                                          uint32_t start_threshold,
+                                         uint32_t arm_delay_ms,
                                          audio_in_wait_metrics_t *out_metrics);
 
 // Continues capture from an already-open microphone after speech start was detected.

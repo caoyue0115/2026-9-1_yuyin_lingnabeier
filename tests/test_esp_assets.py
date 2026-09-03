@@ -668,6 +668,12 @@ class EspAssetTests(unittest.TestCase):
             self.assertGreaterEqual(peak, 7_000)
             self.assertLess(peak, 30_000)
 
+        # Follow-up recording is armed immediately after this cue. Keep the
+        # generated half-second silent tail so speaker decay cannot trip VAD.
+        followup = (ESP_DIR / "spiffs" / "followup_1.pcm").read_bytes()
+        half_second_pcm16_mono = 16_000
+        self.assertEqual(followup[-half_second_pcm16_mono:], b"\x00" * half_second_pcm16_mono)
+
     def test_wifi_board_lite_raises_event_task_stack_for_esp_wifi_connect_callbacks(self) -> None:
         sdkconfig_defaults = (ESP_DIR / "sdkconfig.defaults.vocat_lowcost_16m8m").read_text(encoding="utf-8")
         package_script = (ROOT / "scripts" / "package_esp_compile_only.py").read_text(encoding="utf-8")

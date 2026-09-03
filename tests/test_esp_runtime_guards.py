@@ -301,16 +301,22 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertIn("CONVERSATION_ACTION_LISTEN_FOLLOWUP", followup_block)
         self.assertNotIn("PROMPT_SPEAK", followup_block)
 
-    def test_followup_listener_rejects_bell_tail_and_keeps_full_five_seconds(self) -> None:
+    def test_followup_listener_starts_immediately_and_keeps_full_five_seconds(self) -> None:
         config_h = (ESP_MAIN / "config.h").read_text(encoding="utf-8")
         audio_in_h = (ESP_MAIN / "audio_in.h").read_text(encoding="utf-8")
         audio_in_c = (ESP_MAIN / "audio_in.c").read_text(encoding="utf-8")
         main_c = (ESP_MAIN / "main.c").read_text(encoding="utf-8")
 
         self.assertIn("#define DEMO_FOLLOWUP_VAD_START_THRESHOLD 800", config_h)
+        self.assertIn("#define DEMO_FOLLOWUP_WAITING_SPEECH_ARM_MS 0", config_h)
         self.assertIn("uint32_t start_threshold", audio_in_h)
+        self.assertIn("uint32_t arm_delay_ms", audio_in_h)
         self.assertIn(
             "timeout_at_us = armed_at_us + (int64_t)DEMO_WAIT_FOR_SPEECH_TIMEOUT_MS * 1000",
+            audio_in_c,
+        )
+        self.assertIn(
+            "armed_at_us = wait_start_us + (int64_t)arm_delay_ms * 1000",
             audio_in_c,
         )
         self.assertIn("chunk_level >= start_threshold", audio_in_c)
@@ -319,6 +325,7 @@ class EspRuntimeGuardTests(unittest.TestCase):
             main_c,
         )
         self.assertIn("DEMO_FOLLOWUP_VAD_START_THRESHOLD", main_c)
+        self.assertIn("DEMO_FOLLOWUP_WAITING_SPEECH_ARM_MS", main_c)
 
     def test_v6_websocket_json_parser_ignores_control_frames(self) -> None:
         conversation_c = (ESP_MAIN / "cloud_conversation.c").read_text(encoding="utf-8")

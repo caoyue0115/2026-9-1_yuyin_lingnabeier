@@ -635,6 +635,12 @@
 #ifndef DEMO_WAITING_SPEECH_ARM_MS
 #define DEMO_WAITING_SPEECH_ARM_MS 150
 #endif
+
+// The spoken follow-up cue already contains 500 ms of trailing digital silence,
+// so adding another guard interval here only clips users who answer immediately.
+#ifndef DEMO_FOLLOWUP_WAITING_SPEECH_ARM_MS
+#define DEMO_FOLLOWUP_WAITING_SPEECH_ARM_MS 0
+#endif
 #ifndef DEMO_SPEECH_START_HOLD_MS
 #define DEMO_SPEECH_START_HOLD_MS 128
 #endif
