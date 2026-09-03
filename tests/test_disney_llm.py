@@ -89,6 +89,8 @@ def test_nick_prompt_avoids_repeating_full_identity() -> None:
     prompt = messages[0]["content"]
     assert "通常只叫‘尼克’或‘我的搭档’" in prompt
     assert "不要每次都念" in prompt
+    assert "用户只问和尼克的关系时" in prompt
+    assert "不要顺带介绍他的全名、过去职业" in prompt
 
 
 def test_reference_scope_wins_over_old_conversation_words() -> None:
@@ -103,6 +105,22 @@ def test_reference_scope_wins_over_old_conversation_words() -> None:
         ],
     )
     assert "本题不属于朱迪亲历" in messages[0]["content"]
+
+
+def test_direct_acquaintance_question_uses_a_human_sounding_boundary() -> None:
+    messages = _build_messages(
+        "你认识玲娜贝儿吗？",
+        [
+            {
+                "source_title": "玲娜贝儿",
+                "snippet": "玲娜贝儿是一只爱探索的小狐狸。",
+                "knowledge_scope": "disney_hearsay",
+            }
+        ],
+    )
+    prompt = messages[0]["content"]
+    assert "优先说‘还没见过’或‘没有打过交道’" in prompt
+    assert "不要使用生硬的‘我不认识’" in prompt
 
 
 def test_prompt_separates_real_park_from_judys_story_city_and_keeps_dates_absolute() -> None:
