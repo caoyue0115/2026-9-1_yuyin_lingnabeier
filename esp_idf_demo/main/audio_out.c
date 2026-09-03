@@ -16,6 +16,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/ringbuf.h"
 #include "freertos/task.h"
@@ -36,6 +37,7 @@ typedef struct {
     esp_codec_dev_handle_t speaker_handle;
     RingbufHandle_t jitter_ringbuf;
     TaskHandle_t stream_task;
+    bool stream_task_stack_with_caps;
     bool stream_task_done;
     esp_err_t stream_task_result;
     size_t jitter_total_in;
@@ -66,6 +68,7 @@ static audio_out_state_t s_audio_out_state = {
     .speaker_handle = NULL,
     .jitter_ringbuf = NULL,
     .stream_task = NULL,
+    .stream_task_stack_with_caps = false,
     .stream_task_done = true,
     .stream_task_result = ESP_OK,
     .jitter_total_in = 0,
@@ -803,6 +806,7 @@ esp_err_t audio_out_open_pcm_stream(uint32_t sample_rate,
         s_audio_out_state.opened = true;
         s_audio_out_state.stream_task_started = false;
         s_audio_out_state.stream_task = NULL;
+        s_audio_out_state.stream_task_stack_with_caps = false;
         s_audio_out_state.stream_task_done = true;
         s_audio_out_state.stream_task_result = ESP_OK;
         s_audio_out_state.jitter_total_in = 0;
@@ -888,15 +892,28 @@ esp_err_t audio_out_write_pcm_chunk_buffered(const uint8_t *pcm_bytes,
     if (!s_audio_out_state.stream_task_started) {
         s_audio_out_state.stream_task_started = true;
         s_audio_out_state.stream_task_done = false;
-        BaseType_t task_ret = xTaskCreate(audio_stream_task,
-                                          "audio_stream",
-                                          4096,
-                                          NULL,
-                                          DEMO_PIPELINE_TASK_PRIORITY + 1,
-                                          &s_audio_out_state.stream_task);
+        BaseType_t task_ret = pdFAIL;
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+        task_ret = xTaskCreateWithCaps(audio_stream_task,
+                                       "audio_stream",
+                                       4096,
+                                       NULL,
+                                       DEMO_PIPELINE_TASK_PRIORITY + 1,
+                                       &s_audio_out_state.stream_task,
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_audio_out_state.stream_task_stack_with_caps = task_ret == pdPASS;
+#else
+        task_ret = xTaskCreate(audio_stream_task,
+                               "audio_stream",
+                               4096,
+                               NULL,
+                               DEMO_PIPELINE_TASK_PRIORITY + 1,
+                               &s_audio_out_state.stream_task);
+#endif
         if (task_ret != pdPASS) {
             s_audio_out_state.stream_task_started = false;
             s_audio_out_state.stream_task = NULL;
+            s_audio_out_state.stream_task_stack_with_caps = false;
             s_audio_out_state.stream_task_done = true;
             audio_out_unlock();
             return ESP_ERR_NO_MEM;
@@ -993,6 +1010,8 @@ esp_err_t audio_out_close_pcm_stream_with_metrics(audio_out_jitter_metrics_t *me
             const int64_t underrun_us = s_audio_out_state.jitter_underrun_us;
             const bool playback_started = s_audio_out_state.jitter_playback_started;
             TaskHandle_t stream_task = s_audio_out_state.stream_task;
+            const bool stream_task_stack_with_caps =
+                s_audio_out_state.stream_task_stack_with_caps;
             audio_out_unlock();
             if (stream_task_done) {
                 if (stream_task != NULL) {
@@ -1007,7 +1026,11 @@ esp_err_t audio_out_close_pcm_stream_with_metrics(audio_out_jitter_metrics_t *me
                         ESP_LOGE(TAG, "Realtime jitter task did not suspend after completion");
                         return ESP_ERR_TIMEOUT;
                     }
-                    vTaskDelete(stream_task);
+                    if (stream_task_stack_with_caps) {
+                        vTaskDeleteWithCaps(stream_task);
+                    } else {
+                        vTaskDelete(stream_task);
+                    }
                 }
                 break;
             }
@@ -1049,6 +1072,7 @@ esp_err_t audio_out_close_pcm_stream_with_metrics(audio_out_jitter_metrics_t *me
             return ret;
         }
         s_audio_out_state.stream_task = NULL;
+        s_audio_out_state.stream_task_stack_with_caps = false;
         s_audio_out_state.stream_task_done = true;
     }
 

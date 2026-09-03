@@ -23,9 +23,11 @@
 #define PLAYBACK_REAPER_STACK_BYTES 4096
 
 static const char *TAG = "playback_session";
+#if !CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
 static StaticTask_t s_playback_reaper_task;
 static StackType_t
     s_playback_reaper_stack[PLAYBACK_REAPER_STACK_BYTES / sizeof(StackType_t)];
+#endif
 static StaticQueue_t s_playback_reaper_queue;
 static uint8_t s_playback_reaper_queue_storage[sizeof(playback_session_t *)];
 static portMUX_TYPE s_playback_reaper_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -141,6 +143,17 @@ static esp_err_t playback_session_ensure_reaper(void)
                                              &s_playback_reaper_queue);
     TaskHandle_t task = NULL;
     if (queue != NULL) {
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+        if (xTaskCreateWithCaps(playback_session_reaper,
+                                "playback_reaper",
+                                PLAYBACK_REAPER_STACK_BYTES,
+                                queue,
+                                tskIDLE_PRIORITY + 1,
+                                &task,
+                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+            task = NULL;
+        }
+#else
         task = xTaskCreateStatic(playback_session_reaper,
                                  "playback_reaper",
                                  PLAYBACK_REAPER_STACK_BYTES,
@@ -148,6 +161,7 @@ static esp_err_t playback_session_ensure_reaper(void)
                                  tskIDLE_PRIORITY + 1,
                                  s_playback_reaper_stack,
                                  &s_playback_reaper_task);
+#endif
     }
 
     taskENTER_CRITICAL(&s_playback_reaper_lock);

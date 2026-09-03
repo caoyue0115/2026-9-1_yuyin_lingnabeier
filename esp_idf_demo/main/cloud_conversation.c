@@ -4,6 +4,7 @@
 
 #include "cJSON.h"
 #include "esp_audio_enc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_opus_enc.h"
 #include "esp_system.h"
@@ -310,9 +311,12 @@ static esp_err_t v6_open_encoder(cloud_conversation_t *conversation)
     conversation->pcm_frame_size = (size_t)input_size;
     conversation->opus_frame_size = (size_t)output_size;
     conversation->ws_frame_size = 10 + conversation->opus_frame_size;
-    conversation->pcm_frame = calloc(1, conversation->pcm_frame_size);
-    conversation->opus_frame = calloc(1, conversation->opus_frame_size);
-    conversation->ws_frame = calloc(1, conversation->ws_frame_size);
+    conversation->pcm_frame = heap_caps_calloc(
+        1, conversation->pcm_frame_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    conversation->opus_frame = heap_caps_calloc(
+        1, conversation->opus_frame_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    conversation->ws_frame = heap_caps_calloc(
+        1, conversation->ws_frame_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     return conversation->pcm_frame != NULL && conversation->opus_frame != NULL &&
                    conversation->ws_frame != NULL
                ? ESP_OK
@@ -377,7 +381,8 @@ esp_err_t cloud_conversation_open(cloud_conversation_t **out)
         return ESP_ERR_INVALID_ARG;
     }
     *out = NULL;
-    cloud_conversation_t *conversation = calloc(1, sizeof(*conversation));
+    cloud_conversation_t *conversation = heap_caps_calloc(
+        1, sizeof(*conversation), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (conversation == NULL) {
         return ESP_ERR_NO_MEM;
     }

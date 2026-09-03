@@ -549,12 +549,23 @@ esp_err_t display_state_init(void)
     s_power_state = DISPLAY_POWER_ACTIVE;
     s_initialized = true;
     (void)bsp_display_brightness_set(DEMO_DISPLAY_ACTIVE_BRIGHTNESS);
-    BaseType_t created = xTaskCreate(display_task,
-                                     "disney_display",
-                                     DEMO_DISPLAY_TASK_STACK_SIZE,
-                                     NULL,
-                                     tskIDLE_PRIORITY + 1,
-                                     &s_display_task);
+    BaseType_t created = pdFAIL;
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    created = xTaskCreateWithCaps(display_task,
+                                  "disney_display",
+                                  DEMO_DISPLAY_TASK_STACK_SIZE,
+                                  NULL,
+                                  tskIDLE_PRIORITY + 1,
+                                  &s_display_task,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    created = xTaskCreate(display_task,
+                          "disney_display",
+                          DEMO_DISPLAY_TASK_STACK_SIZE,
+                          NULL,
+                          tskIDLE_PRIORITY + 1,
+                          &s_display_task);
+#endif
     if (created != pdPASS) {
         return ESP_ERR_NO_MEM;
     }

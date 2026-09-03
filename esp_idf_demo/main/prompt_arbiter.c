@@ -4,8 +4,10 @@
 #include "config.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 
 #include <stdint.h>
@@ -254,12 +256,23 @@ esp_err_t prompt_arbiter_init(void)
     if (s_owner_task != NULL) {
         return ESP_OK;
     }
-    const BaseType_t created = xTaskCreate(prompt_arbiter_owner_task,
-                                           "prompt_owner",
-                                           4096,
-                                           NULL,
-                                           tskIDLE_PRIORITY + 2,
-                                           &s_owner_task);
+    BaseType_t created = pdFAIL;
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    created = xTaskCreateWithCaps(prompt_arbiter_owner_task,
+                                  "prompt_owner",
+                                  4096,
+                                  NULL,
+                                  tskIDLE_PRIORITY + 2,
+                                  &s_owner_task,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    created = xTaskCreate(prompt_arbiter_owner_task,
+                          "prompt_owner",
+                          4096,
+                          NULL,
+                          tskIDLE_PRIORITY + 2,
+                          &s_owner_task);
+#endif
     return created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 

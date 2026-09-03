@@ -21,6 +21,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -237,8 +238,10 @@ static void app_log_runtime_config(void)
 static void app_log_heap_snapshot(const char *stage)
 {
     ESP_LOGI(TAG,
-             "heap stage=%s free_8bit=%u largest_8bit=%u free_spiram=%u largest_spiram=%u",
+             "heap stage=%s free_internal=%u largest_internal=%u free_8bit=%u largest_8bit=%u free_spiram=%u largest_spiram=%u",
              stage != NULL ? stage : "unknown",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
@@ -459,7 +462,11 @@ static void app_v6_open_task(void *arg)
     app_v6_open_task_t *task = (app_v6_open_task_t *)arg;
     task->result = cloud_conversation_open(&task->conversation);
     task->done = true;
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    vTaskDeleteWithCaps(NULL);
+#else
     vTaskDelete(NULL);
+#endif
 }
 
 static esp_err_t app_v6_pcm_sink(const uint8_t *pcm, size_t pcm_bytes, void *user_ctx)
@@ -502,12 +509,24 @@ static esp_err_t run_v6_conversation(app_state_t *state)
 
     app_v6_open_task_t open_task = {0};
     cloud_conversation_t *conversation = NULL;
-    if (xTaskCreate(app_v6_open_task,
-                    "v6_open",
-                    V5_OPUS_UPLINK_WS_TASK_STACK_SIZE,
-                    &open_task,
-                    DEMO_PIPELINE_TASK_PRIORITY,
-                    NULL) != pdPASS) {
+    BaseType_t open_task_created = pdFAIL;
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    open_task_created = xTaskCreateWithCaps(app_v6_open_task,
+                                            "v6_open",
+                                            V5_OPUS_UPLINK_WS_TASK_STACK_SIZE,
+                                            &open_task,
+                                            DEMO_PIPELINE_TASK_PRIORITY,
+                                            NULL,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    open_task_created = xTaskCreate(app_v6_open_task,
+                                    "v6_open",
+                                    V5_OPUS_UPLINK_WS_TASK_STACK_SIZE,
+                                    &open_task,
+                                    DEMO_PIPELINE_TASK_PRIORITY,
+                                    NULL);
+#endif
+    if (open_task_created != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     app_set_state(state, APP_STATE_PLAYING_PROMPT);
@@ -1411,7 +1430,11 @@ static void app_pipeline_task(void *arg)
     s_pipeline_task_handle = NULL;
     s_last_pipeline_finish_us = esp_timer_get_time();
     ESP_LOGI(TAG, "pipeline task finished");
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    vTaskDeleteWithCaps(NULL);
+#else
     vTaskDelete(NULL);
+#endif
 }
 
 static esp_err_t app_start_pipeline_task(const trigger_event_t *event)
@@ -1430,12 +1453,23 @@ static esp_err_t app_start_pipeline_task(const trigger_event_t *event)
     }
     task_args->event = *event;
 
-    BaseType_t ok = xTaskCreate(app_pipeline_task,
-                                "audio_pipeline",
-                                DEMO_PIPELINE_TASK_STACK_SIZE,
-                                task_args,
-                                DEMO_PIPELINE_TASK_PRIORITY,
-                                &s_pipeline_task_handle);
+    BaseType_t ok = pdFAIL;
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    ok = xTaskCreateWithCaps(app_pipeline_task,
+                             "audio_pipeline",
+                             DEMO_PIPELINE_TASK_STACK_SIZE,
+                             task_args,
+                             DEMO_PIPELINE_TASK_PRIORITY,
+                             &s_pipeline_task_handle,
+                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    ok = xTaskCreate(app_pipeline_task,
+                     "audio_pipeline",
+                     DEMO_PIPELINE_TASK_STACK_SIZE,
+                     task_args,
+                     DEMO_PIPELINE_TASK_PRIORITY,
+                     &s_pipeline_task_handle);
+#endif
     if (ok != pdPASS) {
         free(task_args);
         s_pipeline_task_handle = NULL;
@@ -1460,34 +1494,6 @@ static bool app_ota_manifest_idle_ready(int64_t now_us)
     }
     return true;
 }
-
-#if DEMO_OTA_BOOT_SWITCH_ENABLED
-static const char *app_partition_label_or_empty(const esp_partition_t *partition)
-{
-    return partition != NULL ? partition->label : "";
-}
-
-typedef struct {
-    bool pending;
-    char release_id[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
-    char version[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
-    char partition_label[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
-    char sha256[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
-    char last_stage[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
-    uint32_t partition_address;
-} app_ota_p3c_pending_t;
-
-#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
-static volatile bool s_ota_rollback_validation_pending = false;
-static volatile bool s_ota_rollback_business_ready = false;
-static volatile bool s_ota_credential_migration_ready = false;
-static volatile bool s_ota_audio_ready = false;
-static TaskHandle_t s_ota_rollback_validation_task_handle = NULL;
-static TaskHandle_t s_ota_rollback_timeout_task_handle = NULL;
-static app_ota_p3c_pending_t s_ota_rollback_pending = {0};
-static void app_ota_rollback_validation_task(void *arg);
-static void app_ota_rollback_validation_timeout_task(void *arg);
-#endif
 
 static const char *app_reset_reason_to_string(esp_reset_reason_t reason)
 {
@@ -1517,6 +1523,34 @@ static const char *app_reset_reason_to_string(esp_reset_reason_t reason)
         return "unknown";
     }
 }
+
+#if DEMO_OTA_BOOT_SWITCH_ENABLED
+static const char *app_partition_label_or_empty(const esp_partition_t *partition)
+{
+    return partition != NULL ? partition->label : "";
+}
+
+typedef struct {
+    bool pending;
+    char release_id[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char version[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char partition_label[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char sha256[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    char last_stage[DEMO_CLOUD_OTA_FIELD_MAX_LEN];
+    uint32_t partition_address;
+} app_ota_p3c_pending_t;
+
+#if DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
+static volatile bool s_ota_rollback_validation_pending = false;
+static volatile bool s_ota_rollback_business_ready = false;
+static volatile bool s_ota_credential_migration_ready = false;
+static volatile bool s_ota_audio_ready = false;
+static TaskHandle_t s_ota_rollback_validation_task_handle = NULL;
+static TaskHandle_t s_ota_rollback_timeout_task_handle = NULL;
+static app_ota_p3c_pending_t s_ota_rollback_pending = {0};
+static void app_ota_rollback_validation_task(void *arg);
+static void app_ota_rollback_validation_timeout_task(void *arg);
+#endif
 
 static esp_err_t app_ota_p3c_clear_pending(void)
 {
@@ -2657,6 +2691,7 @@ static void app_runtime_task(void *arg)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Disney Voice Assistant Demo starting");
     ESP_LOGI(TAG, "Board: %s %s", DEMO_BOARD_NAME, DEMO_BOARD_REVISION);
+    ESP_LOGI(TAG, "boot_reset_reason=%s", app_reset_reason_to_string(esp_reset_reason()));
     app_log_runtime_config();
     ESP_LOGI(TAG, "========================================");
 

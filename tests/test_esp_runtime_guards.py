@@ -50,7 +50,45 @@ class EspRuntimeGuardTests(unittest.TestCase):
         self.assertNotIn("vTaskDelete(NULL)", task)
         self.assertIn("eTaskGetState(stream_task) != eSuspended", close)
         self.assertEqual(close.count("vTaskDelete(stream_task)"), 1)
+        self.assertIn("xTaskCreateWithCaps(audio_stream_task", audio_out_c)
+        self.assertIn("vTaskDeleteWithCaps(stream_task)", close)
+        self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", audio_out_c)
         self.assertNotIn("forcing task delete", close)
+
+    def test_v6_pipeline_and_open_stacks_use_psram(self) -> None:
+        main_c = (ESP_MAIN / "main.c").read_text(encoding="utf-8")
+
+        self.assertIn("xTaskCreateWithCaps(app_pipeline_task", main_c)
+        self.assertIn("xTaskCreateWithCaps(app_v6_open_task", main_c)
+        self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", main_c)
+        self.assertIn("vTaskDeleteWithCaps(NULL)", main_c)
+        self.assertIn("boot_reset_reason=%s", main_c)
+
+    def test_non_dma_display_prompt_and_reaper_stacks_use_psram(self) -> None:
+        display_c = (ESP_MAIN / "display_state.c").read_text(encoding="utf-8")
+        prompt_c = (ESP_MAIN / "prompt_arbiter.c").read_text(encoding="utf-8")
+        playback_c = (ESP_MAIN / "playback_session.c").read_text(encoding="utf-8")
+
+        self.assertIn("xTaskCreateWithCaps(display_task", display_c)
+        self.assertIn("xTaskCreateWithCaps(prompt_arbiter_owner_task", prompt_c)
+        self.assertIn("xTaskCreateWithCaps(playback_session_reaper", playback_c)
+        for source in (display_c, prompt_c, playback_c):
+            self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", source)
+
+    def test_realtime_packet_and_conversation_buffers_use_psram(self) -> None:
+        cloud_c = (ESP_MAIN / "cloud_client.c").read_text(encoding="utf-8")
+        conversation_c = (ESP_MAIN / "cloud_conversation.c").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("heap_caps_calloc(\n        1, sizeof(*packet)", cloud_c)
+        self.assertIn("heap_caps_realloc(\n            state->pending", cloud_c)
+        self.assertIn("packet->payload = heap_caps_malloc", cloud_c)
+        self.assertIn("cloud_audio_headers_t *audio_headers = heap_caps_calloc", cloud_c)
+        self.assertIn("cloud_frame_stream_state_t *frame_state = heap_caps_calloc", cloud_c)
+        self.assertIn("cloud_conversation_t *conversation = heap_caps_calloc", conversation_c)
+        self.assertIn("conversation->pcm_frame = heap_caps_calloc", conversation_c)
+        self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", conversation_c)
 
     def test_audio_stream_task_flushes_partial_tail_on_stream_stop(self) -> None:
         audio_out_c = (ESP_MAIN / "audio_out.c").read_text(encoding="utf-8")

@@ -863,7 +863,8 @@ static void cloud_frame_stream_cleanup(cloud_frame_stream_state_t *state)
 
 static cloud_encoded_packet_t *cloud_encoded_packet_alloc(cloud_stream_packet_type_t type)
 {
-    cloud_encoded_packet_t *packet = calloc(1, sizeof(*packet));
+    cloud_encoded_packet_t *packet = heap_caps_calloc(
+        1, sizeof(*packet), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (packet != NULL) {
         packet->type = type;
     }
@@ -881,7 +882,8 @@ static void cloud_encoded_packet_free(cloud_encoded_packet_t *packet)
 
 static cloud_pcm_packet_t *cloud_pcm_packet_alloc(cloud_stream_packet_type_t type)
 {
-    cloud_pcm_packet_t *packet = calloc(1, sizeof(*packet));
+    cloud_pcm_packet_t *packet = heap_caps_calloc(
+        1, sizeof(*packet), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (packet != NULL) {
         packet->type = type;
     }
@@ -981,7 +983,8 @@ static esp_err_t cloud_frame_stream_append(cloud_frame_stream_state_t *state,
         while (state->pending_len + data_len > new_cap) {
             new_cap *= 2;
         }
-        uint8_t *new_data = realloc(state->pending, new_cap);
+        uint8_t *new_data = heap_caps_realloc(
+            state->pending, new_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (new_data == NULL) {
             return ESP_ERR_NO_MEM;
         }
@@ -1065,7 +1068,8 @@ static esp_err_t cloud_consume_framed_audio_packets(cloud_frame_stream_state_t *
         }
         packet->audio_format = audio_format;
         packet->sequence = sequence;
-        packet->payload = malloc(payload_len);
+        packet->payload = heap_caps_malloc(
+            payload_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (packet->payload == NULL) {
             cloud_encoded_packet_free(packet);
             return ESP_ERR_NO_MEM;
@@ -1157,7 +1161,8 @@ static esp_err_t cloud_opus_decoder_init(cloud_opus_decoder_state_t *state,
 
     const size_t frame_samples = (sample_rate * frame_duration_ms) / 1000U;
     state->pcm_buffer_size = frame_samples * channels * sizeof(int16_t);
-    state->pcm_buffer = calloc(1, state->pcm_buffer_size);
+    state->pcm_buffer = heap_caps_calloc(
+        1, state->pcm_buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (state->pcm_buffer == NULL) {
         cloud_opus_decoder_cleanup(state);
         return ESP_ERR_NO_MEM;
@@ -1177,7 +1182,8 @@ static esp_err_t cloud_opus_pending_append(cloud_opus_decoder_state_t *state,
         while (new_cap < state->pending_len + data_len) {
             new_cap *= 2;
         }
-        uint8_t *new_buf = realloc(state->pending, new_cap);
+        uint8_t *new_buf = heap_caps_realloc(
+            state->pending, new_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (new_buf == NULL) {
             return ESP_ERR_NO_MEM;
         }
@@ -1257,7 +1263,8 @@ static esp_err_t cloud_enqueue_pcm_callback(const uint8_t *chunk,
     if (packet == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    packet->payload = malloc(chunk_bytes);
+    packet->payload = heap_caps_malloc(
+        chunk_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (packet->payload == NULL) {
         cloud_pcm_packet_free(packet);
         return ESP_ERR_NO_MEM;
@@ -2743,7 +2750,8 @@ esp_err_t cloud_client_stream_realtime_audio_cancellable(
         memset(metrics, 0, sizeof(*metrics));
     }
 
-    cloud_audio_headers_t *audio_headers = calloc(1, sizeof(*audio_headers));
+    cloud_audio_headers_t *audio_headers = heap_caps_calloc(
+        1, sizeof(*audio_headers), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (audio_headers == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -2794,8 +2802,11 @@ esp_err_t cloud_client_stream_realtime_audio_cancellable(
 
     ret = cloud_validate_audio_header_exact(audio_headers, client, "Content-Type", "application/octet-stream");
     cloud_audio_format_t audio_format = CLOUD_AUDIO_FORMAT_PCM;
-    cloud_frame_stream_state_t *frame_state = calloc(1, sizeof(*frame_state));
-    uint8_t *chunk = malloc(DEMO_REALTIME_AUDIO_HTTP_READ_CHUNK_BYTES);
+    cloud_frame_stream_state_t *frame_state = heap_caps_calloc(
+        1, sizeof(*frame_state), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *chunk = heap_caps_malloc(
+        DEMO_REALTIME_AUDIO_HTTP_READ_CHUNK_BYTES,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     cloud_stream_runtime_t runtime = {0};
     runtime.callback = callback;
     runtime.user_ctx = user_ctx;
@@ -2969,7 +2980,8 @@ esp_err_t cloud_client_stream_realtime_audio_cancellable(
             } else {
                 packet->audio_format = audio_format;
                 packet->sequence = metrics != NULL ? (uint32_t)metrics->packet_count : 0;
-                packet->payload = malloc((size_t)read_len);
+                packet->payload = heap_caps_malloc(
+                    (size_t)read_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                 if (packet->payload == NULL) {
                     cloud_encoded_packet_free(packet);
                     ret = ESP_ERR_NO_MEM;
