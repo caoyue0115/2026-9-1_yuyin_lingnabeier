@@ -244,6 +244,7 @@ class ConversationSocket:
         self.started = False
         self._active_turn_id: str | None = None
         self._frames: dict[str, dict[int, bytes]] = {}
+        self._asr_error_codes: dict[str, str] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
         self._send_lock = asyncio.Lock()
 
@@ -370,6 +371,17 @@ class ConversationSocket:
         elif control.type == "turn_end":
             turn.state_machine.on_turn_end(control)
             self._active_turn_id = None
+            frames = self._frames.get(turn.turn_id, {})
+            demo_diagnostics.record(
+                "audio_uploaded",
+                device_id=self.device_id,
+                conversation_id=self.session.conversation_id,
+                turn_id=turn.turn_id,
+                turn_index=turn.turn_index,
+                state="thinking",
+                opus_frames=len(frames),
+                opus_bytes=sum(len(frame) for frame in frames.values()),
+            )
             task = asyncio.create_task(self._finish_turn(turn.turn_id))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
@@ -414,15 +426,31 @@ class ConversationSocket:
         turn = self.session._require_turn(turn_id)
         asr_started = time.perf_counter()
         try:
-            question = await asyncio.to_thread(self._transcribe_turn, turn_id)
+            demo_diagnostics.record(
+                "asr_started",
+                device_id=self.device_id,
+                conversation_id=self.session.conversation_id,
+                turn_id=turn.turn_id,
+                turn_index=turn.turn_index,
+                state="thinking",
+            )
+            try:
+                question = await asyncio.wait_for(
+                    asyncio.to_thread(self._transcribe_turn, turn_id),
+                    timeout=max(float(settings.asr_timeout_seconds), 0.001) + 1.0,
+                )
+            except TimeoutError:
+                self._asr_error_codes[turn_id] = "asr_timeout"
+                question = ""
             asr_ms = round((time.perf_counter() - asr_started) * 1000)
             if turn.cancel_event.is_set():
                 return
             if not question:
+                empty_event = self._asr_error_codes.pop(turn_id, "asr_empty")
                 transition = turn.state_machine.on_asr_empty()
                 self.session.complete_asr_empty(turn.turn_id)
                 demo_diagnostics.record(
-                    "asr_empty",
+                    empty_event,
                     device_id=self.device_id,
                     conversation_id=self.session.conversation_id,
                     turn_id=turn.turn_id,
@@ -430,6 +458,7 @@ class ConversationSocket:
                     state="ready",
                     asr_text="",
                     asr_ms=asr_ms,
+                    error=empty_event if empty_event != "asr_empty" else "",
                 )
                 await self._send(build_turn_event(
                     transition,
@@ -558,15 +587,16 @@ class ConversationSocket:
             settings.realtime_audio_opus_channels,
         )
         result = transcribe_wav_result(wav_path)
-        if result.error_code == "asr_empty_text":
+        if result.error_code in {"asr_empty_text", "asr_timeout"}:
+            self._asr_error_codes[turn_id] = result.error_code
             logger.info(
-                "conversation_asr_final conversation_id=%s turn_id=%s turn_index=%s model=%s audio=%s text=%r",
+                "conversation_asr_empty conversation_id=%s turn_id=%s turn_index=%s model=%s audio=%s error_code=%s",
                 self.session.conversation_id,
                 turn_id,
                 self.session._require_turn(turn_id).turn_index,
                 settings.asr_model,
                 Path(wav_path).name,
-                "",
+                result.error_code,
             )
             return ""
         if result.error_code:

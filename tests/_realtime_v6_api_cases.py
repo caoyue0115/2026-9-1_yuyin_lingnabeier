@@ -439,7 +439,7 @@ def test_asr_empty_text_completes_turn_as_asr_empty(monkeypatch) -> None:
     assert turn.status == "asr_empty"
 
 
-def test_asr_provider_failure_remains_a_technical_error(monkeypatch) -> None:
+def test_asr_timeout_requests_a_retry_instead_of_hanging(monkeypatch) -> None:
     class FakeWebSocket:
         def __init__(self) -> None:
             self.sent: list[dict] = []
@@ -464,5 +464,5 @@ def test_asr_provider_failure_remains_a_technical_error(monkeypatch) -> None:
     asyncio.run(socket._finish_turn(turn.turn_id))
 
     assert websocket.sent[-1]["type"] == "turn_complete"
-    assert websocket.sent[-1]["outcome"] == "technical_error"
-    assert turn.status == "technical_error"
+    assert websocket.sent[-1]["outcome"] == "asr_empty"
+    assert turn.status == "asr_empty"

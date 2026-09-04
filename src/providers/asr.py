@@ -91,13 +91,11 @@ def _is_main_thread() -> bool:
 
 
 def _run_with_timeout(recognition: Any, audio_path: str) -> Any:
-    if not _is_main_thread():
-        return recognition.call(audio_path)
     timeout_seconds = max(float(settings.asr_timeout_seconds), 0.001)
     signal_timeout_supported = all(
         hasattr(signal, name) for name in ("SIGALRM", "ITIMER_REAL", "setitimer")
     )
-    if not signal_timeout_supported:
+    if not _is_main_thread() or not signal_timeout_supported:
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr-timeout")
         future = executor.submit(recognition.call, audio_path)
         try:
@@ -139,6 +137,7 @@ class _Qwen3ASRFlashRecognition:
             ],
             result_format="message",
             asr_options=asr_options,
+            request_timeout=max(float(settings.asr_timeout_seconds), 0.001),
         )
 
 

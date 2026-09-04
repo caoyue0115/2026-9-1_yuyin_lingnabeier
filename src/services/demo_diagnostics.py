@@ -81,7 +81,12 @@ class DemoDiagnostics:
             conversation_id=conversation_id,
             online=True,
             state="connected",
+            asr_text="",
+            answer="",
+            memory=[],
         )
+        with self._lock:
+            self._devices[device_id]["turn_index"] = None
 
     def set_disconnected(self, device_id: str, conversation_id: str) -> None:
         self.record(

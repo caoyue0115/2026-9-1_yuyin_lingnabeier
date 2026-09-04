@@ -137,6 +137,10 @@ class TranscribeWavTests(unittest.TestCase):
             _FakeMultiModalConversation.last_kwargs["asr_options"],
             {"enable_itn": False, "language": "zh"},
         )
+        self.assertEqual(
+            _FakeMultiModalConversation.last_kwargs["request_timeout"],
+            asr.settings.asr_timeout_seconds,
+        )
         audio_uri = _FakeMultiModalConversation.last_kwargs["messages"][0]["content"][0]["audio"]
         self.assertEqual(audio_uri, self.audio_path.resolve().as_uri())
         configure_sdk.assert_called_once_with()
@@ -220,23 +224,26 @@ class TranscribeWavTests(unittest.TestCase):
         self.assertEqual(result.error_code, "asr_http_400")
         self.assertEqual(result.error_message, "bad request")
 
-    def test_run_with_timeout_skips_signal_guard_outside_main_thread(self) -> None:
-        recognition = _FakeRecognition()
+    def test_run_with_timeout_enforces_guard_outside_main_thread(self) -> None:
+        recognition = _FakeSlowRecognition()
         result_holder: dict[str, object] = {}
 
         def _target() -> None:
-            result_holder["result"] = asr._run_with_timeout(recognition, str(self.audio_path))
+            try:
+                asr._run_with_timeout(recognition, str(self.audio_path))
+            except Exception as exc:
+                result_holder["error"] = exc
 
         with mock.patch.object(asr, "_is_main_thread", return_value=False), mock.patch.object(
             asr.signal, "signal"
         ) as signal_fn, mock.patch.object(
             asr.signal, "setitimer", create=True
-        ) as setitimer_fn:
+        ) as setitimer_fn, mock.patch.object(asr.settings, "asr_timeout_seconds", 0.01):
             thread = threading.Thread(target=_target)
             thread.start()
             thread.join()
 
-        self.assertIsInstance(result_holder["result"], _FakeSuccessResult)
+        self.assertIsInstance(result_holder["error"], TimeoutError)
         signal_fn.assert_not_called()
         setitimer_fn.assert_not_called()
 

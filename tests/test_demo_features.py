@@ -28,6 +28,29 @@ def test_diagnostics_keeps_bounded_events_and_copies_snapshot() -> None:
     assert diagnostics.snapshot()["devices"][0]["answer"] == "你好呀"
 
 
+def test_new_connection_clears_previous_conversation_summary() -> None:
+    diagnostics = DemoDiagnostics()
+    diagnostics.set_connected("board-1", "conversation-1")
+    diagnostics.record(
+        "answer_ready",
+        device_id="board-1",
+        conversation_id="conversation-1",
+        turn_index=2,
+        asr_text="旧问题",
+        answer="旧答案",
+        memory=[{"question": "旧问题"}],
+    )
+
+    diagnostics.set_connected("board-1", "conversation-2")
+
+    device = diagnostics.snapshot()["devices"][0]
+    assert device["conversation_id"] == "conversation-2"
+    assert device["turn_index"] is None
+    assert device["asr_text"] == ""
+    assert device["answer"] == ""
+    assert device["memory"] == []
+
+
 def test_phone_location_and_navigation_api() -> None:
     update = demo_api.update_phone_location(
         demo_api.PhoneLocationUpdate(
