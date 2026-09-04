@@ -23,6 +23,13 @@ static const char *TAG = "wake_word";
 static const char *const s_expected_spike_model = "wn9_xiaomingtongxue_tts2";
 
 typedef struct {
+    int16_t degrees;
+    uint16_t channel_difference_permille;
+    uint32_t mean_energy;
+    int64_t captured_us;
+} direction_sample_t;
+
+typedef struct {
     bool initialized;
     bool unavailable;
     volatile bool running;
@@ -41,6 +48,9 @@ typedef struct {
     volatile bool latest_direction_valid;
     volatile int latest_direction_degrees;
     volatile int64_t latest_direction_us;
+    direction_sample_t direction_history[DEMO_SOUND_DIRECTION_HISTORY_FRAMES];
+    size_t direction_history_next;
+    size_t direction_history_count;
     char detected_word[64];
     char detected_model[64];
     bool detected_direction_valid;
@@ -49,6 +59,148 @@ typedef struct {
 
 static wake_word_state_t s_wake = {0};
 static portMUX_TYPE s_direction_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void wake_word_store_direction_sample(int degrees,
+                                             uint32_t mean_energy,
+                                             uint16_t channel_difference_permille,
+                                             int64_t captured_us)
+{
+    taskENTER_CRITICAL(&s_direction_lock);
+    s_wake.latest_direction_degrees = degrees;
+    s_wake.latest_direction_us = captured_us;
+    s_wake.latest_direction_valid = true;
+    direction_sample_t *sample = &s_wake.direction_history[s_wake.direction_history_next];
+    sample->degrees = (int16_t)degrees;
+    sample->mean_energy = mean_energy;
+    sample->channel_difference_permille = channel_difference_permille;
+    sample->captured_us = captured_us;
+    s_wake.direction_history_next =
+        (s_wake.direction_history_next + 1U) % DEMO_SOUND_DIRECTION_HISTORY_FRAMES;
+    if (s_wake.direction_history_count < DEMO_SOUND_DIRECTION_HISTORY_FRAMES) {
+        s_wake.direction_history_count++;
+    }
+    taskEXIT_CRITICAL(&s_direction_lock);
+}
+
+static bool wake_word_select_direction(int64_t now_us,
+                                       int *out_degrees,
+                                       size_t *out_sample_count,
+                                       int *out_min_degrees,
+                                       int *out_max_degrees,
+                                       uint32_t *out_peak_energy,
+                                       uint16_t *out_channel_difference_permille)
+{
+    // esp_doa currently returns 0..180 degrees at 20-degree resolution.
+    uint64_t bucket_energy[10] = {0};
+    uint32_t peak_energy = 0;
+    size_t sample_count = 0;
+    int min_degrees = 180;
+    int max_degrees = 0;
+    int peak_degrees = 90;
+    uint16_t peak_difference = 0;
+    const int64_t max_age_us = (int64_t)DEMO_SOUND_DIRECTION_HISTORY_MAX_AGE_MS * 1000;
+
+    taskENTER_CRITICAL(&s_direction_lock);
+    for (size_t index = 0; index < s_wake.direction_history_count; ++index) {
+        const direction_sample_t *sample = &s_wake.direction_history[index];
+        const int64_t age_us = now_us - sample->captured_us;
+        if (sample->captured_us <= 0 || age_us < 0 || age_us > max_age_us) {
+            continue;
+        }
+        int degrees = sample->degrees;
+        if (degrees < 0) {
+            degrees = 0;
+        } else if (degrees > 180) {
+            degrees = 180;
+        }
+        int bucket = (degrees + 10) / 20;
+        if (bucket > 9) {
+            bucket = 9;
+        }
+        bucket_energy[bucket] += sample->mean_energy;
+        sample_count++;
+        if (degrees < min_degrees) {
+            min_degrees = degrees;
+        }
+        if (degrees > max_degrees) {
+            max_degrees = degrees;
+        }
+        if (sample->mean_energy > peak_energy) {
+            peak_energy = sample->mean_energy;
+            peak_degrees = degrees;
+            peak_difference = sample->channel_difference_permille;
+        }
+    }
+    const bool latest_valid = s_wake.latest_direction_valid &&
+                              now_us >= s_wake.latest_direction_us &&
+                              now_us - s_wake.latest_direction_us <= max_age_us;
+    const int latest_degrees = s_wake.latest_direction_degrees;
+    taskEXIT_CRITICAL(&s_direction_lock);
+
+    if (sample_count == 0) {
+        if (!latest_valid) {
+            return false;
+        }
+        *out_degrees = latest_degrees;
+        *out_sample_count = 1;
+        *out_min_degrees = latest_degrees;
+        *out_max_degrees = latest_degrees;
+        *out_peak_energy = 0;
+        *out_channel_difference_permille = 0;
+        return true;
+    }
+
+    int best_bucket = 0;
+    uint64_t best_neighborhood_energy = 0;
+    for (int bucket = 0; bucket < 10; ++bucket) {
+        uint64_t neighborhood_energy = bucket_energy[bucket];
+        if (bucket > 0) {
+            neighborhood_energy += bucket_energy[bucket - 1];
+        }
+        if (bucket < 9) {
+            neighborhood_energy += bucket_energy[bucket + 1];
+        }
+        if (neighborhood_energy > best_neighborhood_energy) {
+            best_neighborhood_energy = neighborhood_energy;
+            best_bucket = bucket;
+        }
+    }
+
+    // Prefer the highest-energy speech frame inside the winning cluster. This
+    // avoids the quiet tail after the wake word pulling every result to 90°.
+    int selected_degrees = peak_degrees;
+    uint32_t selected_energy = 0;
+    uint16_t selected_difference = peak_difference;
+    taskENTER_CRITICAL(&s_direction_lock);
+    for (size_t index = 0; index < s_wake.direction_history_count; ++index) {
+        const direction_sample_t *sample = &s_wake.direction_history[index];
+        const int64_t age_us = now_us - sample->captured_us;
+        if (sample->captured_us <= 0 || age_us < 0 || age_us > max_age_us) {
+            continue;
+        }
+        int bucket = ((int)sample->degrees + 10) / 20;
+        if (bucket < 0) {
+            bucket = 0;
+        } else if (bucket > 9) {
+            bucket = 9;
+        }
+        if (bucket >= best_bucket - 1 && bucket <= best_bucket + 1 &&
+            sample->mean_energy > selected_energy) {
+            selected_energy = sample->mean_energy;
+            selected_degrees = sample->degrees;
+            selected_difference = sample->channel_difference_permille;
+        }
+    }
+    taskEXIT_CRITICAL(&s_direction_lock);
+
+    *out_degrees = selected_degrees;
+    *out_sample_count = sample_count;
+    *out_min_degrees = min_degrees;
+    *out_max_degrees = max_degrees;
+    *out_peak_energy = peak_energy;
+    *out_channel_difference_permille = selected_difference;
+    return true;
+}
 
 static void wake_word_log_heap(const char *stage)
 {
@@ -287,10 +439,13 @@ static void wake_word_feed_task(void *arg)
                 doa_fill++;
                 if (doa_fill == DEMO_SOUND_DIRECTION_FRAME_SAMPLES) {
                     int64_t energy = 0;
+                    int64_t difference_energy = 0;
                     for (size_t index = 0; index < doa_fill; ++index) {
                         const int32_t left = doa_left[index];
                         const int32_t right = doa_right[index];
+                        const int32_t difference = left - right;
                         energy += ((int64_t)left * left + (int64_t)right * right) / 2;
+                        difference_energy += (int64_t)difference * difference;
                     }
                     const int64_t minimum_energy =
                         (int64_t)DEMO_SOUND_DIRECTION_MIN_RMS *
@@ -302,11 +457,16 @@ static void wake_word_feed_task(void *arg)
 #if DEMO_SOUND_DIRECTION_REVERSED
                             angle = 180.0f - angle;
 #endif
-                            taskENTER_CRITICAL(&s_direction_lock);
-                            s_wake.latest_direction_degrees = (int)(angle + 0.5f);
-                            s_wake.latest_direction_us = esp_timer_get_time();
-                            s_wake.latest_direction_valid = true;
-                            taskEXIT_CRITICAL(&s_direction_lock);
+                            const uint32_t mean_energy = (uint32_t)(energy / (int64_t)doa_fill);
+                            uint64_t difference_permille =
+                                energy > 0 ? ((uint64_t)difference_energy * 1000ULL) / (uint64_t)energy : 0;
+                            if (difference_permille > UINT16_MAX) {
+                                difference_permille = UINT16_MAX;
+                            }
+                            wake_word_store_direction_sample((int)(angle + 0.5f),
+                                                             mean_energy,
+                                                             (uint16_t)difference_permille,
+                                                             esp_timer_get_time());
                         }
                     }
                     doa_fill = 0;
@@ -339,23 +499,34 @@ static void wake_word_fetch_task(void *arg)
         if (result->wakeup_state == WAKENET_DETECTED) {
             strlcpy(s_wake.detected_word, DEMO_WAKE_WORD_TEXT, sizeof(s_wake.detected_word));
             strlcpy(s_wake.detected_model, DEMO_WAKE_WORD_MODEL_NAME, sizeof(s_wake.detected_model));
-            taskENTER_CRITICAL(&s_direction_lock);
-            const int64_t direction_age_us = esp_timer_get_time() - s_wake.latest_direction_us;
-            s_wake.detected_direction_valid = s_wake.latest_direction_valid &&
-                                                direction_age_us >= 0 &&
-                                                direction_age_us <= 1500000;
-            s_wake.detected_direction_degrees = s_wake.latest_direction_degrees;
-            taskEXIT_CRITICAL(&s_direction_lock);
+            size_t direction_sample_count = 0;
+            int direction_min_degrees = 90;
+            int direction_max_degrees = 90;
+            uint32_t direction_peak_energy = 0;
+            uint16_t direction_channel_difference = 0;
+            s_wake.detected_direction_valid =
+                wake_word_select_direction(esp_timer_get_time(),
+                                           &s_wake.detected_direction_degrees,
+                                           &direction_sample_count,
+                                           &direction_min_degrees,
+                                           &direction_max_degrees,
+                                           &direction_peak_energy,
+                                           &direction_channel_difference);
             s_wake.event_pending = true;
             s_wake.stop_requested = true;
             ESP_LOGI(TAG,
-                     "wake_word_detected word=%s model=%s wake_word_index=%d wakenet_model_index=%d direction_valid=%d direction_degrees=%d",
+                     "wake_word_detected word=%s model=%s wake_word_index=%d wakenet_model_index=%d direction_valid=%d direction_degrees=%d direction_samples=%u direction_range=%d..%d peak_energy=%u channel_difference_permille=%u",
                      s_wake.detected_word,
                      s_wake.detected_model,
                      result->wake_word_index,
                      result->wakenet_model_index,
                      s_wake.detected_direction_valid ? 1 : 0,
-                     s_wake.detected_direction_degrees);
+                     s_wake.detected_direction_degrees,
+                     (unsigned)direction_sample_count,
+                     direction_min_degrees,
+                     direction_max_degrees,
+                     (unsigned)direction_peak_energy,
+                     (unsigned)direction_channel_difference);
             break;
         }
     }
@@ -403,6 +574,9 @@ esp_err_t wake_word_service_start(void)
     s_wake.latest_direction_valid = false;
     s_wake.latest_direction_degrees = 90;
     s_wake.latest_direction_us = 0;
+    s_wake.direction_history_next = 0;
+    s_wake.direction_history_count = 0;
+    memset(s_wake.direction_history, 0, sizeof(s_wake.direction_history));
     taskEXIT_CRITICAL(&s_direction_lock);
     s_wake.running = true;
 
