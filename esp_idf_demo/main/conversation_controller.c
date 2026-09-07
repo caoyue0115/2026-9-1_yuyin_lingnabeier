@@ -49,7 +49,7 @@ conversation_transition_t conversation_controller_handle(conversation_controller
     case CONVERSATION_STATE_REPROMPT:
         if (event == CONVERSATION_EVENT_PROMPT_DONE) {
             controller->state = CONVERSATION_STATE_RECORDING;
-            controller->deadline_ms = now_ms + CONVERSATION_FOLLOWUP_START_TIMEOUT_MS;
+            controller->deadline_ms = now_ms + CONVERSATION_INITIAL_SPEECH_TIMEOUT_MS;
             return make_transition(controller, CONVERSATION_ACTION_START_RECORDING);
         }
         break;

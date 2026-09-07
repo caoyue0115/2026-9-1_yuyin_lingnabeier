@@ -28,7 +28,7 @@ int main(void)
         transition = send(&controller, CONVERSATION_EVENT_PROMPT_DONE, 2000 * followup + 100);
         assert(controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW);
         assert(transition.action == CONVERSATION_ACTION_LISTEN_FOLLOWUP);
-        assert(transition.deadline_ms == 2000 * followup + 5100);
+        assert(transition.deadline_ms == 2000 * followup + 10100);
         send(&controller, CONVERSATION_EVENT_SPEECH_STARTED, 2000 * followup + 200);
         assert(controller.turn_index == followup);
         send(&controller, CONVERSATION_EVENT_RECORDING_DONE, 2000 * followup + 800);
@@ -63,12 +63,12 @@ int main(void)
     send(&controller, CONVERSATION_EVENT_TURN_RESULT, 2);
     send(&controller, CONVERSATION_EVENT_PLAYBACK_DONE, 3);
     send(&controller, CONVERSATION_EVENT_PROMPT_DONE, 503);
-    conversation_transition_t silence = send(&controller, CONVERSATION_EVENT_SPEECH_TIMEOUT, 5503);
+    conversation_transition_t silence = send(&controller, CONVERSATION_EVENT_SPEECH_TIMEOUT, 10503);
     assert(silence.action == CONVERSATION_ACTION_NONE);
     assert(controller.state == CONVERSATION_STATE_ENDING);
-    assert(silence.deadline_ms == 6503);
-    assert(send(&controller, CONVERSATION_EVENT_TIMER, 6502).action == CONVERSATION_ACTION_NONE);
-    assert(send(&controller, CONVERSATION_EVENT_TIMER, 6503).action == CONVERSATION_ACTION_PLAY_DONE);
+    assert(silence.deadline_ms == 11503);
+    assert(send(&controller, CONVERSATION_EVENT_TIMER, 11502).action == CONVERSATION_ACTION_NONE);
+    assert(send(&controller, CONVERSATION_EVENT_TIMER, 11503).action == CONVERSATION_ACTION_PLAY_DONE);
 
     conversation_controller_init(&controller);
     send(&controller, CONVERSATION_EVENT_BEGIN, 0);

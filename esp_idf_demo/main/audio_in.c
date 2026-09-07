@@ -276,10 +276,11 @@ esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
                                          size_t *out_speech_prefix_bytes,
                                          uint32_t start_threshold,
                                          uint32_t arm_delay_ms,
+                                         uint32_t timeout_ms,
                                          audio_in_wait_metrics_t *out_metrics)
 {
     if (out_speech_prefix == NULL || out_speech_prefix_bytes == NULL ||
-        start_threshold == 0) {
+        start_threshold == 0 || timeout_ms == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -312,7 +313,7 @@ esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
 
     const int64_t wait_start_us = esp_timer_get_time();
     const int64_t armed_at_us = wait_start_us + (int64_t)arm_delay_ms * 1000;
-    const int64_t timeout_at_us = armed_at_us + (int64_t)DEMO_WAIT_FOR_SPEECH_TIMEOUT_MS * 1000;
+    const int64_t timeout_at_us = armed_at_us + (int64_t)timeout_ms * 1000;
     size_t hold_bytes = 0;
     size_t prefix_bytes = 0;
     uint32_t max_level = 0;
@@ -339,10 +340,11 @@ esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
 
         if (!armed_logged) {
             ESP_LOGI(TAG,
-                     "stage=waiting_speech event=armed elapsed_ms=%u threshold=%u configured_arm_ms=%u",
+                     "stage=waiting_speech event=armed elapsed_ms=%u threshold=%u configured_arm_ms=%u timeout_ms=%u",
                      (unsigned)((now_us - wait_start_us) / 1000),
                      (unsigned)start_threshold,
-                     (unsigned)arm_delay_ms);
+                     (unsigned)arm_delay_ms,
+                     (unsigned)timeout_ms);
             armed_logged = true;
         }
 

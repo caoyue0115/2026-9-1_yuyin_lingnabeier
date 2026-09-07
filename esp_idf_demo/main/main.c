@@ -200,6 +200,8 @@ static void app_log_runtime_config(void)
     ESP_LOGI(TAG, "  record_retry_timeout_prompt_path=%s", DEMO_RECORD_RETRY_TIMEOUT_PROMPT_PATH);
     ESP_LOGI(TAG, "  record_retry_error_prompt_path=%s", DEMO_RECORD_RETRY_ERROR_PROMPT_PATH);
     ESP_LOGI(TAG, "  wait_for_speech_timeout_ms=%d", DEMO_WAIT_FOR_SPEECH_TIMEOUT_MS);
+    ESP_LOGI(TAG, "  initial_speech_timeout_ms=%d", CONVERSATION_INITIAL_SPEECH_TIMEOUT_MS);
+    ESP_LOGI(TAG, "  followup_speech_timeout_ms=%d", CONVERSATION_FOLLOWUP_START_TIMEOUT_MS);
     ESP_LOGI(TAG, "  waiting_speech_arm_ms=%d", DEMO_WAITING_SPEECH_ARM_MS);
     ESP_LOGI(TAG, "  followup_waiting_speech_arm_ms=%d", DEMO_FOLLOWUP_WAITING_SPEECH_ARM_MS);
     ESP_LOGI(TAG, "  followup_prompt_tail_ms=%d", DEMO_FOLLOWUP_PROMPT_TAIL_MS);
@@ -575,10 +577,15 @@ static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *
             controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW
                 ? DEMO_FOLLOWUP_WAITING_SPEECH_ARM_MS
                 : DEMO_WAITING_SPEECH_ARM_MS;
+        const uint32_t speech_timeout_ms =
+            controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW
+                ? CONVERSATION_FOLLOWUP_START_TIMEOUT_MS
+                : CONVERSATION_INITIAL_SPEECH_TIMEOUT_MS;
         ret = audio_in_wait_for_speech_start(&speech_prefix,
                                              &speech_prefix_bytes,
                                              start_threshold,
                                              arm_delay_ms,
+                                             speech_timeout_ms,
                                              &wait_metrics);
         if (ret == DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT) {
             conversation_transition_t timeout = conversation_controller_handle(
@@ -963,6 +970,7 @@ static esp_err_t __attribute__((unused)) run_trigger_pipeline(app_state_t *state
                                                  &speech_prefix_bytes,
                                                  DEMO_RECORD_VAD_START_THRESHOLD,
                                                  DEMO_WAITING_SPEECH_ARM_MS,
+                                                 DEMO_WAIT_FOR_SPEECH_TIMEOUT_MS,
                                                  &wait_metrics);
             if (ret == ESP_OK || ret == DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT) {
                 break;
