@@ -5,6 +5,8 @@ import time
 from src.api import demo as demo_api
 from src.services.demo_diagnostics import DemoDiagnostics, demo_diagnostics
 from src.services import park_navigation as navigation
+from src.settings import settings
+from src.storage.db import init_db
 
 
 def setup_function() -> None:
@@ -95,3 +97,15 @@ def test_demo_pages_are_available() -> None:
     payload = demo_api.demo_devices()
     assert "disney-vocat-demo-001" in payload["devices"]
     assert any(item["key"] == "zootopia_hot_pursuit" for item in payload["pois"])
+
+
+def test_pet_profile_api_uses_device_id_scope(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "pet-api.db"))
+    init_db()
+
+    payload = demo_api.demo_pet_profile("board-1")
+
+    assert payload["status"] == "ok"
+    assert payload["pet"]["device_id"] == "board-1"
+    assert payload["pet"]["affection"] == 10
+    assert payload["pet"]["memories"] == {}

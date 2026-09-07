@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -29,6 +30,7 @@ from src.services.question_router import (
     route_question,
 )
 from src.services.park_navigation import answer_navigation_question
+from src.services.pet_companion import process_pet_turn
 from src.services.realtime_session import (
     _split_stream_buffer,
     _stream_answer_audio,
@@ -40,6 +42,9 @@ from src.storage.conversation_v6_store import (
     IdempotentTurnBudget,
     TurnCancelled,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +365,7 @@ class ConversationSession:
                 turn.audio,
                 answer_chars=self._answer_chars,
                 device_id=self.device_id,
+                event_id=turn.turn_id,
             )
         except TurnCancelled as exc:
             turn.answer, turn.answer_truncated = _truncate_text(
@@ -434,14 +440,26 @@ def run_turn(
     *,
     answer_chars: int | None = None,
     device_id: str = "",
+    event_id: str = "",
 ) -> TurnRunResult:
     """Adapt the v5 retrieval, LLM, and TTS providers to an owned v6 turn."""
     answer_parts: list[str] = []
     _check_cancel(cancel_event, answer_parts)
+    pet_answer: str | None = None
+    companion_context = ""
+    if device_id and event_id:
+        try:
+            pet_turn = process_pet_turn(question, device_id, event_id)
+            pet_answer = pet_turn.answer
+            companion_context = pet_turn.prompt_context
+        except Exception:
+            # Pet persistence must fail open so a database issue does not
+            # disable the existing voice assistant.
+            logger.exception("pet_turn_failed device_id=%s event_id=%s", device_id, event_id)
     retrieval_question = _retrieval_question(question, history)
     route = route_question(retrieval_question)
     references: list[dict] = []
-    canned_answer = answer_navigation_question(question, device_id)
+    canned_answer = pet_answer or answer_navigation_question(question, device_id)
     if canned_answer is not None:
         pass
     elif route == QuestionRoute.DYNAMIC_CURRENT:
@@ -471,7 +489,14 @@ def run_turn(
         return TurnRunResult(answer=answer, answer_truncated=answer_truncated)
 
     llm_question = _question_with_history(question, history)
-    llm_stream = stream_answer_text(llm_question, references)
+    if companion_context:
+        llm_stream = stream_answer_text(
+            llm_question,
+            references,
+            companion_context=companion_context,
+        )
+    else:
+        llm_stream = stream_answer_text(llm_question, references)
     _register_close_hook(audio_queue, llm_stream)
     llm_iterator = iter(llm_stream)
     limit = settings.conversation_v6_answer_chars if answer_chars is None else answer_chars

@@ -14,6 +14,7 @@ from src.services.park_navigation import (
     match_destination,
     phone_locations,
 )
+from src.services.pet_companion import get_pet_snapshot
 from src.settings import settings
 
 
@@ -61,6 +62,7 @@ def demo_status() -> dict[str, Any]:
     for device in snapshot["devices"]:
         fix = phone_locations.get(device["device_id"], include_stale=True)
         device["phone_location"] = fix.public_dict() if fix else None
+        device["pet"] = get_pet_snapshot(device["device_id"])
     snapshot.update(
         {
             "service": settings.project_name,
@@ -70,6 +72,7 @@ def demo_status() -> dict[str, Any]:
                 "tts": settings.realtime_tts_model or settings.dashscope_tts_model,
             },
             "memory_turns": min(max(settings.conversation_v6_memory_turns, 0), 5),
+            "long_term_memory_scope": "device_id",
         }
     )
     return snapshot
@@ -81,6 +84,14 @@ def demo_devices() -> dict[str, Any]:
     if "disney-vocat-demo-001" not in devices:
         devices.append("disney-vocat-demo-001")
     return {"devices": devices, "pois": list_park_pois()}
+
+
+@router.get("/api/demo/pet/{device_id}", tags=["demo"])
+def demo_pet_profile(device_id: str) -> dict[str, Any]:
+    try:
+        return {"status": "ok", "pet": get_pet_snapshot(device_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/api/demo/location", tags=["demo"])

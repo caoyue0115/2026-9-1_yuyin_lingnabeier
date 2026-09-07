@@ -84,6 +84,7 @@ def _build_messages(
     references: list[dict],
     *,
     answer_mode: str | None = None,
+    companion_context: str = "",
 ) -> list[dict[str, str]]:
     evidence = "\n".join(
         f"- [{'朱迪核心设定' if item.get('knowledge_scope') == ZOOTOPIA_CORE else '其他迪士尼听闻'}] "
@@ -91,6 +92,8 @@ def _build_messages(
         for item in references
     )
     persona_prompt = _persona_prompt(question_text, references)
+    if companion_context:
+        persona_prompt += str(companion_context).strip()
     if references:
         role_prompt = (
             persona_prompt
@@ -178,13 +181,19 @@ def stream_answer_text(
     references: list[dict],
     *,
     answer_mode: str | None = None,
+    companion_context: str = "",
 ) -> Iterator[str]:
     client = _build_client()
     response_stream = client.chat.completions.create(
         model=settings.llm_model,
         temperature=settings.llm_temperature,
         max_tokens=_max_tokens_for_answer_mode(answer_mode),
-        messages=_build_messages(question_text, references, answer_mode=answer_mode),
+        messages=_build_messages(
+            question_text,
+            references,
+            answer_mode=answer_mode,
+            companion_context=companion_context,
+        ),
         stream=True,
         extra_body={"enable_thinking": False},
     )

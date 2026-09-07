@@ -96,6 +96,55 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_profiles (
+                device_id TEXT PRIMARY KEY,
+                affection INTEGER NOT NULL DEFAULT 10,
+                mood TEXT NOT NULL DEFAULT 'curious',
+                energy INTEGER NOT NULL DEFAULT 80,
+                streak_days INTEGER NOT NULL DEFAULT 0,
+                last_interaction_date TEXT,
+                last_interaction_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_events (
+                event_id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                affection_delta INTEGER NOT NULL DEFAULT 0,
+                energy_delta INTEGER NOT NULL DEFAULT 0,
+                mood_before TEXT NOT NULL,
+                mood_after TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pet_events_device_created
+            ON pet_events(device_id, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_memories (
+                device_id TEXT NOT NULL,
+                memory_key TEXT NOT NULL,
+                memory_value TEXT NOT NULL,
+                source_turn_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (device_id, memory_key)
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
