@@ -550,6 +550,7 @@ def test_run_turn_checks_cancel_before_requesting_each_llm_chunk(monkeypatch) ->
         "retrieve_references",
         lambda question, top_k: ([{"source_title": "s", "snippet": "x"}], 1.0),
     )
+    monkeypatch.setattr(conversation_service, "realtime_tts_health", lambda: False)
     monkeypatch.setattr(conversation_service, "stream_answer_text", lambda question, refs: llm_chunks())
     monkeypatch.setattr(conversation_service, "_split_stream_buffer", cancel_during_first_chunk)
 
