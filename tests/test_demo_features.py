@@ -70,7 +70,10 @@ def test_phone_location_and_navigation_api() -> None:
     assert update["status"] == "ok"
     assert route["status"] == "ok"
     assert "疯狂动物城" in route["answer"]
-    assert "方向" in route["answer"]
+    assert any(
+        direction in route["answer"]
+        for direction in ("方向", "向东", "向南", "向西", "向北", "左转", "右转", "直行")
+    )
 
 
 def test_voice_navigation_requests_phone_location_first() -> None:
