@@ -24,6 +24,8 @@ extern const uint8_t prompt_repeat_start[] asm("_binary_repeat_1_pcm_start");
 extern const uint8_t prompt_repeat_end[] asm("_binary_repeat_1_pcm_end");
 extern const uint8_t prompt_followup_start[] asm("_binary_followup_1_pcm_start");
 extern const uint8_t prompt_followup_end[] asm("_binary_followup_1_pcm_end");
+extern const uint8_t prompt_technical_error_start[] asm("_binary_technical_error_1_pcm_start");
+extern const uint8_t prompt_technical_error_end[] asm("_binary_technical_error_1_pcm_end");
 
 static const char *TAG = "prompt_arbiter";
 
@@ -120,8 +122,8 @@ static esp_err_t prompt_arbiter_play(prompt_id_t id)
         end = prompt_repeat_end;
         break;
     case PROMPT_TECHNICAL_ERROR:
-        start = prompt_followup_bell_start;
-        end = prompt_followup_bell_end;
+        start = prompt_technical_error_start;
+        end = prompt_technical_error_end;
         break;
     default:
         return ESP_ERR_NOT_SUPPORTED;

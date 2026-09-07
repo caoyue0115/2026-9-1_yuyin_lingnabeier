@@ -229,7 +229,7 @@ static void app_log_runtime_config(void)
     ESP_LOGI(TAG, "  v5_uplink_frame_ms=%d", V5_OPUS_UPLINK_FRAME_MS);
     ESP_LOGI(TAG, "  v5_uplink_asr_provider=%s", V5_OPUS_UPLINK_ASR_PROVIDER);
     ESP_LOGI(TAG, "  v5_uplink_answer_mode=%s", V5_OPUS_UPLINK_ANSWER_MODE);
-    ESP_LOGI(TAG, "  realtime_audio_open_timeout_ms=%d", DEMO_REALTIME_AUDIO_OPEN_TIMEOUT_MS);
+    ESP_LOGI(TAG, "  realtime_audio_first_chunk_timeout_ms=%d", DEMO_REALTIME_AUDIO_FIRST_CHUNK_TIMEOUT_MS);
     ESP_LOGI(TAG, "  realtime_audio_read_timeout_ms=%d", DEMO_REALTIME_AUDIO_READ_TIMEOUT_MS);
     ESP_LOGI(TAG, "  realtime_audio_jitter_buffer_bytes=%d", DEMO_REALTIME_AUDIO_JITTER_BUFFER_BYTES);
     ESP_LOGI(TAG, "  realtime_audio_jitter_prebuffer_bytes=%d", DEMO_REALTIME_AUDIO_JITTER_PREBUFFER_BYTES);

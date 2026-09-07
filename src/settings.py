@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     realtime_tts_voice: str = ""
     tts_language_type: str = "Chinese"
     tts_instructions: str = "请使用明快、机灵、温暖的年轻女性中文声线，语速自然，表达友好。"
-    tts_timeout_seconds: int = 20
+    tts_timeout_seconds: int = 10
     dashscope_playback_rate: float = 1.0
     request_timeout_seconds: int = 30
     default_sample_rate: int = 16000
@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     conversation_v6_audio_queue_bytes: int = 256 * 1024
     conversation_v6_cancel_timeout_seconds: float = 2.0
     conversation_v6_close_timeout_seconds: float = 2.0
+    conversation_v6_first_audio_timeout_seconds: float = 12.0
     conversation_v6_question_chars: int = 512
     conversation_v6_answer_chars: int = 4096
     conversation_v6_memory_turns: int = 3

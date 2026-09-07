@@ -367,6 +367,12 @@ class ConversationSession:
             )
             turn.interrupted = bool(turn.answer)
             raise
+        except BaseException:
+            # Wake a request waiting for the first audio chunk so provider
+            # failures are reported immediately instead of looking like an
+            # ESP-side HTTP timeout.
+            turn.audio.finish()
+            raise
         turn.answer, turn.answer_truncated = _truncate_text(result.answer, self._answer_chars)
         turn.answer_truncated = turn.answer_truncated or result.answer_truncated
         self.commit_turn(

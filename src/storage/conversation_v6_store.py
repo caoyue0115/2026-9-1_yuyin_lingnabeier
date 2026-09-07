@@ -25,6 +25,7 @@ class BoundedAudioQueue:
         self._condition = threading.Condition()
         self._chunks: deque[bytes] = deque()
         self._byte_count = 0
+        self._has_published_audio = False
         self._finished = False
         self._revoked = False
         self._close_hooks: list[Callable[[], None]] = []
@@ -69,6 +70,7 @@ class BoundedAudioQueue:
                 raise RuntimeError("audio_queue_finished")
             self._chunks.append(chunk)
             self._byte_count += len(chunk)
+            self._has_published_audio = True
             self._condition.notify_all()
 
     def get(self, timeout: float | None = None) -> bytes | None:
@@ -89,6 +91,19 @@ class BoundedAudioQueue:
             self._byte_count -= len(chunk)
             self._condition.notify_all()
             return chunk
+
+    def wait_for_first_chunk(self, timeout: float) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._condition:
+            while not self._has_published_audio:
+                self._raise_if_cancelled()
+                if self._finished:
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(timeout=remaining)
+            return self._has_published_audio
 
     def finish(self) -> None:
         with self._condition:

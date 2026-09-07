@@ -40,6 +40,7 @@ from src.providers.opus import (
 from src.services.conversation_v6 import ConversationSession
 from src.services.demo_diagnostics import demo_diagnostics
 from src.settings import settings
+from src.storage.conversation_v6_store import TurnCancelled
 from src.storage.files import save_pcm_as_wav
 
 
@@ -52,6 +53,14 @@ AUDIO_TOKEN_TTL_SECONDS = 120.0
 
 class KeepaliveTimeout(TimeoutError):
     pass
+
+
+def _finish_stream_on_turn_cancel(body: Any) -> Any:
+    """Treat a revoked turn as a normal HTTP stream close for the device."""
+    try:
+        yield from body
+    except TurnCancelled:
+        return
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +199,7 @@ class ConversationRegistry:
                 }
             )
         return StreamingResponse(
-            body,
+            _finish_stream_on_turn_cancel(body),
             media_type="application/octet-stream",
             headers=headers,
         )
@@ -486,6 +495,10 @@ class ConversationSocket:
                 str(transition.data["text"]),
             ))
             future: Future[Any] = self.session.process_turn(turn.turn_id, question)
+            first_audio_deadline = time.monotonic() + max(
+                float(settings.conversation_v6_first_audio_timeout_seconds),
+                0.001,
+            )
             token = conversation_registry.issue_audio_token(
                 self.session.conversation_id,
                 turn.turn_id,
@@ -506,6 +519,14 @@ class ConversationSocket:
                 session_id=f"{self.session.conversation_id}:{turn.turn_id}",
                 audio_stream_url=audio_url,
             ))
+            first_audio_ready = await asyncio.to_thread(
+                turn.audio.wait_for_first_chunk,
+                max(0.0, first_audio_deadline - time.monotonic()),
+            )
+            if not first_audio_ready:
+                if future.done():
+                    future.result()
+                raise TimeoutError("tts_first_audio_timeout")
             result = await asyncio.wrap_future(future)
             demo_diagnostics.record(
                 "answer_ready",

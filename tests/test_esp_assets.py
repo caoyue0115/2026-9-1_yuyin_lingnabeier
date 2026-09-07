@@ -546,13 +546,16 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("s_playing_key", prompt_source)
         self.assertIn("prompt_arbiter_network_prompt_is_relevant", prompt_source)
         self.assertIn("case PROMPT_TECHNICAL_ERROR:", prompt_source)
-        self.assertIn("start = prompt_followup_bell_start;", prompt_source)
+        technical_error_case = prompt_source.split("case PROMPT_TECHNICAL_ERROR:", 1)[1].split("break;", 1)[0]
+        self.assertIn("start = prompt_technical_error_start;", technical_error_case)
+        self.assertNotIn("prompt_followup_bell_start", technical_error_case)
         for asset in (
             "followup_bell_1.pcm",
             "followup_1.pcm",
             "intro_1.pcm",
             "repeat_1.pcm",
             "speak_1.pcm",
+            "technical_error_1.pcm",
         ):
             self.assertIn(f'../spiffs/{asset}', cmake)
 
@@ -567,6 +570,7 @@ class EspAssetTests(unittest.TestCase):
             "speak_1.pcm": (41_600, "ae9f47198e664a6412718f50a675665bcd0943716933ae6ca1087ef9eb713e42"),
             "repeat_1.pcm": (51_840, "f93dd96750b166b8bc6afdf3620749d40c8a49247dfbc6930b96395e3348a98a"),
             "followup_1.pcm": (46_720, "db361e32924af074185ae011890531d9fcf72b64a87bacb85aa465ea1b302ad6"),
+            "technical_error_1.pcm": (45_600, "17caaceb7bfda82a9ab7adcb45a5bf2197da08d035e115bfd96932adb870415d"),
         }
         for name, (size, digest) in expected.items():
             payload = (ESP_DIR / "spiffs" / name).read_bytes()

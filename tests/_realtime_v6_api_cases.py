@@ -13,6 +13,7 @@ from src.app import app
 from src.api import realtime_v6
 from src.models.conversation_v6 import ConversationLimits, MAX_CONNECTION_SECONDS, ProtocolError
 from src.providers.asr import ASRResult
+from src.services.conversation_v6 import TurnRunResult
 
 
 @pytest.fixture(autouse=True)
@@ -382,7 +383,7 @@ def test_two_missing_pong_intervals_close_with_keepalive_timeout() -> None:
     assert websocket.closed[1] == "keepalive_timeout"
 
 
-def test_turn_result_is_sent_before_streaming_tts_worker_finishes(monkeypatch) -> None:
+def test_turn_result_is_sent_before_first_audio_and_tts_worker_finishes(monkeypatch) -> None:
     class FakeWebSocket:
         def __init__(self) -> None:
             self.sent: list[dict] = []
@@ -404,10 +405,44 @@ def test_turn_result_is_sent_before_streaming_tts_worker_finishes(monkeypatch) -
         await asyncio.sleep(0.02)
         assert any(event["type"] == "turn_result" for event in websocket.sent)
         assert not worker.done()
-        worker.set_result(None)
+        turn.audio.put(b"first-audio")
+        worker.set_result(TurnRunResult(answer="answer"))
         await task
 
     asyncio.run(run_until_result())
+
+
+def test_first_audio_deadline_closes_early_url_as_technical_error(monkeypatch) -> None:
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_json(self, payload: dict) -> None:
+            self.sent.append(payload)
+
+    session = realtime_v6.conversation_registry.create(device_id="board-1")
+    turn = session.start_turn("turn-0", 0)
+    turn.state_machine.on_turn_end()
+    websocket = FakeWebSocket()
+    socket = realtime_v6.ConversationSocket(websocket, session, device_id="board-1")
+    worker: Future = Future()
+    monkeypatch.setattr(socket, "_transcribe_turn", lambda _turn_id: "question")
+    monkeypatch.setattr(session, "process_turn", lambda _turn_id, _question: worker)
+    monkeypatch.setattr(
+        realtime_v6.settings,
+        "conversation_v6_first_audio_timeout_seconds",
+        0.01,
+    )
+
+    asyncio.run(socket._finish_turn("turn-0"))
+
+    assert [event["type"] for event in websocket.sent][-2:] == [
+        "turn_result",
+        "turn_complete",
+    ]
+    assert websocket.sent[-1]["outcome"] == "technical_error"
+    assert turn.status == "technical_error"
+    assert turn.audio.revoked
 
 
 def test_asr_empty_text_completes_turn_as_asr_empty(monkeypatch) -> None:

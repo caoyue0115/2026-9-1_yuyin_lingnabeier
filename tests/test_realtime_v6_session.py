@@ -37,6 +37,35 @@ def test_audio_queue_applies_backpressure_by_bytes() -> None:
     assert audio.byte_count == 1
 
 
+def test_audio_queue_waits_until_first_chunk_is_buffered() -> None:
+    audio = BoundedAudioQueue(max_bytes=8, cancel_event=threading.Event())
+    result: list[bool] = []
+    waiter = threading.Thread(target=lambda: result.append(audio.wait_for_first_chunk(0.5)))
+    waiter.start()
+
+    time.sleep(0.02)
+    audio.put(b"audio")
+
+    waiter.join(timeout=0.5)
+    assert result == [True]
+    assert audio.byte_count == 5
+
+
+def test_audio_queue_first_chunk_wait_ends_when_empty_stream_finishes() -> None:
+    audio = BoundedAudioQueue(max_bytes=8, cancel_event=threading.Event())
+    audio.finish()
+
+    assert not audio.wait_for_first_chunk(0.5)
+
+
+def test_audio_queue_remembers_first_chunk_after_consumer_drains_it() -> None:
+    audio = BoundedAudioQueue(max_bytes=8, cancel_event=threading.Event())
+    audio.put(b"audio")
+    assert audio.get() == b"audio"
+
+    assert audio.wait_for_first_chunk(0.0)
+
+
 def test_cancel_wakes_a_producer_blocked_on_capacity() -> None:
     cancel_event = threading.Event()
     audio = BoundedAudioQueue(max_bytes=4, cancel_event=cancel_event)

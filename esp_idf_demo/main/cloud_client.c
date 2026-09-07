@@ -2758,7 +2758,7 @@ esp_err_t cloud_client_stream_realtime_audio_cancellable(
     esp_http_client_config_t config = {
         .url = audio_stream_url,
         .method = HTTP_METHOD_GET,
-        .timeout_ms = DEMO_REALTIME_AUDIO_OPEN_TIMEOUT_MS,
+        .timeout_ms = DEMO_REALTIME_AUDIO_FIRST_CHUNK_TIMEOUT_MS,
         .event_handler = cloud_realtime_audio_event_handler,
         .user_data = audio_headers,
     };
@@ -2917,6 +2917,7 @@ esp_err_t cloud_client_stream_realtime_audio_cancellable(
     }
 
     bool saw_first_chunk = false;
+    bool applied_stream_read_timeout = false;
     int64_t last_chunk_us = 0;
     esp_err_t stream_result = ESP_OK;
     while (true) {
@@ -2939,6 +2940,22 @@ esp_err_t cloud_client_stream_realtime_audio_cancellable(
                 break;
             }
             continue;
+        }
+
+        if (!applied_stream_read_timeout) {
+            esp_err_t timeout_ret = esp_http_client_set_timeout_ms(
+                client, DEMO_REALTIME_AUDIO_READ_TIMEOUT_MS);
+            if (timeout_ret != ESP_OK) {
+                ESP_LOGE(TAG,
+                         "Failed to apply realtime audio stream timeout: %s",
+                         esp_err_to_name(timeout_ret));
+                stream_result = timeout_ret;
+                break;
+            }
+            applied_stream_read_timeout = true;
+            ESP_LOGI(TAG,
+                     "Realtime audio first body bytes received; stream read timeout now %d ms",
+                     DEMO_REALTIME_AUDIO_READ_TIMEOUT_MS);
         }
 
         if (framed_packetization) {

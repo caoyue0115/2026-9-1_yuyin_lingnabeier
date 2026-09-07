@@ -9,6 +9,7 @@ target_add_binary_data(${COMPONENT_LIB} "../spiffs/followup_bell_1.pcm" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "../spiffs/speak_1.pcm" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "../spiffs/repeat_1.pcm" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "../spiffs/followup_1.pcm" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "../spiffs/technical_error_1.pcm" BINARY)
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/../spiffs")
 spiffs_create_partition_image(storage ../spiffs FLASH_IN_PROJECT)
