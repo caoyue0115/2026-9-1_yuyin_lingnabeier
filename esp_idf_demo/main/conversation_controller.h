@@ -15,6 +15,12 @@
 #ifndef CONVERSATION_FINAL_DONE_DELAY_MS
 #define CONVERSATION_FINAL_DONE_DELAY_MS 1000
 #endif
+#ifndef CONVERSATION_DEFAULT_MAX_TURNS
+#define CONVERSATION_DEFAULT_MAX_TURNS 4
+#endif
+#ifndef CONVERSATION_GAME_MAX_TURNS
+#define CONVERSATION_GAME_MAX_TURNS 10
+#endif
 
 typedef enum {
     CONVERSATION_STATE_IDLE = 0,
@@ -60,6 +66,7 @@ typedef struct {
     conversation_state_t state;
     uint8_t turn_index;
     uint8_t followup_count;
+    uint8_t max_turns;
     uint16_t attempt_serial;
     bool reprompt_used;
     bool done_prompt_issued;
@@ -75,6 +82,8 @@ typedef struct {
 } conversation_transition_t;
 
 void conversation_controller_init(conversation_controller_t *controller);
+void conversation_controller_set_max_turns(conversation_controller_t *controller,
+                                           uint8_t max_turns);
 conversation_transition_t conversation_controller_handle(conversation_controller_t *controller,
                                                          conversation_event_t event,
                                                          int64_t now_ms);

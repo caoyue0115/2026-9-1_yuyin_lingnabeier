@@ -733,10 +733,18 @@ static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *
             goto technical_close;
         }
         const int64_t playback_done_ms = esp_timer_get_time() / 1000;
-        ret = cloud_conversation_complete_playback(conversation, turn_id);
+        ret = cloud_conversation_complete_playback(conversation, turn_id, &result);
         if (ret != ESP_OK) {
             goto technical_close;
         }
+        conversation_controller_set_max_turns(
+            &controller,
+            result.max_turns > 0 ? result.max_turns : CONVERSATION_DEFAULT_MAX_TURNS);
+        ESP_LOGI(TAG,
+                 "v6 interaction_mode=%s max_turns=%u pet_mood=%s",
+                 result.interaction_mode[0] != '\0' ? result.interaction_mode : "normal",
+                 (unsigned)controller.max_turns,
+                 result.pet_mood[0] != '\0' ? result.pet_mood : "curious");
         conversation_transition_t played = conversation_controller_handle(
             &controller, CONVERSATION_EVENT_PLAYBACK_DONE,
             playback_done_ms);

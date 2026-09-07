@@ -145,6 +145,26 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_games (
+                device_id TEXT PRIMARY KEY,
+                game_id TEXT NOT NULL,
+                game_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                turn_count INTEGER NOT NULL DEFAULT 0,
+                clue_count INTEGER NOT NULL DEFAULT 0,
+                guess_count INTEGER NOT NULL DEFAULT 0,
+                answer_key TEXT,
+                answer_label TEXT,
+                clues_json TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()

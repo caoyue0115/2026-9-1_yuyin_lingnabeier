@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -79,13 +79,15 @@ def test_favorite_can_be_remembered_recalled_and_forgotten(pet_db) -> None:
 
 def test_status_and_play_actions_update_deterministic_state(pet_db) -> None:
     played = process_pet_turn("陪我玩", "board-1", "turn-1", now=_at(7))
-    status = process_pet_turn("我们的亲密度是多少", "board-1", "turn-2", now=_at(7, 3))
+    snapshot = get_pet_snapshot("board-1", now=_at(7) + timedelta(seconds=3))
 
-    assert played.profile.mood == "excited"
-    assert played.profile.energy == 82
-    assert played.profile.affection == 14
-    assert "线索问答" in played.answer
-    assert "亲密度是14" in status.answer
+    assert played.profile.mood == "happy"
+    assert played.profile.energy == 89
+    assert played.profile.affection == 12
+    assert played.game_active is True
+    assert "你想说三条线索" in played.answer
+    assert snapshot["affection"] == 12
+    assert snapshot["game"]["active"] is True
 
 
 def test_companion_context_is_added_to_system_prompt() -> None:
@@ -156,3 +158,45 @@ def test_general_v6_turn_passes_compact_device_memory_to_llm(pet_db, monkeypatch
     assert result.answer == "当然可以。"
     assert "用户明确说自己叫小悦" in captured["companion_context"]
     assert len(captured["companion_context"]) < 160
+
+
+def test_third_player_clue_uses_llm_guess_without_rag(pet_db, monkeypatch) -> None:
+    process_pet_turn("你来猜，我说线索", "board-1", "game-1")
+    process_pet_turn("她是一位女王", "board-1", "game-2")
+    process_pet_turn("她有一个妹妹", "board-1", "game-3")
+    captured: dict[str, object] = {}
+
+    def answer(question, references, **kwargs):
+        captured["question"] = question
+        captured["references"] = references
+        captured.update(kwargs)
+        return iter(["我猜是艾莎，对吗？"])
+
+    monkeypatch.setattr(conversation_service, "stream_answer_text", answer)
+    monkeypatch.setattr(
+        conversation_service,
+        "retrieve_references",
+        lambda *args, **kwargs: pytest.fail("game clue turn must not query RAG"),
+    )
+    monkeypatch.setattr(conversation_service, "realtime_tts_health", lambda: False)
+    monkeypatch.setattr(
+        conversation_service,
+        "_stream_answer_audio",
+        lambda segments, answer: iter([b"audio"]),
+    )
+    audio = BoundedAudioQueue(max_bytes=32, cancel_event=threading.Event())
+
+    result = conversation_service.run_turn(
+        "她会冰雪魔法",
+        [],
+        threading.Event(),
+        audio,
+        device_id="board-1",
+        event_id="game-4",
+    )
+
+    assert result.answer == "我猜是艾莎，对吗？"
+    assert result.interaction_mode == "game"
+    assert result.max_turns == 10
+    assert captured["references"] == []
+    assert "她会冰雪魔法" in str(captured["companion_context"])

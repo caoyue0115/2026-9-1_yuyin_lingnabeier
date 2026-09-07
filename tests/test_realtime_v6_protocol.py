@@ -5,6 +5,8 @@ import hashlib
 import pytest
 
 from src.models.conversation_v6 import (
+    DEFAULT_MAX_TURNS,
+    GAME_MAX_TURNS,
     ConversationLimits,
     MAX_CONNECTION_SECONDS,
     MAX_FRAMES_PER_TURN,
@@ -21,6 +23,7 @@ from src.models.conversation_v6 import (
     conversation_done_event,
     conversation_ready_event,
     parse_client_control,
+    turn_complete_event,
 )
 
 
@@ -389,7 +392,7 @@ def test_wire_ingestion_measures_payload_before_delegating_to_sequencing() -> No
 
 
 def test_conversation_limits_enforce_turn_count_and_connection_duration() -> None:
-    limits = ConversationLimits(started_at=10.0)
+    limits = ConversationLimits(started_at=10.0, max_turns=MAX_TURNS)
 
     for turn_index in range(MAX_TURNS):
         limits.start_turn(f"turn-{turn_index}", turn_index, now=10.0)
@@ -399,6 +402,38 @@ def test_conversation_limits_enforce_turn_count_and_connection_duration() -> Non
     timed_limits = ConversationLimits(started_at=10.0)
     with pytest.raises(ProtocolError, match="^connection_time_exceeded$"):
         timed_limits.start_turn("turn-0", 0, now=10.0 + MAX_CONNECTION_SECONDS + 1)
+
+
+def test_conversation_limits_expand_only_after_game_mode_is_confirmed() -> None:
+    limits = ConversationLimits(started_at=0.0)
+    for turn_index in range(DEFAULT_MAX_TURNS):
+        limits.start_turn(f"normal-{turn_index}", turn_index, now=0.0)
+    with pytest.raises(ProtocolError, match="^turn_limit_exceeded$"):
+        limits.start_turn("normal-over-limit", DEFAULT_MAX_TURNS, now=0.0)
+
+    game_limits = ConversationLimits(started_at=0.0)
+    game_limits.start_turn("game-0", 0, now=0.0)
+    game_limits.set_max_turns(GAME_MAX_TURNS)
+    for turn_index in range(1, GAME_MAX_TURNS):
+        game_limits.start_turn(f"game-{turn_index}", turn_index, now=0.0)
+    with pytest.raises(ProtocolError, match="^turn_limit_exceeded$"):
+        game_limits.start_turn("game-over-limit", GAME_MAX_TURNS, now=0.0)
+
+
+def test_turn_complete_can_publish_game_limit_and_pet_mood() -> None:
+    payload = turn_complete_event(
+        "conversation-1",
+        "turn-1",
+        0,
+        TurnOutcome.PLAYED,
+        interaction_mode="game",
+        max_turns=GAME_MAX_TURNS,
+        pet_mood="happy",
+    ).to_payload()
+
+    assert payload["interaction_mode"] == "game"
+    assert payload["max_turns"] == 10
+    assert payload["pet_mood"] == "happy"
 
 
 def test_conversation_limits_reject_reused_turn_ids_and_conflicting_indices() -> None:
@@ -644,7 +679,9 @@ def test_error_completion_rejects_idle_without_mutating_state(transition: str) -
 
 
 def test_protocol_limits_are_locked() -> None:
-    assert MAX_TURNS == 4
+    assert DEFAULT_MAX_TURNS == 4
+    assert GAME_MAX_TURNS == 10
+    assert MAX_TURNS == 10
     assert MAX_FRAME_BYTES == 4096
     assert MAX_TURN_AUDIO_BYTES == 16_000 * 2 * 8
-    assert MAX_CONNECTION_SECONDS == 180
+    assert MAX_CONNECTION_SECONDS == 360

@@ -412,6 +412,49 @@ def test_turn_result_is_sent_before_first_audio_and_tts_worker_finishes(monkeypa
     asyncio.run(run_until_result())
 
 
+def test_playback_complete_publishes_game_mode_limit_and_mood() -> None:
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_json(self, payload: dict) -> None:
+            self.sent.append(payload)
+
+    session = realtime_v6.conversation_registry.create(device_id="board-1")
+    turn = session.start_turn("turn-0", 0)
+    turn.state_machine.on_turn_end()
+    turn.state_machine.on_asr_final("陪我玩")
+    turn.state_machine.on_turn_result(
+        session_id="session-1",
+        audio_stream_url="/audio",
+    )
+    turn.interaction_mode = "game"
+    turn.max_turns = 10
+    turn.pet_mood = "happy"
+    websocket = FakeWebSocket()
+    socket = realtime_v6.ConversationSocket(websocket, session, device_id="board-1")
+    socket.started = True
+
+    asyncio.run(
+        socket._handle_text(
+            json.dumps(
+                {
+                    "type": "turn_playback_complete",
+                    "conversation_id": session.conversation_id,
+                    "turn_id": turn.turn_id,
+                    "turn_index": turn.turn_index,
+                }
+            )
+        )
+    )
+
+    complete = websocket.sent[-1]
+    assert complete["type"] == "turn_complete"
+    assert complete["interaction_mode"] == "game"
+    assert complete["max_turns"] == 10
+    assert complete["pet_mood"] == "happy"
+
+
 def test_first_audio_deadline_closes_early_url_as_technical_error(monkeypatch) -> None:
     class FakeWebSocket:
         def __init__(self) -> None:

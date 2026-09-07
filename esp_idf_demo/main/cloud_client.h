@@ -26,6 +26,14 @@
 #define DEMO_CLOUD_ERROR_CODE_MAX_LEN 128
 #endif
 
+#ifndef DEMO_CLOUD_INTERACTION_MODE_MAX_LEN
+#define DEMO_CLOUD_INTERACTION_MODE_MAX_LEN 16
+#endif
+
+#ifndef DEMO_CLOUD_PET_MOOD_MAX_LEN
+#define DEMO_CLOUD_PET_MOOD_MAX_LEN 16
+#endif
+
 #ifndef DEMO_CLOUD_OTA_FIELD_MAX_LEN
 #define DEMO_CLOUD_OTA_FIELD_MAX_LEN 128
 #endif
@@ -67,6 +75,9 @@ typedef struct {
     char session_id[DEMO_CLOUD_TASK_ID_MAX_LEN];
     char status[DEMO_CLOUD_STATUS_MAX_LEN];
     char audio_stream_url[DEMO_CLOUD_AUDIO_URL_MAX_LEN];
+    char interaction_mode[DEMO_CLOUD_INTERACTION_MODE_MAX_LEN];
+    char pet_mood[DEMO_CLOUD_PET_MOOD_MAX_LEN];
+    uint8_t max_turns;
 } cloud_realtime_session_t;
 
 typedef struct {

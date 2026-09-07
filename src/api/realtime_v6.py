@@ -15,7 +15,6 @@ from fastapi import APIRouter, Header, HTTPException, WebSocket
 from fastapi.responses import StreamingResponse
 
 from src.models.conversation_v6 import (
-    MAX_TURNS,
     ProtocolError,
     TurnOutcome,
     TurnState,
@@ -302,10 +301,10 @@ class ConversationSocket:
         requested_index = payload.get("turn_index")
         if (
             payload.get("type") == "turn_start"
-            and self.session.turn_count >= MAX_TURNS
+            and self.session.turn_count >= self.session.max_turns
             and isinstance(requested_index, int)
             and not isinstance(requested_index, bool)
-            and requested_index >= MAX_TURNS
+            and requested_index >= self.session.max_turns
         ):
             raise ProtocolError("turn_limit_exceeded")
         control = parse_client_control(payload)
@@ -396,6 +395,7 @@ class ConversationSocket:
             task.add_done_callback(self._tasks.discard)
         elif control.type == "turn_playback_complete":
             transition = turn.state_machine.on_turn_playback_complete(control)
+            playback_metadata = self.session.playback_metadata(turn.turn_id)
             demo_diagnostics.record(
                 "playback_complete",
                 device_id=self.device_id,
@@ -404,13 +404,17 @@ class ConversationSocket:
                 turn_index=turn.turn_index,
                 state="ready",
                 memory=self.session.history(),
+                **playback_metadata,
             )
-            await self._send(build_turn_event(
-                transition,
-                conversation_id=self.session.conversation_id,
-                turn_id=turn.turn_id,
-                turn_index=turn.turn_index,
-            ))
+            await self._send(
+                turn_complete_event(
+                    self.session.conversation_id,
+                    turn.turn_id,
+                    turn.turn_index,
+                    transition.outcome or TurnOutcome.PLAYED,
+                    **playback_metadata,
+                )
+            )
         return False
 
     async def _handle_binary(self, body: bytes) -> None:

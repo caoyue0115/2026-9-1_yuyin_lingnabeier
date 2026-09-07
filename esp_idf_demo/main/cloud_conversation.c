@@ -194,6 +194,23 @@ static void v6_handle_json(cloud_conversation_t *conversation, const char *json)
             }
         } else if (strcmp(type, "turn_complete") == 0) {
             const char *outcome = v6_json_string(root, "outcome");
+            const char *interaction_mode = v6_json_string(root, "interaction_mode");
+            const char *pet_mood = v6_json_string(root, "pet_mood");
+            const cJSON *max_turns = cJSON_GetObjectItemCaseSensitive(root, "max_turns");
+            if (interaction_mode != NULL) {
+                snprintf(conversation->result.interaction_mode,
+                         sizeof(conversation->result.interaction_mode),
+                         "%s", interaction_mode);
+            }
+            if (pet_mood != NULL) {
+                snprintf(conversation->result.pet_mood,
+                         sizeof(conversation->result.pet_mood),
+                         "%s", pet_mood);
+            }
+            if (cJSON_IsNumber(max_turns) && max_turns->valueint >= 1 &&
+                max_turns->valueint <= 10) {
+                conversation->result.max_turns = (uint8_t)max_turns->valueint;
+            }
             v6_flag_set(&conversation->playback_complete);
             if (conversation->result.audio_stream_url[0] == '\0') {
                 snprintf(conversation->result.status,
@@ -557,7 +574,8 @@ esp_err_t cloud_conversation_finish_turn(cloud_conversation_t *conversation,
 }
 
 esp_err_t cloud_conversation_complete_playback(cloud_conversation_t *conversation,
-                                               const char *turn_id)
+                                               const char *turn_id,
+                                               cloud_realtime_session_t *result)
 {
     if (conversation == NULL || turn_id == NULL || strcmp(turn_id, conversation->turn_id) != 0) {
         return ESP_ERR_INVALID_ARG;
@@ -585,6 +603,9 @@ esp_err_t cloud_conversation_complete_playback(cloud_conversation_t *conversatio
     }
     const esp_err_t ret =
         v6_wait_flag(conversation, &conversation->playback_complete, V6_WAIT_MS);
+    if (ret == ESP_OK && result != NULL) {
+        *result = conversation->result;
+    }
     ESP_LOGI(TAG,
              "v6 playback_complete wait result=%s ack=%d disconnected=%d error_received=%d",
              esp_err_to_name(ret),

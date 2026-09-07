@@ -171,6 +171,34 @@ def test_session_enforces_task1_turn_order_and_limit() -> None:
         session.start_turn("t4", 4)
 
 
+def test_game_result_expands_session_to_ten_turns(monkeypatch) -> None:
+    monkeypatch.setattr(
+        conversation_service,
+        "run_turn",
+        lambda *args, **kwargs: TurnRunResult(
+            answer="开始玩吧",
+            interaction_mode="game",
+            max_turns=10,
+            pet_mood="happy",
+        ),
+    )
+    session = ConversationSession.for_test()
+    session.start_turn("t0", 0)
+    session.process_turn("t0", "陪我玩").result(timeout=1.0)
+
+    assert session.max_turns == 10
+    assert session.playback_metadata("t0") == {
+        "interaction_mode": "game",
+        "max_turns": 10,
+        "pet_mood": "happy",
+    }
+    for index in range(1, 10):
+        turn = session.start_turn(f"t{index}", index)
+        session.commit_turn(turn.turn_id, question="线索", answer="继续")
+    with pytest.raises(ProtocolError, match="turn_limit_exceeded"):
+        session.start_turn("t10", 10)
+
+
 def test_session_allows_one_new_turn_id_after_asr_empty_at_same_index() -> None:
     session = ConversationSession.for_test()
     empty_turn = session.start_turn("t0", 0)

@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from src.services.pet_games import (
+    GAME_MAX_TURNS,
+    GameDecision,
+    get_game_snapshot,
+    process_game_turn,
+)
 from src.storage.db import connect
 
 
@@ -13,6 +19,7 @@ PET_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 DEFAULT_AFFECTION = 10
 DEFAULT_ENERGY = 80
 DEFAULT_MOOD = "curious"
+DEFAULT_CONVERSATION_TURNS = 4
 
 MOOD_LABELS = {
     "curious": "好奇",
@@ -81,6 +88,9 @@ class PetTurnResult:
     memories: dict[str, str]
     prompt_context: str
     duplicate_event: bool = False
+    game_active: bool = False
+    max_turns: int = DEFAULT_CONVERSATION_TURNS
+    game: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,19 +99,21 @@ class _Intent:
     value: str = ""
 
 
-def get_pet_snapshot(device_id: str) -> dict[str, Any]:
+def get_pet_snapshot(device_id: str, *, now: datetime | None = None) -> dict[str, Any]:
     normalized_device = _normalize_device_id(device_id)
-    now = datetime.now(timezone.utc)
+    current_time = _as_utc(now or datetime.now(timezone.utc))
     conn = connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        profile = _get_or_create_profile(conn, normalized_device, now)
+        profile = _get_or_create_profile(conn, normalized_device, current_time)
         memories = _load_memories(conn, normalized_device)
+        game = get_game_snapshot(conn, normalized_device, now=current_time)
         conn.commit()
     finally:
         conn.close()
     payload = profile.public_dict()
     payload["memories"] = memories
+    payload["game"] = game
     return payload
 
 
@@ -123,6 +135,7 @@ def process_pet_turn(
     local_date = current_time.astimezone(PET_TIMEZONE).date()
 
     conn = connect()
+    game_decision = GameDecision()
     try:
         conn.execute("BEGIN IMMEDIATE")
         profile = _get_or_create_profile(conn, normalized_device, current_time)
@@ -153,7 +166,21 @@ def process_pet_turn(
                 energy_delta += min(10, 100 - energy)
                 mood_after = DEFAULT_MOOD
 
-            if intent.action == "remember_name":
+            game_decision = process_game_turn(
+                conn,
+                normalized_device,
+                normalized_question,
+                energy=_clamp(energy + energy_delta),
+                mood=mood_after,
+                now=current_time,
+            )
+            if game_decision.handled or game_decision.llm_instruction:
+                intent = _Intent(game_decision.action or "game")
+                affection_delta += game_decision.affection_delta
+                energy_delta += game_decision.energy_delta
+                if game_decision.mood:
+                    mood_after = game_decision.mood
+            elif intent.action == "remember_name":
                 _upsert_memory(conn, normalized_device, "name", intent.value, normalized_event, current_time)
                 memory_changed = True
                 mood_after = "happy"
@@ -236,6 +263,7 @@ def process_pet_turn(
             (normalized_device,),
         ).fetchone()
         memories = _load_memories(conn, normalized_device)
+        game = get_game_snapshot(conn, normalized_device, now=current_time)
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -244,15 +272,28 @@ def process_pet_turn(
         conn.close()
 
     profile = _profile_from_row(row)
-    answer = _render_answer(intent, profile, memories, first_today, memory_changed)
+    answer = game_decision.answer or _render_answer(
+        intent,
+        profile,
+        memories,
+        first_today,
+        memory_changed,
+    )
+    prompt_context = _build_prompt_context(profile, memories)
+    if game_decision.llm_instruction:
+        prompt_context += game_decision.llm_instruction
+    game_active = bool(game and game.get("active"))
     return PetTurnResult(
         handled=answer is not None,
         answer=answer,
         action=intent.action,
         profile=profile,
         memories=memories,
-        prompt_context=_build_prompt_context(profile, memories),
+        prompt_context=prompt_context,
         duplicate_event=duplicate,
+        game_active=game_active,
+        max_turns=GAME_MAX_TURNS if game_active else DEFAULT_CONVERSATION_TURNS,
+        game=game,
     )
 
 
@@ -360,7 +401,9 @@ def _build_prompt_context(profile: PetProfile, memories: dict[str, str]) -> str:
     return (
         "设备长期陪伴档案："
         + "；".join(parts)
-        + "。只在相关时自然使用，不主动朗读亲密度或档案，不声称通过声纹识别了具体的人。"
+        + "。心情会影响表达：好奇时自然追问，开心时温暖鼓励，兴奋时更活泼但仍简短，"
+        "困倦时语气轻缓且不主动提议玩游戏。只在相关时自然使用，不主动朗读亲密度或档案，"
+        "不声称通过声纹识别了具体的人。"
     )
 
 

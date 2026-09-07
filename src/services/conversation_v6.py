@@ -11,7 +11,8 @@ from typing import Any
 
 from src.models.conversation_v6 import (
     ConversationLimits,
-    MAX_TURNS,
+    DEFAULT_MAX_TURNS,
+    GAME_MAX_TURNS,
     ProtocolError,
     ServerEvent,
     TurnState,
@@ -53,6 +54,9 @@ class TurnRunResult:
     status: str = "committed"
     interrupted: bool = False
     answer_truncated: bool = False
+    interaction_mode: str = "normal"
+    max_turns: int = DEFAULT_MAX_TURNS
+    pet_mood: str = "curious"
 
 
 @dataclass(slots=True)
@@ -68,6 +72,9 @@ class ConversationTurn:
     question_truncated: bool = False
     answer_truncated: bool = False
     status: str = "receiving"
+    interaction_mode: str = "normal"
+    max_turns: int = DEFAULT_MAX_TURNS
+    pet_mood: str = "curious"
     future: Future[Any] | None = None
     _cancel_condition: threading.Condition = field(default_factory=threading.Condition)
     _cancellation_in_progress: bool = False
@@ -102,8 +109,8 @@ class ConversationSession:
         close_timeout_seconds: float | None = None,
         question_chars: int | None = None,
         answer_chars: int | None = None,
-        quota_limit: int = 4,
-        turn_budget_limit: int = 4,
+        quota_limit: int = GAME_MAX_TURNS,
+        turn_budget_limit: int = GAME_MAX_TURNS,
         worker: Callable[[ConversationTurn], Any] | None = None,
     ) -> None:
         self.conversation_id = conversation_id or str(uuid.uuid4())
@@ -148,6 +155,10 @@ class ConversationSession:
     def turn_count(self) -> int:
         return self._limits.turn_count
 
+    @property
+    def max_turns(self) -> int:
+        return self._limits.max_turns
+
     def start_turn(self, turn_id: str, turn_index: int) -> ConversationTurn:
         if not isinstance(turn_id, str) or not turn_id:
             raise ValueError("missing_turn_id")
@@ -168,7 +179,7 @@ class ConversationSession:
                 if len(same_index) != 1 or same_index[0].status != "asr_empty":
                     raise ProtocolError("turn_index_conflict")
                 allow_index_retry = True
-            elif self._limits.turn_count >= MAX_TURNS:
+            elif self._limits.turn_count >= self._limits.max_turns:
                 raise ProtocolError("turn_limit_exceeded")
             cancel_event = threading.Event()
             audio = BoundedAudioQueue(self._max_audio_queue_bytes, cancel_event)
@@ -381,6 +392,10 @@ class ConversationSession:
             raise
         turn.answer, turn.answer_truncated = _truncate_text(result.answer, self._answer_chars)
         turn.answer_truncated = turn.answer_truncated or result.answer_truncated
+        turn.interaction_mode = result.interaction_mode
+        turn.max_turns = result.max_turns
+        turn.pet_mood = result.pet_mood
+        self._limits.set_max_turns(result.max_turns)
         self.commit_turn(
             turn.turn_id,
             question=turn.question,
@@ -388,6 +403,14 @@ class ConversationSession:
             interrupted=result.interrupted,
         )
         return result
+
+    def playback_metadata(self, turn_id: str) -> dict[str, Any]:
+        turn = self._require_turn(turn_id)
+        return {
+            "interaction_mode": turn.interaction_mode,
+            "max_turns": turn.max_turns,
+            "pet_mood": turn.pet_mood,
+        }
 
     def _commit_context(self, turn: ConversationTurn, *, interrupted: bool) -> dict[str, Any]:
         question, question_truncated = _truncate_text(turn.question, self._question_chars)
@@ -447,6 +470,7 @@ def run_turn(
     _check_cancel(cancel_event, answer_parts)
     pet_answer: str | None = None
     companion_context = ""
+    pet_turn = None
     if device_id and event_id:
         try:
             pet_turn = process_pet_turn(question, device_id, event_id)
@@ -459,8 +483,13 @@ def run_turn(
     retrieval_question = _retrieval_question(question, history)
     route = route_question(retrieval_question)
     references: list[dict] = []
-    canned_answer = pet_answer or answer_navigation_question(question, device_id)
+    game_llm_turn = bool(pet_turn and pet_turn.action == "game_judy_guess")
+    canned_answer = pet_answer
+    if canned_answer is None and not game_llm_turn:
+        canned_answer = answer_navigation_question(question, device_id)
     if canned_answer is not None:
+        pass
+    elif game_llm_turn:
         pass
     elif route == QuestionRoute.DYNAMIC_CURRENT:
         canned_answer = DYNAMIC_REFUSAL
@@ -486,7 +515,13 @@ def run_turn(
             exc.partial_answer = answer
             raise
         audio_queue.finish()
-        return TurnRunResult(answer=answer, answer_truncated=answer_truncated)
+        return TurnRunResult(
+            answer=answer,
+            answer_truncated=answer_truncated,
+            interaction_mode="game" if pet_turn and pet_turn.game_active else "normal",
+            max_turns=pet_turn.max_turns if pet_turn else DEFAULT_MAX_TURNS,
+            pet_mood=pet_turn.profile.mood if pet_turn and pet_turn.profile else "curious",
+        )
 
     llm_question = _question_with_history(question, history)
     if companion_context:
@@ -525,7 +560,13 @@ def run_turn(
     if not answer:
         raise ValueError("llm_empty_text")
     audio_queue.finish()
-    return TurnRunResult(answer=answer, answer_truncated=bool(assembly["truncated"]))
+    return TurnRunResult(
+        answer=answer,
+        answer_truncated=bool(assembly["truncated"]),
+        interaction_mode="game" if pet_turn and pet_turn.game_active else "normal",
+        max_turns=pet_turn.max_turns if pet_turn else DEFAULT_MAX_TURNS,
+        pet_mood=pet_turn.profile.mood if pet_turn and pet_turn.profile else "curious",
+    )
 
 
 def _iter_llm_segments(

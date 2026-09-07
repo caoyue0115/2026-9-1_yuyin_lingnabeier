@@ -43,6 +43,31 @@ int main(void)
     assert(send(&controller, CONVERSATION_EVENT_TIMER, 9000).action == CONVERSATION_ACTION_PLAY_DONE);
 
     conversation_controller_init(&controller);
+    assert(controller.max_turns == CONVERSATION_DEFAULT_MAX_TURNS);
+    conversation_controller_set_max_turns(&controller, CONVERSATION_GAME_MAX_TURNS);
+    assert(controller.max_turns == CONVERSATION_GAME_MAX_TURNS);
+    send(&controller, CONVERSATION_EVENT_BEGIN, 0);
+    send(&controller, CONVERSATION_EVENT_PROMPT_DONE, 1);
+    send(&controller, CONVERSATION_EVENT_RECORDING_DONE, 2);
+    send(&controller, CONVERSATION_EVENT_TURN_RESULT, 3);
+    for (int followup = 1; followup <= 9; ++followup) {
+        conversation_transition_t transition =
+            send(&controller, CONVERSATION_EVENT_PLAYBACK_DONE, 1000 * followup);
+        assert(controller.state == CONVERSATION_STATE_FOLLOWUP_CUE);
+        assert(transition.action == CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE);
+        send(&controller, CONVERSATION_EVENT_PROMPT_DONE, 1000 * followup + 1);
+        send(&controller, CONVERSATION_EVENT_SPEECH_STARTED, 1000 * followup + 2);
+        send(&controller, CONVERSATION_EVENT_RECORDING_DONE, 1000 * followup + 3);
+        send(&controller, CONVERSATION_EVENT_TURN_RESULT, 1000 * followup + 4);
+    }
+    assert(controller.followup_count == 9);
+    assert(send(&controller, CONVERSATION_EVENT_PLAYBACK_DONE, 10000).action ==
+           CONVERSATION_ACTION_NONE);
+    assert(controller.state == CONVERSATION_STATE_ENDING);
+    conversation_controller_set_max_turns(&controller, 11);
+    assert(controller.max_turns == CONVERSATION_DEFAULT_MAX_TURNS);
+
+    conversation_controller_init(&controller);
     send(&controller, CONVERSATION_EVENT_BEGIN, 0);
     send(&controller, CONVERSATION_EVENT_PROMPT_DONE, 0);
     send(&controller, CONVERSATION_EVENT_RECORDING_DONE, 1);

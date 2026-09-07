@@ -8,10 +8,12 @@ from typing import Any, Callable, Mapping
 from types import MappingProxyType
 
 
-MAX_TURNS = 4
+DEFAULT_MAX_TURNS = 4
+GAME_MAX_TURNS = 10
+MAX_TURNS = GAME_MAX_TURNS
 MAX_FRAME_BYTES = 4096
 MAX_TURN_AUDIO_BYTES = 16_000 * 2 * 8
-MAX_CONNECTION_SECONDS = 180
+MAX_CONNECTION_SECONDS = 360
 MAX_FRAMES_PER_TURN = 1024
 SUPPORTED_AUDIO_FORMATS = frozenset({"opus"})
 SUPPORTED_ANSWER_MODES = frozenset({"streaming"})
@@ -245,9 +247,30 @@ def turn_result_event(
 
 
 def turn_complete_event(
-    conversation_id: str, turn_id: str, turn_index: int, outcome: TurnOutcome
+    conversation_id: str,
+    turn_id: str,
+    turn_index: int,
+    outcome: TurnOutcome,
+    *,
+    interaction_mode: str | None = None,
+    max_turns: int | None = None,
+    pet_mood: str | None = None,
 ) -> ServerEvent:
-    return _turn_event("turn_complete", conversation_id, turn_id, turn_index, outcome=outcome)
+    data: dict[str, Any] = {}
+    if interaction_mode is not None:
+        data["interaction_mode"] = interaction_mode
+    if max_turns is not None:
+        data["max_turns"] = max_turns
+    if pet_mood is not None:
+        data["pet_mood"] = pet_mood
+    return _turn_event(
+        "turn_complete",
+        conversation_id,
+        turn_id,
+        turn_index,
+        outcome=outcome,
+        data=data,
+    )
 
 
 def turn_cancelled_event(conversation_id: str, turn_id: str, turn_index: int) -> ServerEvent:
@@ -288,12 +311,16 @@ class ConversationLimits:
         *,
         started_at: float | None = None,
         monotonic: Callable[[], float] = default_monotonic,
+        max_turns: int = DEFAULT_MAX_TURNS,
     ) -> None:
+        if not isinstance(max_turns, int) or isinstance(max_turns, bool) or not 1 <= max_turns <= MAX_TURNS:
+            raise ValueError("invalid_max_turns")
         self._monotonic = monotonic
         self._started_at = monotonic() if started_at is None else _validate_timestamp(started_at)
         self._last_activity_at = self._started_at
         self._turn_ids: set[str] = set()
         self._turn_indices: dict[int, int] = {}
+        self._max_turns = max_turns
 
     @property
     def turn_count(self) -> int:
@@ -302,6 +329,15 @@ class ConversationLimits:
     @property
     def attempt_count(self) -> int:
         return len(self._turn_ids)
+
+    @property
+    def max_turns(self) -> int:
+        return self._max_turns
+
+    def set_max_turns(self, value: int) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= MAX_TURNS:
+            raise ValueError("invalid_max_turns")
+        self._max_turns = max(value, self.turn_count)
 
     def now(self) -> float:
         return self._monotonic()
@@ -327,7 +363,7 @@ class ConversationLimits:
         turn_id = _require_nonempty_string(turn_id, "turn_id")
         if turn_id in self._turn_ids:
             raise ProtocolError("turn_id_reused")
-        if len(self._turn_indices) >= MAX_TURNS and turn_index not in self._turn_indices:
+        if len(self._turn_indices) >= self._max_turns and turn_index not in self._turn_indices:
             raise ProtocolError("turn_limit_exceeded")
         turn_index = _validate_turn_index(turn_index)
         attempts = self._turn_indices.get(turn_index, 0)
@@ -645,10 +681,23 @@ def _require_turn_correlation(
 
 def _validate_server_event(event: ServerEvent) -> None:
     if event.type == "turn_complete":
-        _require_event_data_keys(event.data, allowed=frozenset())
+        _require_event_data_keys(
+            event.data,
+            allowed=frozenset({"interaction_mode", "max_turns", "pet_mood"}),
+        )
         if not isinstance(event.outcome, TurnOutcome):
             raise ProtocolError("invalid_turn_outcome")
         _require_absent(event.highest_contiguous_sequence, "highest_contiguous_sequence")
+        if "interaction_mode" in event.data:
+            mode = _require_event_data_string(event.data, "interaction_mode")
+            if mode not in {"normal", "game"}:
+                raise ProtocolError("invalid_interaction_mode")
+        if "max_turns" in event.data:
+            max_turns = event.data["max_turns"]
+            if not isinstance(max_turns, int) or isinstance(max_turns, bool) or not 1 <= max_turns <= MAX_TURNS:
+                raise ProtocolError("invalid_max_turns")
+        if "pet_mood" in event.data:
+            _require_event_data_string(event.data, "pet_mood")
         return
     if event.type == "ack":
         _require_event_data_keys(event.data, allowed=frozenset({"acknowledged_type"}))

@@ -21,7 +21,21 @@ void conversation_controller_init(conversation_controller_t *controller)
     if (controller != NULL) {
         memset(controller, 0, sizeof(*controller));
         controller->state = CONVERSATION_STATE_IDLE;
+        controller->max_turns = CONVERSATION_DEFAULT_MAX_TURNS;
     }
+}
+
+void conversation_controller_set_max_turns(conversation_controller_t *controller,
+                                           uint8_t max_turns)
+{
+    if (controller == NULL) {
+        return;
+    }
+    if (max_turns < 1 || max_turns > CONVERSATION_GAME_MAX_TURNS) {
+        controller->max_turns = CONVERSATION_DEFAULT_MAX_TURNS;
+        return;
+    }
+    controller->max_turns = max_turns;
 }
 
 conversation_transition_t conversation_controller_handle(conversation_controller_t *controller,
@@ -92,7 +106,7 @@ conversation_transition_t conversation_controller_handle(conversation_controller
         break;
     case CONVERSATION_STATE_PLAYING:
         if (event == CONVERSATION_EVENT_PLAYBACK_DONE) {
-            if (controller->followup_count >= 3) {
+            if ((uint8_t)(controller->followup_count + 1) >= controller->max_turns) {
                 controller->state = CONVERSATION_STATE_ENDING;
                 controller->deadline_ms = now_ms + CONVERSATION_FINAL_DONE_DELAY_MS;
                 return make_transition(controller, CONVERSATION_ACTION_NONE);
