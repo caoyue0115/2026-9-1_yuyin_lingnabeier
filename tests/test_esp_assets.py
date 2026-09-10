@@ -217,12 +217,12 @@ class EspAssetTests(unittest.TestCase):
         self.assertLessEqual(intro.stat().st_size, 64 * 1024)
 
     def test_boot_sound_audio_asset_is_small_neutral_pcm_resource(self) -> None:
-        boot_sound = ESP_DIR / "spiffs" / "intro_1.pcm"
+        boot_sound = ESP_DIR / "spiffs" / "boot_1.pcm"
 
         self.assertTrue(boot_sound.exists())
         self.assertGreater(boot_sound.stat().st_size, 0)
         self.assertLessEqual(boot_sound.stat().st_size, 64 * 1024)
-        self.assertEqual(48_000, boot_sound.stat().st_size)
+        self.assertEqual(42_880, boot_sound.stat().st_size)
         boot_sound_bytes = boot_sound.read_bytes()
         self.assertEqual(0, len(boot_sound_bytes) % 2)
         self.assertNotEqual(b"RIFF", boot_sound_bytes[:4])
@@ -369,7 +369,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("DEMO_BOOT_SOUND_EMBEDDED_ENABLED", config)
         self.assertEqual("1", _read_macro_value(config, "DEMO_BOOT_SOUND_EMBEDDED_ENABLED"))
         self.assertIn("DEMO_BOOT_SOUND_PATH", config)
-        self.assertEqual('"/spiffs/intro_1.pcm"', _read_macro_value(config, "DEMO_BOOT_SOUND_PATH"))
+        self.assertEqual('"/spiffs/boot_1.pcm"', _read_macro_value(config, "DEMO_BOOT_SOUND_PATH"))
         self.assertIn("DEMO_BOOT_SOUND_MAX_BYTES", config)
         self.assertEqual("(64 * 1024)", _read_macro_value(config, "DEMO_BOOT_SOUND_MAX_BYTES"))
 
@@ -380,12 +380,12 @@ class EspAssetTests(unittest.TestCase):
         main_source = (ESP_DIR / "main" / "main.c").read_text(encoding="utf-8")
         prompt_source = (ESP_DIR / "main" / "prompt_arbiter.c").read_text(encoding="utf-8")
 
-        self.assertIn('target_add_binary_data(${COMPONENT_LIB} "../spiffs/intro_1.pcm" BINARY)', main_cmake)
+        self.assertIn('target_add_binary_data(${COMPONENT_LIB} "../spiffs/boot_1.pcm" BINARY)', main_cmake)
         self.assertIn("audio_out_play_pcm_buffer", audio_header)
         self.assertIn("audio_out_play_pcm_buffer", audio_source)
-        self.assertIn("_binary_intro_1_pcm_start", main_source)
-        self.assertIn("_binary_intro_1_pcm_end", main_source)
-        self.assertIn("_binary_intro_1_pcm_start", prompt_source)
+        self.assertIn("_binary_boot_1_pcm_start", main_source)
+        self.assertIn("_binary_boot_1_pcm_end", main_source)
+        self.assertIn("_binary_boot_1_pcm_start", prompt_source)
         self.assertIn("audio_out_play_pcm_buffer(boot_sound_start", main_source)
         self.assertNotIn("audio_out_play_pcm_file(DEMO_BOOT_SOUND_PATH", main_source)
 
@@ -550,9 +550,11 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("start = prompt_technical_error_start;", technical_error_case)
         self.assertNotIn("prompt_followup_bell_start", technical_error_case)
         for asset in (
+            "boot_1.pcm",
+            "network_connected_1.pcm",
+            "network_required_1.pcm",
             "followup_bell_1.pcm",
             "followup_1.pcm",
-            "intro_1.pcm",
             "repeat_1.pcm",
             "speak_1.pcm",
             "technical_error_1.pcm",
@@ -562,9 +564,25 @@ class EspAssetTests(unittest.TestCase):
         self.assertIn("_binary_speak_1_pcm_start", prompt_source)
         self.assertIn("_binary_repeat_1_pcm_start", prompt_source)
         self.assertIn("_binary_followup_1_pcm_start", prompt_source)
+        self.assertIn("_binary_network_connected_1_pcm_start", prompt_source)
+        self.assertIn("_binary_network_required_1_pcm_start", prompt_source)
+
+        network_connected_case = prompt_source.split("case PROMPT_NETWORK_CONNECTED:", 1)[1].split("break;", 1)[0]
+        self.assertIn("prompt_network_connected_start", network_connected_case)
+        self.assertNotIn("prompt_intro_start", network_connected_case)
+        network_required_case = prompt_source.split("case PROMPT_NETWORK_REQUIRED:", 1)[1].split("break;", 1)[0]
+        self.assertIn("prompt_network_required_start", network_required_case)
+        self.assertNotIn("prompt_followup_bell_start", network_required_case)
+        conversation_done_case = prompt_source.split("case PROMPT_CONVERSATION_DONE:", 1)[1].split("break;", 1)[0]
+        self.assertIn("prompt_followup_bell_start", conversation_done_case)
+        self.assertNotIn("prompt_network_connected_start", conversation_done_case)
+        self.assertNotIn("prompt_network_required_start", conversation_done_case)
 
     def test_v7_embedded_prompt_assets_have_locked_pcm_hashes(self) -> None:
         expected = {
+            "boot_1.pcm": (42_880, "c93abadfd0640705a6dfe9abd0327c45e8bcd3cf544fb8391f32b3034689a5f0"),
+            "network_connected_1.pcm": (60_688, "46537ba4aa731e4e54719786ffe9d7bc716f341b2adea7c339577711db0a69fa"),
+            "network_required_1.pcm": (50_560, "dfb79e02b33da8fa8e70b94447be0e20c6b2af46e7fa48ce4057b47e1d973d67"),
             "intro_1.pcm": (48_000, "b9cbe3581350a0a168b57d3c2b6c887099ae11c4b070fb741368cc5eb78cb424"),
             "followup_bell_1.pcm": (27_200, "88d1d0bbad225cf5c0fea00cff23dc037172f717cc6a95d9c579b4f23de2d8fb"),
             "speak_1.pcm": (41_600, "ae9f47198e664a6412718f50a675665bcd0943716933ae6ca1087ef9eb713e42"),
@@ -610,7 +628,7 @@ class EspAssetTests(unittest.TestCase):
         self.assertEqual(1, network.count('xTaskCreate(app_network_runtime_outage_task'))
         self.assertIn("portMUX_TYPE s_outage_lock", network)
         self.assertIn("prompt_arbiter_set_conversation_active", main_source)
-        self.assertIn("_binary_intro_1_pcm_start", main_source)
+        self.assertIn("_binary_boot_1_pcm_start", main_source)
 
         self.assertIn('#include "wifi_lifecycle.h"', manager_header)
         self.assertIn("WifiTransitionGate transition_gate_", manager_header)
@@ -657,6 +675,9 @@ class EspAssetTests(unittest.TestCase):
 
     def test_v7_voice_prompts_are_audible_and_not_clipped(self) -> None:
         minimum_sizes = {
+            "boot_1.pcm": 20_000,
+            "network_connected_1.pcm": 20_000,
+            "network_required_1.pcm": 20_000,
             "intro_1.pcm": 20_000,
             "followup_bell_1.pcm": 12_000,
             "repeat_1.pcm": 20_000,
@@ -671,6 +692,12 @@ class EspAssetTests(unittest.TestCase):
             self.assertGreaterEqual(len(payload), minimum_size)
             self.assertGreaterEqual(peak, 7_000)
             self.assertLess(peak, 30_000)
+
+        # Every newly generated status phrase keeps 300 ms of silence so its
+        # final syllable is not clipped by speaker teardown.
+        status_tail = bytes(9_600)
+        for name in ("boot_1.pcm", "network_connected_1.pcm", "network_required_1.pcm"):
+            self.assertEqual((ESP_DIR / "spiffs" / name).read_bytes()[-9_600:], status_tail)
 
         # Follow-up recording is armed immediately after this cue. Keep the
         # generated half-second silent tail so speaker decay cannot trip VAD.

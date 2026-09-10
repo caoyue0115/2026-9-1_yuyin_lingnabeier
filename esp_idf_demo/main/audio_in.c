@@ -272,12 +272,20 @@ static esp_err_t audio_in_record_after_voice_start_impl(const uint8_t *speech_pr
     return ESP_OK;
 }
 
-esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
-                                         size_t *out_speech_prefix_bytes,
-                                         uint32_t start_threshold,
-                                         uint32_t arm_delay_ms,
-                                         uint32_t timeout_ms,
-                                         audio_in_wait_metrics_t *out_metrics)
+static bool audio_in_cancel_requested(const volatile bool *cancel_requested)
+{
+    return cancel_requested != NULL &&
+           __atomic_load_n(cancel_requested, __ATOMIC_ACQUIRE);
+}
+
+esp_err_t audio_in_wait_for_speech_start_cancellable(
+    uint8_t **out_speech_prefix,
+    size_t *out_speech_prefix_bytes,
+    uint32_t start_threshold,
+    uint32_t arm_delay_ms,
+    uint32_t timeout_ms,
+    audio_in_wait_metrics_t *out_metrics,
+    const volatile bool *cancel_requested)
 {
     if (out_speech_prefix == NULL || out_speech_prefix_bytes == NULL ||
         start_threshold == 0 || timeout_ms == 0) {
@@ -320,12 +328,24 @@ esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
     bool armed_logged = false;
 
     while (esp_timer_get_time() < timeout_at_us) {
+        if (audio_in_cancel_requested(cancel_requested)) {
+            free(chunk);
+            free(speech_prefix);
+            audio_in_close_locked();
+            return DEMO_AUDIO_IN_ERR_CANCELLED;
+        }
         ret = audio_in_read_chunk(chunk, DEMO_AUDIO_CHUNK_BYTES);
         if (ret != ESP_OK) {
             free(chunk);
             free(speech_prefix);
             audio_in_close_locked();
             return ret;
+        }
+        if (audio_in_cancel_requested(cancel_requested)) {
+            free(chunk);
+            free(speech_prefix);
+            audio_in_close_locked();
+            return DEMO_AUDIO_IN_ERR_CANCELLED;
         }
 
         const int64_t now_us = esp_timer_get_time();
@@ -387,6 +407,22 @@ esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
     return DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT;
 }
 
+esp_err_t audio_in_wait_for_speech_start(uint8_t **out_speech_prefix,
+                                         size_t *out_speech_prefix_bytes,
+                                         uint32_t start_threshold,
+                                         uint32_t arm_delay_ms,
+                                         uint32_t timeout_ms,
+                                         audio_in_wait_metrics_t *out_metrics)
+{
+    return audio_in_wait_for_speech_start_cancellable(out_speech_prefix,
+                                                      out_speech_prefix_bytes,
+                                                      start_threshold,
+                                                      arm_delay_ms,
+                                                      timeout_ms,
+                                                      out_metrics,
+                                                      NULL);
+}
+
 esp_err_t audio_in_record_after_speech_start(const uint8_t *speech_prefix,
                                              size_t speech_prefix_bytes,
                                              uint8_t **out_buffer,
@@ -400,11 +436,13 @@ esp_err_t audio_in_record_after_speech_start(const uint8_t *speech_prefix,
                                                   out_metrics);
 }
 
-esp_err_t audio_in_stream_after_speech_start(const uint8_t *speech_prefix,
-                                             size_t speech_prefix_bytes,
-                                             audio_in_pcm_chunk_callback_t callback,
-                                             void *user_ctx,
-                                             audio_in_record_metrics_t *out_metrics)
+esp_err_t audio_in_stream_after_speech_start_cancellable(
+    const uint8_t *speech_prefix,
+    size_t speech_prefix_bytes,
+    audio_in_pcm_chunk_callback_t callback,
+    void *user_ctx,
+    audio_in_record_metrics_t *out_metrics,
+    const volatile bool *cancel_requested)
 {
     if (callback == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -430,6 +468,11 @@ esp_err_t audio_in_stream_after_speech_start(const uint8_t *speech_prefix,
     const int64_t start_us = esp_timer_get_time();
 
     if (speech_prefix != NULL && speech_prefix_bytes > 0) {
+        if (audio_in_cancel_requested(cancel_requested)) {
+            free(chunk);
+            audio_in_close_locked();
+            return DEMO_AUDIO_IN_ERR_CANCELLED;
+        }
         esp_err_t ret = callback(speech_prefix, speech_prefix_bytes, user_ctx);
         if (ret != ESP_OK) {
             free(chunk);
@@ -441,6 +484,11 @@ esp_err_t audio_in_stream_after_speech_start(const uint8_t *speech_prefix,
     }
 
     while (pcm_bytes < DEMO_AUDIO_BUFFER_BYTES) {
+        if (audio_in_cancel_requested(cancel_requested)) {
+            free(chunk);
+            audio_in_close_locked();
+            return DEMO_AUDIO_IN_ERR_CANCELLED;
+        }
         const size_t chunk_bytes = DEMO_AUDIO_BUFFER_BYTES - pcm_bytes > DEMO_AUDIO_CHUNK_BYTES ?
                                    DEMO_AUDIO_CHUNK_BYTES :
                                    DEMO_AUDIO_BUFFER_BYTES - pcm_bytes;
@@ -449,6 +497,11 @@ esp_err_t audio_in_stream_after_speech_start(const uint8_t *speech_prefix,
             free(chunk);
             audio_in_close_locked();
             return ret;
+        }
+        if (audio_in_cancel_requested(cancel_requested)) {
+            free(chunk);
+            audio_in_close_locked();
+            return DEMO_AUDIO_IN_ERR_CANCELLED;
         }
 
         ret = callback(chunk, chunk_bytes, user_ctx);
@@ -501,6 +554,20 @@ esp_err_t audio_in_stream_after_speech_start(const uint8_t *speech_prefix,
              (unsigned)max_chunk_level);
     free(chunk);
     return ESP_OK;
+}
+
+esp_err_t audio_in_stream_after_speech_start(const uint8_t *speech_prefix,
+                                             size_t speech_prefix_bytes,
+                                             audio_in_pcm_chunk_callback_t callback,
+                                             void *user_ctx,
+                                             audio_in_record_metrics_t *out_metrics)
+{
+    return audio_in_stream_after_speech_start_cancellable(speech_prefix,
+                                                          speech_prefix_bytes,
+                                                          callback,
+                                                          user_ctx,
+                                                          out_metrics,
+                                                          NULL);
 }
 
 void audio_in_deinit(void)

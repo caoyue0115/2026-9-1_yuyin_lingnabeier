@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 
@@ -11,3 +13,9 @@ esp_err_t playback_session_detach(playback_session_t **session);
 esp_err_t playback_session_join(playback_session_t **session,
                                 TickType_t inactivity_timeout,
                                 esp_err_t *playback_result);
+esp_err_t playback_session_join_interruptible(
+    playback_session_t **session,
+    TickType_t inactivity_timeout,
+    esp_err_t *playback_result,
+    const volatile bool *interrupt_requested,
+    bool *interrupted);

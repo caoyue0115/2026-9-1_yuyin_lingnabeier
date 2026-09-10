@@ -59,5 +59,6 @@ typedef struct {
 
 esp_err_t audio_out_close_pcm_stream(void);
 esp_err_t audio_out_close_pcm_stream_with_metrics(audio_out_jitter_metrics_t *metrics);
+esp_err_t audio_out_cancel_pcm_stream(void);
 
 void audio_out_deinit(void);

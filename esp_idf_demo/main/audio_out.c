@@ -39,6 +39,7 @@ typedef struct {
     TaskHandle_t stream_task;
     bool stream_task_stack_with_caps;
     bool stream_task_done;
+    volatile bool stream_cancel_requested;
     esp_err_t stream_task_result;
     size_t jitter_total_in;
     size_t jitter_total_out;
@@ -70,6 +71,7 @@ static audio_out_state_t s_audio_out_state = {
     .stream_task = NULL,
     .stream_task_stack_with_caps = false,
     .stream_task_done = true,
+    .stream_cancel_requested = false,
     .stream_task_result = ESP_OK,
     .jitter_total_in = 0,
     .jitter_total_out = 0,
@@ -600,6 +602,10 @@ static void audio_stream_task(void *arg)
     bool prebuffer_done = false;
 
     while (true) {
+        if (__atomic_load_n(&s_audio_out_state.stream_cancel_requested,
+                            __ATOMIC_ACQUIRE)) {
+            break;
+        }
         if (!prebuffer_done) {
             esp_err_t lock_ret = audio_out_lock();
             if (lock_ret == ESP_OK) {
@@ -641,6 +647,12 @@ static void audio_stream_task(void *arg)
             continue;
         }
 
+        if (__atomic_load_n(&s_audio_out_state.stream_cancel_requested,
+                            __ATOMIC_ACQUIRE)) {
+            vRingbufferReturnItem(s_audio_out_state.jitter_ringbuf, item);
+            goto done;
+        }
+
         size_t item_offset = 0;
         while (item_offset < item_size) {
             const size_t copy_bytes = item_size - item_offset <
@@ -652,6 +664,11 @@ static void audio_stream_task(void *arg)
             item_offset += copy_bytes;
 
             if (scratch_len == sizeof(scratch)) {
+                if (__atomic_load_n(&s_audio_out_state.stream_cancel_requested,
+                                    __ATOMIC_ACQUIRE)) {
+                    vRingbufferReturnItem(s_audio_out_state.jitter_ringbuf, item);
+                    goto done;
+                }
                 size_t written_bytes = 0;
                 const int64_t write_start_us = esp_timer_get_time();
                 esp_err_t ret = audio_out_write_pcm_chunk(scratch, scratch_len, &written_bytes);
@@ -686,7 +703,9 @@ static void audio_stream_task(void *arg)
         vRingbufferReturnItem(s_audio_out_state.jitter_ringbuf, item);
     }
 
-    if (scratch_len > 0) {
+    if (scratch_len > 0 &&
+        !__atomic_load_n(&s_audio_out_state.stream_cancel_requested,
+                         __ATOMIC_ACQUIRE)) {
         size_t written_bytes = 0;
         const int64_t write_start_us = esp_timer_get_time();
         esp_err_t ret = audio_out_write_pcm_chunk(scratch, scratch_len, &written_bytes);
@@ -808,6 +827,9 @@ esp_err_t audio_out_open_pcm_stream(uint32_t sample_rate,
         s_audio_out_state.stream_task = NULL;
         s_audio_out_state.stream_task_stack_with_caps = false;
         s_audio_out_state.stream_task_done = true;
+        __atomic_store_n(&s_audio_out_state.stream_cancel_requested,
+                         false,
+                         __ATOMIC_RELEASE);
         s_audio_out_state.stream_task_result = ESP_OK;
         s_audio_out_state.jitter_total_in = 0;
         s_audio_out_state.jitter_total_out = 0;
@@ -1096,6 +1118,9 @@ esp_err_t audio_out_close_pcm_stream_with_metrics(audio_out_jitter_metrics_t *me
     s_audio_out_state.jitter_playback_start_us = 0;
     s_audio_out_state.jitter_prebuffer_wait_us = 0;
     s_audio_out_state.jitter_playback_started = false;
+    __atomic_store_n(&s_audio_out_state.stream_cancel_requested,
+                     false,
+                     __ATOMIC_RELEASE);
 
     if (ret != ESP_OK) {
         (void)audio_out_close_locked();
@@ -1112,6 +1137,30 @@ esp_err_t audio_out_close_pcm_stream_with_metrics(audio_out_jitter_metrics_t *me
 esp_err_t audio_out_close_pcm_stream(void)
 {
     return audio_out_close_pcm_stream_with_metrics(NULL);
+}
+
+esp_err_t audio_out_cancel_pcm_stream(void)
+{
+    esp_err_t ret = audio_out_lock();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    const bool active = s_audio_out_state.stream_task != NULL;
+    const size_t buffered_bytes = audio_jitter_level_locked();
+    if (active) {
+        __atomic_store_n(&s_audio_out_state.stream_cancel_requested,
+                         true,
+                         __ATOMIC_RELEASE);
+    }
+    audio_out_unlock();
+
+    if (active) {
+        ESP_LOGI(TAG,
+                 "Realtime jitter cancel requested buffered_bytes=%u",
+                 (unsigned)buffered_bytes);
+    }
+    return ESP_OK;
 }
 
 static esp_err_t audio_play_view(const wav_pcm_view_t *view)

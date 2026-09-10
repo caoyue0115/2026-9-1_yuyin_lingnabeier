@@ -95,7 +95,28 @@ class EspRuntimeGuardTests(unittest.TestCase):
 
         self.assertIn("audio_jitter_level_locked() <= scratch_len;", audio_out_c)
         self.assertNotIn("audio_jitter_level_locked() == 0;", audio_out_c)
-        self.assertIn("if (scratch_len > 0)", audio_out_c)
+        self.assertIn("if (scratch_len > 0 &&", audio_out_c)
+
+    def test_touch_cancel_discards_buffered_answer_without_shrinking_jitter_buffer(self) -> None:
+        audio_out_h = (ESP_MAIN / "audio_out.h").read_text(encoding="utf-8")
+        audio_out_c = (ESP_MAIN / "audio_out.c").read_text(encoding="utf-8")
+        playback_c = (ESP_MAIN / "playback_session.c").read_text(encoding="utf-8")
+        stream_task = audio_out_c.split("static void audio_stream_task", 1)[1].split(
+            "static esp_err_t audio_out_finish_existing_stream", 1
+        )[0]
+        cancel = audio_out_c.split("esp_err_t audio_out_cancel_pcm_stream", 1)[1].split(
+            "static esp_err_t audio_play_view", 1
+        )[0]
+        playback_cancel = playback_c.split("esp_err_t playback_session_cancel", 1)[1].split(
+            "esp_err_t playback_session_detach", 1
+        )[0]
+
+        self.assertIn("audio_out_cancel_pcm_stream(void)", audio_out_h)
+        self.assertIn("stream_cancel_requested", stream_task)
+        self.assertIn("vRingbufferReturnItem", stream_task)
+        self.assertIn("stream_cancel_requested", cancel)
+        self.assertIn("audio_jitter_level_locked", cancel)
+        self.assertIn("audio_out_cancel_pcm_stream()", playback_cancel)
 
     def test_audio_jitter_buffer_applies_lossless_backpressure(self) -> None:
         audio_out_c = (ESP_MAIN / "audio_out.c").read_text(encoding="utf-8")
@@ -179,6 +200,11 @@ class EspRuntimeGuardTests(unittest.TestCase):
             "cloud_conversation_close(cloud_conversation_t *conversation, const char *reason)",
         ):
             self.assertIn(declaration, conversation_h)
+        self.assertIn("cloud_conversation_finish_turn_cancellable", conversation_h)
+        self.assertIn("cloud_conversation_cancel_turn_with_reason", conversation_h)
+        self.assertIn("cloud_conversation_request_cancel_turn_with_reason", conversation_h)
+        self.assertIn("cloud_conversation_wait_turn_cancelled", conversation_h)
+        self.assertIn("playback_session_join_interruptible", playback_h)
         self.assertIn("api/v6/realtime/conversation/opus-stream", conversation_c)
         self.assertIn("conversation_start", conversation_c)
         self.assertIn("turn_start", conversation_c)
@@ -288,18 +314,33 @@ class EspRuntimeGuardTests(unittest.TestCase):
     def test_followup_window_plays_distinct_prompt_before_listening(self) -> None:
         main_c = (ESP_MAIN / "main.c").read_text(encoding="utf-8")
         followup_block = main_c.split(
-            "conversation_transition_t played = conversation_controller_handle", 1
+            "if (played.action == CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE)", 1
         )[1].split("if (played.state == CONVERSATION_STATE_ENDING)", 1)[0]
 
         self.assertIn(
-            "played.action == CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE",
-            followup_block,
+            "if (played.action == CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE)",
+            main_c,
         )
         self.assertIn("PROMPT_FOLLOWUP_CUE", followup_block)
         self.assertIn('"conversation:followup-cue:', followup_block)
         self.assertIn("CONVERSATION_EVENT_PROMPT_DONE", followup_block)
         self.assertIn("CONVERSATION_ACTION_LISTEN_FOLLOWUP", followup_block)
         self.assertNotIn("PROMPT_SPEAK", followup_block)
+
+    def test_answer_touch_plays_followup_cue_while_cancel_ack_is_in_flight(self) -> None:
+        main_c = (ESP_MAIN / "main.c").read_text(encoding="utf-8")
+        playback_block = main_c.split(
+            "const app_touch_action_t playback_touch", 1
+        )[1].split("if (played.state == CONVERSATION_STATE_ENDING)", 1)[0]
+
+        request_at = playback_block.index(
+            "cloud_conversation_request_cancel_turn_with_reason"
+        )
+        cue_at = playback_block.index("app_v6_play_prompt(PROMPT_FOLLOWUP_CUE")
+        wait_at = playback_block.index("cloud_conversation_wait_turn_cancelled")
+        self.assertLess(request_at, cue_at)
+        self.assertLess(cue_at, wait_at)
+        self.assertIn("playback_cancel_ack_pending", playback_block)
 
     def test_followup_listener_starts_immediately_and_keeps_full_ten_seconds(self) -> None:
         config_h = (ESP_MAIN / "config.h").read_text(encoding="utf-8")

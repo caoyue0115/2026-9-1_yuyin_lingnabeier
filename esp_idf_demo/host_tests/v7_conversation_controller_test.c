@@ -100,5 +100,35 @@ int main(void)
     assert(send(&controller, CONVERSATION_EVENT_TECHNICAL_ERROR, 1).action ==
            CONVERSATION_ACTION_PLAY_TECHNICAL_ERROR);
     assert(controller.state == CONVERSATION_STATE_FAILED);
+
+    conversation_controller_init(&controller);
+    send(&controller, CONVERSATION_EVENT_BEGIN, 0);
+    send(&controller, CONVERSATION_EVENT_PROMPT_DONE, 10);
+    assert(send(&controller, CONVERSATION_EVENT_TOUCH_RESTART, 20).action ==
+           CONVERSATION_ACTION_PLAY_REPROMPT);
+    assert(controller.state == CONVERSATION_STATE_REPROMPT);
+    conversation_transition_t initial_restart =
+        send(&controller, CONVERSATION_EVENT_PROMPT_DONE, 30);
+    assert(initial_restart.action == CONVERSATION_ACTION_START_RECORDING);
+    assert(initial_restart.deadline_ms == 5030);
+
+    send(&controller, CONVERSATION_EVENT_RECORDING_DONE, 40);
+    assert(send(&controller, CONVERSATION_EVENT_TOUCH_RESTART, 50).action ==
+           CONVERSATION_ACTION_PLAY_REPROMPT);
+    assert(send(&controller, CONVERSATION_EVENT_PROMPT_DONE, 60).action ==
+           CONVERSATION_ACTION_START_RECORDING);
+
+    send(&controller, CONVERSATION_EVENT_RECORDING_DONE, 70);
+    send(&controller, CONVERSATION_EVENT_TURN_RESULT, 80);
+    assert(send(&controller, CONVERSATION_EVENT_PLAYBACK_INTERRUPTED, 90).action ==
+           CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE);
+    send(&controller, CONVERSATION_EVENT_PROMPT_DONE, 100);
+    assert(controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW);
+    assert(send(&controller, CONVERSATION_EVENT_TOUCH_RESTART, 110).action ==
+           CONVERSATION_ACTION_PLAY_REPROMPT);
+    conversation_transition_t followup_restart =
+        send(&controller, CONVERSATION_EVENT_PROMPT_DONE, 120);
+    assert(followup_restart.action == CONVERSATION_ACTION_LISTEN_FOLLOWUP);
+    assert(followup_restart.deadline_ms == 10120);
     return 0;
 }

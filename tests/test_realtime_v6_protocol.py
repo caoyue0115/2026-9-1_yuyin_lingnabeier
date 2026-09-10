@@ -94,6 +94,20 @@ def test_client_controls_parse_with_required_correlation_fields() -> None:
     assert end.data["reason"] == "normal"
 
 
+def test_turn_cancel_accepts_only_supported_touch_reasons() -> None:
+    restart = parse_client_control(
+        {**_turn_control("turn_cancel"), "reason": "restart_listening"}
+    )
+    interrupted = parse_client_control(
+        {**_turn_control("turn_cancel"), "reason": "interrupt_playback"}
+    )
+
+    assert restart.data["reason"] == "restart_listening"
+    assert interrupted.data["reason"] == "interrupt_playback"
+    with pytest.raises(ProtocolError, match="^invalid_cancel_reason$"):
+        parse_client_control({**_turn_control("turn_cancel"), "reason": "unknown"})
+
+
 @pytest.mark.parametrize("message_type", [None, True, 0, 1.5, [], {}])
 def test_client_controls_reject_every_non_string_type_with_protocol_error(message_type: object) -> None:
     with pytest.raises(ProtocolError, match="^invalid_control_type$"):
@@ -458,6 +472,19 @@ def test_conversation_limits_allow_one_explicit_retry_without_consuming_logical_
     assert limits.attempt_count == 2
     with pytest.raises(ProtocolError, match="^turn_index_conflict$"):
         limits.start_turn("turn-0-retry-2", 0, now=0.0, allow_index_retry=True)
+
+
+def test_conversation_limits_release_relisten_attempt_but_never_reuse_turn_id() -> None:
+    limits = ConversationLimits(started_at=0.0)
+    limits.start_turn("turn-0", 0, now=0.0)
+
+    assert limits.release_turn_attempt("turn-0", 0)
+    assert limits.turn_count == 0
+    assert limits.attempt_count == 1
+    limits.start_turn("turn-0-relisten", 0, now=0.0, allow_index_retry=True)
+
+    with pytest.raises(ProtocolError, match="^turn_id_reused$"):
+        limits.start_turn("turn-0", 0, now=0.0)
 
 
 def test_conversation_deadline_expires_while_idle_and_active() -> None:

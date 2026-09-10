@@ -49,6 +49,16 @@ _TURN_CONTROLS = frozenset({"turn_start", "turn_end", "turn_cancel", "turn_playb
 _CONVERSATION_CONTROLS = frozenset({"conversation_start", "conversation_end"})
 _TURN_EVENTS = frozenset({"ack", "asr_final", "turn_result", "turn_complete", "turn_cancelled"})
 _SERVER_EVENTS = _TURN_EVENTS | frozenset({"conversation_ready", "conversation_done", "error"})
+TURN_CANCEL_REASON_CLIENT = "client_cancelled"
+TURN_CANCEL_REASON_RESTART_LISTENING = "restart_listening"
+TURN_CANCEL_REASON_INTERRUPT_PLAYBACK = "interrupt_playback"
+TURN_CANCEL_REASONS = frozenset(
+    {
+        TURN_CANCEL_REASON_CLIENT,
+        TURN_CANCEL_REASON_RESTART_LISTENING,
+        TURN_CANCEL_REASON_INTERRUPT_PLAYBACK,
+    }
+)
 _RESERVED_EVENT_DATA_KEYS = frozenset(
     {"type", "conversation_id", "turn_id", "turn_index", "outcome", "highest_contiguous_sequence"}
 )
@@ -164,6 +174,10 @@ def parse_client_control(payload: Mapping[str, Any]) -> ClientControl:
         return ClientControl(type=message_type, conversation_id=conversation_id, data=_extra_payload(payload))
 
     turn_id, turn_index = _parse_turn_correlation(payload)
+    if message_type == "turn_cancel":
+        reason = payload.get("reason", TURN_CANCEL_REASON_CLIENT)
+        if reason not in TURN_CANCEL_REASONS:
+            raise ProtocolError("invalid_cancel_reason")
     return ClientControl(
         type=message_type,
         conversation_id=conversation_id,
@@ -374,6 +388,21 @@ class ConversationLimits:
             raise ProtocolError("turn_index_conflict")
         self._turn_ids.add(turn_id)
         self._turn_indices[turn_index] = attempts + 1
+
+    def release_turn_attempt(self, turn_id: str, turn_index: int) -> bool:
+        """Release a relisten attempt without allowing its turn id to be reused."""
+        turn_id = _require_nonempty_string(turn_id, "turn_id")
+        turn_index = _validate_turn_index(turn_index)
+        if turn_id not in self._turn_ids:
+            return False
+        attempts = self._turn_indices.get(turn_index, 0)
+        if attempts <= 0:
+            return False
+        if attempts == 1:
+            del self._turn_indices[turn_index]
+        else:
+            self._turn_indices[turn_index] = attempts - 1
+        return True
 
 
 class TurnStateMachine:

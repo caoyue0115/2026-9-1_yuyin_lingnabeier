@@ -18,7 +18,10 @@ typedef enum {
     DISPLAY_UI_ERROR,
 } display_ui_state_t;
 
+typedef void (*display_touch_callback_t)(void *user_ctx);
+
 esp_err_t display_state_init(void);
+void display_state_set_touch_callback(display_touch_callback_t callback, void *user_ctx);
 void display_state_set(display_ui_state_t state);
 void display_state_notify_wake_word(void);
 void display_state_set_sound_direction(int degrees, bool valid);

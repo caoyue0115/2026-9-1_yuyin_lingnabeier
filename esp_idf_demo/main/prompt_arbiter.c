@@ -14,8 +14,12 @@
 #include <stdio.h>
 #include <string.h>
 
-extern const uint8_t prompt_intro_start[] asm("_binary_intro_1_pcm_start");
-extern const uint8_t prompt_intro_end[] asm("_binary_intro_1_pcm_end");
+extern const uint8_t prompt_boot_start[] asm("_binary_boot_1_pcm_start");
+extern const uint8_t prompt_boot_end[] asm("_binary_boot_1_pcm_end");
+extern const uint8_t prompt_network_connected_start[] asm("_binary_network_connected_1_pcm_start");
+extern const uint8_t prompt_network_connected_end[] asm("_binary_network_connected_1_pcm_end");
+extern const uint8_t prompt_network_required_start[] asm("_binary_network_required_1_pcm_start");
+extern const uint8_t prompt_network_required_end[] asm("_binary_network_required_1_pcm_end");
 extern const uint8_t prompt_followup_bell_start[] asm("_binary_followup_bell_1_pcm_start");
 extern const uint8_t prompt_followup_bell_end[] asm("_binary_followup_bell_1_pcm_end");
 extern const uint8_t prompt_speak_start[] asm("_binary_speak_1_pcm_start");
@@ -94,16 +98,16 @@ static esp_err_t prompt_arbiter_play(prompt_id_t id)
     const uint8_t *end = NULL;
     switch (id) {
     case PROMPT_BOOT_BELL:
-        start = prompt_intro_start;
-        end = prompt_intro_end;
+        start = prompt_boot_start;
+        end = prompt_boot_end;
         break;
     case PROMPT_NETWORK_CONNECTED:
-        start = prompt_intro_start;
-        end = prompt_intro_end;
+        start = prompt_network_connected_start;
+        end = prompt_network_connected_end;
         break;
     case PROMPT_NETWORK_REQUIRED:
-        start = prompt_followup_bell_start;
-        end = prompt_followup_bell_end;
+        start = prompt_network_required_start;
+        end = prompt_network_required_end;
         break;
     case PROMPT_CONVERSATION_DONE:
         start = prompt_followup_bell_start;

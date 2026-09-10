@@ -60,14 +60,30 @@ conversation_transition_t conversation_controller_handle(conversation_controller
         }
         break;
     case CONVERSATION_STATE_PROMPTING:
-    case CONVERSATION_STATE_REPROMPT:
         if (event == CONVERSATION_EVENT_PROMPT_DONE) {
             controller->state = CONVERSATION_STATE_RECORDING;
             controller->deadline_ms = now_ms + CONVERSATION_INITIAL_SPEECH_TIMEOUT_MS;
             return make_transition(controller, CONVERSATION_ACTION_START_RECORDING);
         }
         break;
+    case CONVERSATION_STATE_REPROMPT:
+        if (event == CONVERSATION_EVENT_PROMPT_DONE) {
+            if (controller->reprompt_resume_state == CONVERSATION_STATE_FOLLOWUP_WINDOW) {
+                controller->state = CONVERSATION_STATE_FOLLOWUP_WINDOW;
+                controller->deadline_ms = now_ms + CONVERSATION_FOLLOWUP_START_TIMEOUT_MS;
+                return make_transition(controller, CONVERSATION_ACTION_LISTEN_FOLLOWUP);
+            }
+            controller->state = CONVERSATION_STATE_RECORDING;
+            controller->deadline_ms = now_ms + CONVERSATION_INITIAL_SPEECH_TIMEOUT_MS;
+            return make_transition(controller, CONVERSATION_ACTION_START_RECORDING);
+        }
+        break;
     case CONVERSATION_STATE_RECORDING:
+        if (event == CONVERSATION_EVENT_TOUCH_RESTART) {
+            controller->reprompt_resume_state = CONVERSATION_STATE_RECORDING;
+            controller->state = CONVERSATION_STATE_REPROMPT;
+            return make_transition(controller, CONVERSATION_ACTION_PLAY_REPROMPT);
+        }
         if (event == CONVERSATION_EVENT_RECORDING_DONE) {
             controller->state = CONVERSATION_STATE_WAITING_RESULT;
             controller->deadline_ms = 0;
@@ -77,6 +93,7 @@ conversation_transition_t conversation_controller_handle(conversation_controller
         if (event == CONVERSATION_EVENT_SPEECH_TIMEOUT) {
             if (!controller->reprompt_used) {
                 controller->reprompt_used = true;
+                controller->reprompt_resume_state = CONVERSATION_STATE_RECORDING;
                 controller->state = CONVERSATION_STATE_REPROMPT;
                 return make_transition(controller, CONVERSATION_ACTION_PLAY_REPROMPT);
             }
@@ -86,6 +103,11 @@ conversation_transition_t conversation_controller_handle(conversation_controller
         }
         break;
     case CONVERSATION_STATE_WAITING_RESULT:
+        if (event == CONVERSATION_EVENT_TOUCH_RESTART) {
+            controller->reprompt_resume_state = CONVERSATION_STATE_RECORDING;
+            controller->state = CONVERSATION_STATE_REPROMPT;
+            return make_transition(controller, CONVERSATION_ACTION_PLAY_REPROMPT);
+        }
         if (event == CONVERSATION_EVENT_TURN_RESULT) {
             if (controller->turn_index > controller->followup_count) {
                 controller->followup_count = controller->turn_index;
@@ -96,6 +118,7 @@ conversation_transition_t conversation_controller_handle(conversation_controller
         if (event == CONVERSATION_EVENT_ASR_EMPTY) {
             if (!controller->reprompt_used) {
                 controller->reprompt_used = true;
+                controller->reprompt_resume_state = CONVERSATION_STATE_RECORDING;
                 controller->state = CONVERSATION_STATE_REPROMPT;
                 return make_transition(controller, CONVERSATION_ACTION_PLAY_REPROMPT);
             }
@@ -105,7 +128,13 @@ conversation_transition_t conversation_controller_handle(conversation_controller
         }
         break;
     case CONVERSATION_STATE_PLAYING:
-        if (event == CONVERSATION_EVENT_PLAYBACK_DONE) {
+        if (event == CONVERSATION_EVENT_TOUCH_RESTART) {
+            controller->reprompt_resume_state = CONVERSATION_STATE_RECORDING;
+            controller->state = CONVERSATION_STATE_REPROMPT;
+            return make_transition(controller, CONVERSATION_ACTION_PLAY_REPROMPT);
+        }
+        if (event == CONVERSATION_EVENT_PLAYBACK_DONE ||
+            event == CONVERSATION_EVENT_PLAYBACK_INTERRUPTED) {
             if ((uint8_t)(controller->followup_count + 1) >= controller->max_turns) {
                 controller->state = CONVERSATION_STATE_ENDING;
                 controller->deadline_ms = now_ms + CONVERSATION_FINAL_DONE_DELAY_MS;
@@ -124,6 +153,11 @@ conversation_transition_t conversation_controller_handle(conversation_controller
         }
         break;
     case CONVERSATION_STATE_FOLLOWUP_WINDOW:
+        if (event == CONVERSATION_EVENT_TOUCH_RESTART) {
+            controller->reprompt_resume_state = CONVERSATION_STATE_FOLLOWUP_WINDOW;
+            controller->state = CONVERSATION_STATE_REPROMPT;
+            return make_transition(controller, CONVERSATION_ACTION_PLAY_REPROMPT);
+        }
         if (event == CONVERSATION_EVENT_SPEECH_STARTED) {
             controller->turn_index = controller->followup_count + 1;
             controller->reprompt_used = false;

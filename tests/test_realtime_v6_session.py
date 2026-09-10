@@ -226,6 +226,48 @@ def test_session_rejects_same_index_retry_unless_previous_attempt_was_asr_empty(
         session.start_turn("t0-retry", 0)
 
 
+def test_relisten_cancel_allows_repeated_same_index_without_using_turn_budget() -> None:
+    session = ConversationSession.for_test(quota_limit=1, turn_budget_limit=1)
+
+    for attempt in range(3):
+        turn = session.start_turn(f"t0-{attempt}", 0)
+        assert session.consume_quota(turn.turn_id)
+        assert session.consume_turn_budget(turn.turn_id)
+        session.cancel_turn(turn.turn_id, "restart_listening")
+        assert turn.cancel_reason == "restart_listening"
+        assert session.turn_count == 0
+        assert session.quota.used == 0
+        assert session.turn_budget.used == 0
+        assert session.context_status(turn.turn_id) is None
+
+    final = session.start_turn("t0-final", 0)
+    session.commit_turn(final.turn_id, question="new question", answer="new answer")
+    assert session.turn_count == 1
+
+
+def test_playback_interrupt_keeps_partial_context_and_consumes_logical_turn() -> None:
+    session = ConversationSession.for_test(max_audio_queue_bytes=8)
+    turn = session.start_turn("t0", 0)
+    turn.question = "question"
+    turn.answer = "partial answer"
+
+    session.cancel_turn("t0", "interrupt_playback")
+
+    assert turn.cancel_reason == "interrupt_playback"
+    assert session.turn_count == 1
+    assert session.context_status("t0") == {
+        "turn_id": "t0",
+        "question": "question",
+        "answer": "partial answer",
+        "status": "cancelled",
+        "interrupted": True,
+        "question_truncated": False,
+        "answer_truncated": False,
+    }
+    with pytest.raises(ProtocolError, match="turn_index_conflict"):
+        session.start_turn("t0-retry", 0)
+
+
 def test_technical_error_turn_is_terminal_during_session_cleanup() -> None:
     session = ConversationSession.for_test()
     turn = session.start_turn("t0", 0)
@@ -415,6 +457,12 @@ def test_quota_and_turn_budget_are_idempotent_by_turn_id() -> None:
     assert turn_budget.consume("t1")
     assert not turn_budget.consume("t2")
     assert turn_budget.used == 1
+
+    assert quota.release("t1")
+    assert not quota.release("t1")
+    assert quota.used == 0
+    assert not quota.consume("t1")
+    assert quota.consume("t3")
 
 
 def test_cancelled_turn_uses_task1_event_shape() -> None:

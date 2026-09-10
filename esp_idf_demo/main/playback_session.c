@@ -246,6 +246,12 @@ esp_err_t playback_session_cancel(playback_session_t *session, int reason)
     session->cancel_reason = reason;
     __atomic_store_n(&session->cancel_requested, true, __ATOMIC_RELEASE);
     __atomic_store_n(&session->last_progress_us, esp_timer_get_time(), __ATOMIC_RELEASE);
+    const esp_err_t audio_cancel_ret = audio_out_cancel_pcm_stream();
+    if (audio_cancel_ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "playback_cancel audio_abort_failed result=%s",
+                 esp_err_to_name(audio_cancel_ret));
+    }
     return ESP_OK;
 }
 
@@ -276,12 +282,18 @@ esp_err_t playback_session_detach(playback_session_t **session)
     return ESP_OK;
 }
 
-esp_err_t playback_session_join(playback_session_t **session,
-                                TickType_t inactivity_timeout,
-                                esp_err_t *playback_result)
+esp_err_t playback_session_join_interruptible(
+    playback_session_t **session,
+    TickType_t inactivity_timeout,
+    esp_err_t *playback_result,
+    const volatile bool *interrupt_requested,
+    bool *interrupted)
 {
     if (session == NULL || playback_result == NULL) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (interrupted != NULL) {
+        *interrupted = false;
     }
     if (*session == NULL) {
         return ESP_OK;
@@ -291,12 +303,24 @@ esp_err_t playback_session_join(playback_session_t **session,
         inactivity_timeout == portMAX_DELAY
             ? INT64_MAX
             : (int64_t)inactivity_timeout * portTICK_PERIOD_MS * 1000;
+    bool interrupt_sent = false;
     while (true) {
+        const bool touch_interrupt = interrupt_requested != NULL &&
+                                     __atomic_load_n(interrupt_requested, __ATOMIC_ACQUIRE);
+        if (touch_interrupt && !interrupt_sent) {
+            interrupt_sent = true;
+            if (interrupted != NULL) {
+                *interrupted = true;
+            }
+            (void)playback_session_cancel(owned, DEMO_CLOUD_ERR_AUDIO_CANCELLED);
+        }
         const EventBits_t bits = xEventGroupWaitBits(owned->events,
                                                      PLAYBACK_SESSION_DONE_BIT,
                                                      pdFALSE,
                                                      pdFALSE,
-                                                     pdMS_TO_TICKS(250));
+                                                     interrupt_requested != NULL
+                                                         ? pdMS_TO_TICKS(20)
+                                                         : pdMS_TO_TICKS(250));
         if ((bits & PLAYBACK_SESSION_DONE_BIT) != 0) {
             break;
         }
@@ -336,4 +360,15 @@ esp_err_t playback_session_join(playback_session_t **session,
     *session = NULL;
     *playback_result = result;
     return ESP_OK;
+}
+
+esp_err_t playback_session_join(playback_session_t **session,
+                                TickType_t inactivity_timeout,
+                                esp_err_t *playback_result)
+{
+    return playback_session_join_interruptible(session,
+                                               inactivity_timeout,
+                                               playback_result,
+                                               NULL,
+                                               NULL);
 }

@@ -44,6 +44,8 @@ typedef enum {
     CONVERSATION_EVENT_TURN_RESULT,
     CONVERSATION_EVENT_ASR_EMPTY,
     CONVERSATION_EVENT_PLAYBACK_DONE,
+    CONVERSATION_EVENT_TOUCH_RESTART,
+    CONVERSATION_EVENT_PLAYBACK_INTERRUPTED,
     CONVERSATION_EVENT_TECHNICAL_ERROR,
     CONVERSATION_EVENT_TIMER,
 } conversation_event_t;
@@ -70,6 +72,7 @@ typedef struct {
     uint16_t attempt_serial;
     bool reprompt_used;
     bool done_prompt_issued;
+    conversation_state_t reprompt_resume_state;
     int64_t deadline_ms;
 } conversation_controller_t;
 

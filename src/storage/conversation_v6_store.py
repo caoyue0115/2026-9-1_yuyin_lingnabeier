@@ -208,4 +208,16 @@ class IdempotentTurnBudget:
                 self._used += 1
             return accepted
 
+    def release(self, turn_id: str) -> bool:
+        """Release one accepted identifier while keeping retries idempotent."""
+        if not isinstance(turn_id, str) or not turn_id:
+            raise ValueError("missing_turn_id")
+        with self._lock:
+            previous = self._decisions.get(turn_id)
+            if previous is not True:
+                return False
+            self._decisions[turn_id] = False
+            self._used -= 1
+            return True
+
     reserve = consume

@@ -4,7 +4,9 @@ idf_component_register(SRCS "main.c" "display_state.c" "idle_video.c" "trigger_i
                                 esp_vocat espressif__esp_lcd_touch esp_websocket_client spiffs
                                 esp_app_format app_update esp-wifi-connect espressif__esp-sr esp_jpeg)
 
-target_add_binary_data(${COMPONENT_LIB} "../spiffs/intro_1.pcm" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "../spiffs/boot_1.pcm" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "../spiffs/network_connected_1.pcm" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "../spiffs/network_required_1.pcm" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "../spiffs/followup_bell_1.pcm" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "../spiffs/speak_1.pcm" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "../spiffs/repeat_1.pcm" BINARY)

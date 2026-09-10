@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from concurrent.futures import Future
 
@@ -112,6 +113,85 @@ def test_websocket_allows_one_asr_empty_retry_with_same_turn_index() -> None:
             error = websocket.receive_json()
             assert error["type"] == "error"
             assert error["code"] == "turn_index_conflict"
+
+
+def test_websocket_allows_touch_relisten_cancel_at_same_turn_index() -> None:
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/api/v6/realtime/conversation/opus-stream",
+            headers={"x-device-id": "board-1"},
+        ) as websocket:
+            websocket.send_json(_conversation_start())
+            conversation_id = websocket.receive_json()["conversation_id"]
+
+            for attempt in range(3):
+                control = {
+                    "conversation_id": conversation_id,
+                    "turn_id": f"turn-0-touch-{attempt}",
+                    "turn_index": 0,
+                }
+                websocket.send_json({"type": "turn_start", **control})
+                assert websocket.receive_json()["type"] == "ack"
+                websocket.send_json(
+                    {"type": "turn_cancel", "reason": "restart_listening", **control}
+                )
+                assert websocket.receive_json()["type"] == "turn_cancelled"
+
+
+def test_websocket_cancels_thinking_without_waiting_for_asr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asr_started = threading.Event()
+    release_asr = threading.Event()
+
+    def blocked_transcription(_socket: object, _turn_id: str) -> str:
+        asr_started.set()
+        release_asr.wait(timeout=5.0)
+        return "这条已取消的问题不应进入上下文"
+
+    monkeypatch.setattr(
+        realtime_v6.ConversationSocket,
+        "_transcribe_turn",
+        blocked_transcription,
+    )
+
+    try:
+        with TestClient(app) as client:
+            with client.websocket_connect(
+                "/api/v6/realtime/conversation/opus-stream",
+                headers={"x-device-id": "board-1"},
+            ) as websocket:
+                websocket.send_json(_conversation_start())
+                conversation_id = websocket.receive_json()["conversation_id"]
+                control = {
+                    "conversation_id": conversation_id,
+                    "turn_id": "turn-0-thinking",
+                    "turn_index": 0,
+                }
+                websocket.send_json({"type": "turn_start", **control})
+                assert websocket.receive_json()["type"] == "ack"
+                websocket.send_json({"type": "turn_end", **control})
+                assert asr_started.wait(timeout=1.0)
+
+                cancel_started = time.monotonic()
+                websocket.send_json(
+                    {"type": "turn_cancel", "reason": "restart_listening", **control}
+                )
+                assert websocket.receive_json()["type"] == "turn_cancelled"
+                assert time.monotonic() - cancel_started < 1.0
+
+                websocket.send_json(
+                    {
+                        "type": "turn_start",
+                        "conversation_id": conversation_id,
+                        "turn_id": "turn-0-after-thinking-touch",
+                        "turn_index": 0,
+                    }
+                )
+                assert websocket.receive_json()["type"] == "ack"
+                release_asr.set()
+    finally:
+        release_asr.set()
 
 
 def test_websocket_disconnect_removes_registry_session() -> None:

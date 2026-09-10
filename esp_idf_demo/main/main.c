@@ -32,8 +32,8 @@
 
 static const char *TAG = "esp_idf_demo";
 
-extern const uint8_t boot_sound_embed_start[] asm("_binary_intro_1_pcm_start");
-extern const uint8_t boot_sound_embed_end[] asm("_binary_intro_1_pcm_end");
+extern const uint8_t boot_sound_embed_start[] asm("_binary_boot_1_pcm_start");
+extern const uint8_t boot_sound_embed_end[] asm("_binary_boot_1_pcm_end");
 static TaskHandle_t s_pipeline_task_handle = NULL;
 static TaskHandle_t s_ota_manifest_task_handle = NULL;
 static int64_t s_last_pipeline_finish_us = 0;
@@ -64,6 +64,84 @@ typedef enum {
 } app_state_t;
 
 static app_state_t s_app_state = APP_STATE_ERROR;
+
+typedef enum {
+    APP_TOUCH_ACTION_NONE = 0,
+    APP_TOUCH_ACTION_RESTART_LISTENING,
+    APP_TOUCH_ACTION_INTERRUPT_PLAYBACK,
+} app_touch_action_t;
+
+static portMUX_TYPE s_touch_action_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool s_touch_action_requested;
+static volatile int s_touch_action_context = APP_TOUCH_ACTION_NONE;
+static app_touch_action_t s_pending_touch_action = APP_TOUCH_ACTION_NONE;
+static int64_t s_last_touch_action_us;
+
+static app_touch_action_t app_touch_action_for_state(app_state_t state)
+{
+    switch (state) {
+    case APP_STATE_WAITING_SPEECH:
+    case APP_STATE_RECORDING:
+    case APP_STATE_POSTING_SESSION:
+    case APP_STATE_POLLING:
+    case APP_STATE_DOWNLOADING:
+    case APP_STATE_OPENING_AUDIO:
+        return APP_TOUCH_ACTION_RESTART_LISTENING;
+    case APP_STATE_STREAMING_AUDIO:
+    case APP_STATE_PLAYING:
+        return APP_TOUCH_ACTION_INTERRUPT_PLAYBACK;
+    default:
+        return APP_TOUCH_ACTION_NONE;
+    }
+}
+
+static void app_touch_action_clear(void)
+{
+    taskENTER_CRITICAL(&s_touch_action_lock);
+    s_pending_touch_action = APP_TOUCH_ACTION_NONE;
+    __atomic_store_n(&s_touch_action_requested, false, __ATOMIC_RELEASE);
+    taskEXIT_CRITICAL(&s_touch_action_lock);
+}
+
+static app_touch_action_t app_touch_action_take(void)
+{
+    taskENTER_CRITICAL(&s_touch_action_lock);
+    const app_touch_action_t action = s_pending_touch_action;
+    s_pending_touch_action = APP_TOUCH_ACTION_NONE;
+    __atomic_store_n(&s_touch_action_requested, false, __ATOMIC_RELEASE);
+    taskEXIT_CRITICAL(&s_touch_action_lock);
+    return action;
+}
+
+static void app_display_touch_callback(void *user_ctx)
+{
+    (void)user_ctx;
+    const app_touch_action_t action = (app_touch_action_t)__atomic_load_n(
+        &s_touch_action_context, __ATOMIC_ACQUIRE);
+    if (action == APP_TOUCH_ACTION_NONE) {
+        return;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    bool accepted = false;
+    taskENTER_CRITICAL(&s_touch_action_lock);
+    if (!__atomic_load_n(&s_touch_action_requested, __ATOMIC_RELAXED) &&
+        now_us - s_last_touch_action_us >=
+            (int64_t)DEMO_TOUCH_ACTION_DEBOUNCE_MS * 1000) {
+        s_pending_touch_action = action;
+        s_last_touch_action_us = now_us;
+        __atomic_store_n(&s_touch_action_requested, true, __ATOMIC_RELEASE);
+        accepted = true;
+    }
+    taskEXIT_CRITICAL(&s_touch_action_lock);
+    if (accepted) {
+        ESP_LOGI(TAG,
+                 "touch_action queued=%s",
+                 action == APP_TOUCH_ACTION_RESTART_LISTENING
+                     ? "restart_listening"
+                     : "interrupt_playback");
+    }
+}
 
 static const char *app_state_to_string(app_state_t state)
 {
@@ -109,6 +187,9 @@ static const char *app_audio_mode_name(void)
 
 static void app_set_state(app_state_t *current_state, app_state_t next_state)
 {
+    __atomic_store_n(&s_touch_action_context,
+                     (int)app_touch_action_for_state(next_state),
+                     __ATOMIC_RELEASE);
     if (*current_state == next_state) {
         return;
     }
@@ -498,6 +579,56 @@ static esp_err_t app_v6_play_prompt(prompt_id_t prompt, const char *key)
     return ret;
 }
 
+static esp_err_t app_v6_reprompt_after_touch(app_state_t *state,
+                                             conversation_controller_t *controller,
+                                             uint32_t *touch_reprompt_serial)
+{
+    conversation_transition_t restart = conversation_controller_handle(
+        controller,
+        CONVERSATION_EVENT_TOUCH_RESTART,
+        esp_timer_get_time() / 1000);
+    if (restart.action != CONVERSATION_ACTION_PLAY_REPROMPT) {
+        ESP_LOGE(TAG,
+                 "touch_relisten invalid_controller_state=%d",
+                 (int)restart.state);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    app_touch_action_clear();
+    app_set_state(state, APP_STATE_PLAYING_PROMPT);
+    char key[64];
+    const uint32_t serial = ++(*touch_reprompt_serial);
+    snprintf(key,
+             sizeof(key),
+             "conversation:touch-reprompt:%u:%lu",
+             (unsigned)restart.turn_index,
+             (unsigned long)serial);
+    esp_err_t ret = app_v6_play_prompt(PROMPT_REPROMPT, key);
+    app_touch_action_clear();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    conversation_transition_t prompt_done = conversation_controller_handle(
+        controller,
+        CONVERSATION_EVENT_PROMPT_DONE,
+        esp_timer_get_time() / 1000);
+    if (prompt_done.action != CONVERSATION_ACTION_START_RECORDING &&
+        prompt_done.action != CONVERSATION_ACTION_LISTEN_FOLLOWUP) {
+        ESP_LOGE(TAG,
+                 "touch_relisten prompt_done_invalid action=%d state=%d",
+                 (int)prompt_done.action,
+                 (int)prompt_done.state);
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGI(TAG,
+             "touch_relisten ready turn=%u window=%s",
+             (unsigned)prompt_done.turn_index,
+             prompt_done.state == CONVERSATION_STATE_FOLLOWUP_WINDOW
+                 ? "followup"
+                 : "initial");
+    return ESP_OK;
+}
+
 static void app_wait_until_ms(int64_t deadline_ms)
 {
     while (true) {
@@ -519,6 +650,7 @@ static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *
 
     conversation_controller_t controller;
     conversation_controller_init(&controller);
+    uint32_t touch_reprompt_serial = 0;
     (void)conversation_controller_handle(&controller, CONVERSATION_EVENT_BEGIN,
                                          esp_timer_get_time() / 1000);
 
@@ -548,6 +680,7 @@ static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *
     if (open_task_created != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
+    app_touch_action_clear();
     app_set_state(state, APP_STATE_PLAYING_PROMPT);
     esp_err_t ret = app_v6_play_prompt(PROMPT_SPEAK, "conversation:speak:0");
     while (!open_task.done) {
@@ -563,11 +696,13 @@ static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *
     }
     (void)conversation_controller_handle(&controller, CONVERSATION_EVENT_PROMPT_DONE,
                                          esp_timer_get_time() / 1000);
+    app_touch_action_clear();
 
     while (true) {
         uint8_t *speech_prefix = NULL;
         size_t speech_prefix_bytes = 0;
         audio_in_wait_metrics_t wait_metrics = {0};
+        app_touch_action_clear();
         app_set_state(state, APP_STATE_WAITING_SPEECH);
         const uint32_t start_threshold =
             controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW
@@ -581,12 +716,34 @@ static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *
             controller.state == CONVERSATION_STATE_FOLLOWUP_WINDOW
                 ? CONVERSATION_FOLLOWUP_START_TIMEOUT_MS
                 : CONVERSATION_INITIAL_SPEECH_TIMEOUT_MS;
-        ret = audio_in_wait_for_speech_start(&speech_prefix,
-                                             &speech_prefix_bytes,
-                                             start_threshold,
-                                             arm_delay_ms,
-                                             speech_timeout_ms,
-                                             &wait_metrics);
+        ret = audio_in_wait_for_speech_start_cancellable(
+            &speech_prefix,
+            &speech_prefix_bytes,
+            start_threshold,
+            arm_delay_ms,
+            speech_timeout_ms,
+            &wait_metrics,
+            &s_touch_action_requested);
+        const app_touch_action_t waiting_touch = app_touch_action_take();
+        if (waiting_touch == APP_TOUCH_ACTION_RESTART_LISTENING) {
+            audio_in_deinit();
+            free(speech_prefix);
+            ESP_LOGI(TAG,
+                     "touch_relisten phase=waiting_speech turn=%u",
+                     (unsigned)controller.turn_index);
+            ret = app_v6_reprompt_after_touch(state,
+                                              &controller,
+                                              &touch_reprompt_serial);
+            if (ret != ESP_OK) {
+                goto technical_close;
+            }
+            continue;
+        }
+        if (ret == DEMO_AUDIO_IN_ERR_CANCELLED) {
+            free(speech_prefix);
+            ret = ESP_ERR_INVALID_STATE;
+            goto technical_close;
+        }
         if (ret == DEMO_AUDIO_IN_ERR_WAIT_TIMEOUT) {
             conversation_transition_t timeout = conversation_controller_handle(
                 &controller, CONVERSATION_EVENT_SPEECH_TIMEOUT,
@@ -645,13 +802,36 @@ static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *
 
         app_set_state(state, APP_STATE_RECORDING);
         audio_in_record_metrics_t record_metrics = {0};
-        ret = audio_in_stream_after_speech_start(speech_prefix,
-                                                 speech_prefix_bytes,
-                                                 app_v6_pcm_sink,
-                                                 conversation,
-                                                 &record_metrics);
+        ret = audio_in_stream_after_speech_start_cancellable(
+            speech_prefix,
+            speech_prefix_bytes,
+            app_v6_pcm_sink,
+            conversation,
+            &record_metrics,
+            &s_touch_action_requested);
         free(speech_prefix);
         audio_in_deinit();
+        const app_touch_action_t recording_touch = app_touch_action_take();
+        if (recording_touch == APP_TOUCH_ACTION_RESTART_LISTENING) {
+            ESP_LOGI(TAG,
+                     "touch_relisten phase=recording turn=%u turn_id=%s",
+                     (unsigned)controller.turn_index,
+                     turn_id);
+            ret = cloud_conversation_cancel_turn_with_reason(
+                conversation,
+                turn_id,
+                "restart_listening");
+            if (ret != ESP_OK) {
+                goto technical_close;
+            }
+            ret = app_v6_reprompt_after_touch(state,
+                                              &controller,
+                                              &touch_reprompt_serial);
+            if (ret != ESP_OK) {
+                goto technical_close;
+            }
+            continue;
+        }
         if (ret != ESP_OK) {
             (void)cloud_conversation_cancel_turn(conversation, turn_id);
             goto technical_close;
@@ -662,7 +842,31 @@ static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *
 
         app_set_state(state, APP_STATE_POSTING_SESSION);
         cloud_realtime_session_t result = {0};
-        ret = cloud_conversation_finish_turn(conversation, &result);
+        ret = cloud_conversation_finish_turn_cancellable(
+            conversation,
+            &result,
+            &s_touch_action_requested);
+        const app_touch_action_t thinking_touch = app_touch_action_take();
+        if (thinking_touch == APP_TOUCH_ACTION_RESTART_LISTENING) {
+            ESP_LOGI(TAG,
+                     "touch_relisten phase=thinking turn=%u turn_id=%s",
+                     (unsigned)controller.turn_index,
+                     turn_id);
+            ret = cloud_conversation_cancel_turn_with_reason(
+                conversation,
+                turn_id,
+                "restart_listening");
+            if (ret != ESP_OK) {
+                goto technical_close;
+            }
+            ret = app_v6_reprompt_after_touch(state,
+                                              &controller,
+                                              &touch_reprompt_serial);
+            if (ret != ESP_OK) {
+                goto technical_close;
+            }
+            continue;
+        }
         if (ret != ESP_OK) {
             goto technical_close;
         }
@@ -699,14 +903,28 @@ static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *
             ret = DEMO_CLOUD_ERR_INVALID_RESPONSE;
             goto technical_close;
         }
+        conversation_controller_set_max_turns(
+            &controller,
+            result.max_turns > 0 ? result.max_turns : CONVERSATION_DEFAULT_MAX_TURNS);
+        ESP_LOGI(TAG,
+                 "v6 interaction_mode=%s max_turns=%u pet_mood=%s",
+                 result.interaction_mode[0] != '\0' ? result.interaction_mode : "normal",
+                 (unsigned)controller.max_turns,
+                 result.pet_mood[0] != '\0' ? result.pet_mood : "curious");
+
+        app_touch_action_clear();
         app_set_state(state, APP_STATE_PLAYING);
         playback_session_t *playback = NULL;
+        bool playback_interrupted = false;
         ret = playback_session_start(result.audio_stream_url, &playback);
         ESP_LOGI(TAG, "v6 playback_start result=%s", esp_err_to_name(ret));
         if (ret == ESP_OK) {
-            esp_err_t join_ret = playback_session_join(&playback,
-                                                       pdMS_TO_TICKS(DEMO_REALTIME_AUDIO_TASK_JOIN_TIMEOUT_MS),
-                                                       &ret);
+            esp_err_t join_ret = playback_session_join_interruptible(
+                &playback,
+                pdMS_TO_TICKS(DEMO_REALTIME_AUDIO_TASK_JOIN_TIMEOUT_MS),
+                &ret,
+                &s_touch_action_requested,
+                &playback_interrupted);
             if (join_ret == ESP_ERR_TIMEOUT && playback != NULL) {
                 (void)playback_session_cancel(playback, ESP_ERR_TIMEOUT);
                 join_ret = playback_session_join(&playback,
@@ -725,39 +943,88 @@ static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *
                 ret = join_ret;
             }
             ESP_LOGI(TAG,
-                     "v6 playback_join join_result=%s playback_result=%s",
-                     esp_err_to_name(join_ret), esp_err_to_name(ret));
+                     "v6 playback_join join_result=%s playback_result=%s touch_interrupted=%d",
+                     esp_err_to_name(join_ret),
+                     esp_err_to_name(ret),
+                     playback_interrupted ? 1 : 0);
         }
-        if (ret != ESP_OK) {
+
+        const app_touch_action_t playback_touch = app_touch_action_take();
+        conversation_transition_t played = {0};
+        bool playback_cancel_ack_pending = false;
+        if (playback_touch != APP_TOUCH_ACTION_NONE) {
+            if (ret != ESP_OK && ret != DEMO_CLOUD_ERR_AUDIO_CANCELLED) {
+                ESP_LOGE(TAG,
+                         "v6 touch_playback_cleanup_failed result=%s",
+                         esp_err_to_name(ret));
+                goto technical_close;
+            }
+            const char *cancel_reason =
+                playback_touch == APP_TOUCH_ACTION_RESTART_LISTENING
+                    ? "restart_listening"
+                    : "interrupt_playback";
+            ESP_LOGI(TAG,
+                     "touch_action phase=playing action=%s turn=%u turn_id=%s",
+                     cancel_reason,
+                     (unsigned)controller.turn_index,
+                     turn_id);
+            ret = playback_touch == APP_TOUCH_ACTION_INTERRUPT_PLAYBACK
+                      ? cloud_conversation_request_cancel_turn_with_reason(conversation,
+                                                                           turn_id,
+                                                                           cancel_reason)
+                      : cloud_conversation_cancel_turn_with_reason(conversation,
+                                                                   turn_id,
+                                                                   cancel_reason);
+            if (ret != ESP_OK) {
+                goto technical_close;
+            }
+            if (playback_touch == APP_TOUCH_ACTION_RESTART_LISTENING) {
+                ret = app_v6_reprompt_after_touch(state,
+                                                  &controller,
+                                                  &touch_reprompt_serial);
+                if (ret != ESP_OK) {
+                    goto technical_close;
+                }
+                continue;
+            }
+            playback_cancel_ack_pending = true;
+            played = conversation_controller_handle(
+                &controller,
+                CONVERSATION_EVENT_PLAYBACK_INTERRUPTED,
+                esp_timer_get_time() / 1000);
+            ret = ESP_OK;
+        } else if (ret != ESP_OK) {
             ESP_LOGE(TAG, "v6 playback_failed result=%s", esp_err_to_name(ret));
             goto technical_close;
+        } else {
+            const int64_t playback_done_ms = esp_timer_get_time() / 1000;
+            ret = cloud_conversation_complete_playback(conversation, turn_id, &result);
+            if (ret != ESP_OK) {
+                goto technical_close;
+            }
+            played = conversation_controller_handle(
+                &controller, CONVERSATION_EVENT_PLAYBACK_DONE,
+                playback_done_ms);
         }
-        const int64_t playback_done_ms = esp_timer_get_time() / 1000;
-        ret = cloud_conversation_complete_playback(conversation, turn_id, &result);
-        if (ret != ESP_OK) {
-            goto technical_close;
-        }
-        conversation_controller_set_max_turns(
-            &controller,
-            result.max_turns > 0 ? result.max_turns : CONVERSATION_DEFAULT_MAX_TURNS);
-        ESP_LOGI(TAG,
-                 "v6 interaction_mode=%s max_turns=%u pet_mood=%s",
-                 result.interaction_mode[0] != '\0' ? result.interaction_mode : "normal",
-                 (unsigned)controller.max_turns,
-                 result.pet_mood[0] != '\0' ? result.pet_mood : "curious");
-        conversation_transition_t played = conversation_controller_handle(
-            &controller, CONVERSATION_EVENT_PLAYBACK_DONE,
-            playback_done_ms);
         if (played.action == CONVERSATION_ACTION_PLAY_FOLLOWUP_CUE) {
             char followup_cue_key[64];
             snprintf(followup_cue_key,
                      sizeof(followup_cue_key),
                      "conversation:followup-cue:%u",
                      (unsigned)(played.turn_index + 1));
+            app_touch_action_clear();
             app_set_state(state, APP_STATE_PLAYING_PROMPT);
             ret = app_v6_play_prompt(PROMPT_FOLLOWUP_CUE, followup_cue_key);
+            app_touch_action_clear();
             if (ret != ESP_OK) {
                 goto technical_close;
+            }
+            if (playback_cancel_ack_pending) {
+                ret = cloud_conversation_wait_turn_cancelled(conversation, turn_id);
+                playback_cancel_ack_pending = false;
+                if (ret != ESP_OK) {
+                    goto technical_close;
+                }
             }
             conversation_transition_t cue_done = conversation_controller_handle(
                 &controller, CONVERSATION_EVENT_PROMPT_DONE,
@@ -766,6 +1033,13 @@ static esp_err_t run_v6_conversation(app_state_t *state, const trigger_event_t *
                 goto technical_close;
             }
             continue;
+        }
+        if (playback_cancel_ack_pending) {
+            ret = cloud_conversation_wait_turn_cancelled(conversation, turn_id);
+            playback_cancel_ack_pending = false;
+            if (ret != ESP_OK) {
+                goto technical_close;
+            }
         }
         if (played.state == CONVERSATION_STATE_ENDING) {
             app_wait_until_ms(played.deadline_ms);
@@ -1466,6 +1740,7 @@ static void app_pipeline_task(void *arg)
     (void)run_trigger_pipeline(&s_app_state);
 #endif
 
+    app_touch_action_clear();
     free(task_args);
     s_pipeline_task_handle = NULL;
     s_last_pipeline_finish_us = esp_timer_get_time();
@@ -1486,6 +1761,8 @@ static esp_err_t app_start_pipeline_task(const trigger_event_t *event)
     if (s_pipeline_task_handle != NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    app_touch_action_clear();
 
     app_pipeline_task_args_t *task_args = calloc(1, sizeof(*task_args));
     if (task_args == NULL) {
@@ -2735,6 +3012,7 @@ static void app_runtime_task(void *arg)
     app_log_runtime_config();
     ESP_LOGI(TAG, "========================================");
 
+    display_state_set_touch_callback(app_display_touch_callback, NULL);
     esp_err_t display_ret = display_state_init();
     if (display_ret != ESP_OK) {
         ESP_LOGW(TAG, "Display initialization failed; audio assistant will continue: %s",

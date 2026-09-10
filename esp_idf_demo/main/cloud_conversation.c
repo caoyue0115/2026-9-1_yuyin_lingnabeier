@@ -280,24 +280,38 @@ static void v6_ws_event(void *handler_args,
     }
 }
 
-static esp_err_t v6_wait_flag(cloud_conversation_t *conversation,
-                              bool *flag,
-                              int timeout_ms)
+static esp_err_t v6_wait_flag_cancellable(cloud_conversation_t *conversation,
+                                          bool *flag,
+                                          int timeout_ms,
+                                          const volatile bool *cancel_requested)
 {
     const int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
     while (!v6_flag_get(flag) &&
            !v6_flag_get(&conversation->error_received) &&
            !v6_flag_get(&conversation->disconnected) &&
+           !(cancel_requested != NULL &&
+             __atomic_load_n(cancel_requested, __ATOMIC_ACQUIRE)) &&
            esp_timer_get_time() < deadline) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     if (v6_flag_get(flag)) {
         return ESP_OK;
     }
+    if (cancel_requested != NULL &&
+        __atomic_load_n(cancel_requested, __ATOMIC_ACQUIRE)) {
+        return DEMO_CLOUD_ERR_AUDIO_CANCELLED;
+    }
     return v6_flag_get(&conversation->error_received) ||
                    v6_flag_get(&conversation->disconnected)
                ? ESP_FAIL
                : ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t v6_wait_flag(cloud_conversation_t *conversation,
+                              bool *flag,
+                              int timeout_ms)
+{
+    return v6_wait_flag_cancellable(conversation, flag, timeout_ms, NULL);
 }
 
 static esp_err_t v6_build_ws_url(char *out, size_t out_size)
@@ -541,8 +555,10 @@ esp_err_t cloud_conversation_send_pcm(cloud_conversation_t *conversation,
     return ESP_OK;
 }
 
-esp_err_t cloud_conversation_finish_turn(cloud_conversation_t *conversation,
-                                         cloud_realtime_session_t *result)
+esp_err_t cloud_conversation_finish_turn_cancellable(
+    cloud_conversation_t *conversation,
+    cloud_realtime_session_t *result,
+    const volatile bool *cancel_requested)
 {
     if (conversation == NULL || result == NULL ||
         !v6_flag_get(&conversation->turn_started)) {
@@ -566,11 +582,20 @@ esp_err_t cloud_conversation_finish_turn(cloud_conversation_t *conversation,
     if (written <= 0 || (size_t)written >= sizeof(json) || v6_send_text(conversation, json) != written) {
         return ESP_FAIL;
     }
-    esp_err_t ret = v6_wait_flag(conversation, &conversation->turn_terminal, V6_WAIT_MS);
+    esp_err_t ret = v6_wait_flag_cancellable(conversation,
+                                             &conversation->turn_terminal,
+                                             V6_WAIT_MS,
+                                             cancel_requested);
     if (ret == ESP_OK) {
         *result = conversation->result;
     }
     return ret;
+}
+
+esp_err_t cloud_conversation_finish_turn(cloud_conversation_t *conversation,
+                                         cloud_realtime_session_t *result)
+{
+    return cloud_conversation_finish_turn_cancellable(conversation, result, NULL);
 }
 
 esp_err_t cloud_conversation_complete_playback(cloud_conversation_t *conversation,
@@ -615,21 +640,56 @@ esp_err_t cloud_conversation_complete_playback(cloud_conversation_t *conversatio
     return ret;
 }
 
-esp_err_t cloud_conversation_cancel_turn(cloud_conversation_t *conversation, const char *turn_id)
+esp_err_t cloud_conversation_request_cancel_turn_with_reason(
+    cloud_conversation_t *conversation,
+    const char *turn_id,
+    const char *reason)
 {
-    if (conversation == NULL || turn_id == NULL || strcmp(turn_id, conversation->turn_id) != 0) {
+    if (conversation == NULL || turn_id == NULL || reason == NULL || reason[0] == '\0' ||
+        strcmp(turn_id, conversation->turn_id) != 0) {
         return ESP_ERR_INVALID_ARG;
     }
+    v6_flag_clear(&conversation->turn_cancelled);
     char json[256];
     const int written = snprintf(json, sizeof(json),
                                  "{\"type\":\"turn_cancel\",\"conversation_id\":\"%s\","
-                                 "\"turn_id\":\"%s\",\"turn_index\":%u}",
+                                 "\"turn_id\":\"%s\",\"turn_index\":%u,\"reason\":\"%s\"}",
                                  conversation->conversation_id, conversation->turn_id,
-                                 (unsigned)conversation->turn_index);
+                                 (unsigned)conversation->turn_index, reason);
     if (written <= 0 || (size_t)written >= sizeof(json) || v6_send_text(conversation, json) != written) {
         return ESP_FAIL;
     }
+    return ESP_OK;
+}
+
+esp_err_t cloud_conversation_wait_turn_cancelled(cloud_conversation_t *conversation,
+                                                 const char *turn_id)
+{
+    if (conversation == NULL || turn_id == NULL ||
+        strcmp(turn_id, conversation->turn_id) != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
     return v6_wait_flag(conversation, &conversation->turn_cancelled, V6_WAIT_MS);
+}
+
+esp_err_t cloud_conversation_cancel_turn_with_reason(cloud_conversation_t *conversation,
+                                                     const char *turn_id,
+                                                     const char *reason)
+{
+    esp_err_t ret = cloud_conversation_request_cancel_turn_with_reason(conversation,
+                                                                       turn_id,
+                                                                       reason);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    return cloud_conversation_wait_turn_cancelled(conversation, turn_id);
+}
+
+esp_err_t cloud_conversation_cancel_turn(cloud_conversation_t *conversation, const char *turn_id)
+{
+    return cloud_conversation_cancel_turn_with_reason(conversation,
+                                                      turn_id,
+                                                      "client_cancelled");
 }
 
 esp_err_t cloud_conversation_close(cloud_conversation_t *conversation, const char *reason)

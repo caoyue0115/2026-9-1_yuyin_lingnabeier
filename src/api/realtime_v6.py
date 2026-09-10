@@ -372,7 +372,11 @@ class ConversationSocket:
         turn = self.session._require_turn(control.turn_id or "")
         turn.state_machine.validate_correlation(control)
         if control.type == "turn_cancel":
-            event = await asyncio.to_thread(self.session.cancel_turn, turn.turn_id)
+            event = await asyncio.to_thread(
+                self.session.cancel_turn,
+                turn.turn_id,
+                str(control.data.get("reason", "client_cancelled")),
+            )
             if self._active_turn_id == turn.turn_id:
                 self._active_turn_id = None
             await self._send(event)

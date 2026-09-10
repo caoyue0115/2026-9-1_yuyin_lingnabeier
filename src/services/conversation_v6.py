@@ -15,6 +15,10 @@ from src.models.conversation_v6 import (
     GAME_MAX_TURNS,
     ProtocolError,
     ServerEvent,
+    TURN_CANCEL_REASON_CLIENT,
+    TURN_CANCEL_REASON_INTERRUPT_PLAYBACK,
+    TURN_CANCEL_REASON_RESTART_LISTENING,
+    TURN_CANCEL_REASONS,
     TurnState,
     TurnStateMachine,
     TurnTransition,
@@ -72,6 +76,7 @@ class ConversationTurn:
     question_truncated: bool = False
     answer_truncated: bool = False
     status: str = "receiving"
+    cancel_reason: str = ""
     interaction_mode: str = "normal"
     max_turns: int = DEFAULT_MAX_TURNS
     pet_mood: str = "curious"
@@ -176,9 +181,16 @@ class ConversationSession:
             same_index = [turn for turn in self._turns.values() if turn.turn_index == turn_index]
             allow_index_retry = False
             if same_index:
-                if len(same_index) != 1 or same_index[0].status != "asr_empty":
+                previous = same_index[-1]
+                if previous.status == "asr_empty":
+                    allow_index_retry = True
+                elif (
+                    previous.status == "cancelled"
+                    and previous.cancel_reason == TURN_CANCEL_REASON_RESTART_LISTENING
+                ):
+                    allow_index_retry = True
+                else:
                     raise ProtocolError("turn_index_conflict")
-                allow_index_retry = True
             elif self._limits.turn_count >= self._limits.max_turns:
                 raise ProtocolError("turn_limit_exceeded")
             cancel_event = threading.Event()
@@ -246,7 +258,13 @@ class ConversationSession:
     def check_deadline(self) -> None:
         self._limits.check_deadline(self._limits.now())
 
-    def cancel_turn(self, turn_id: str) -> ServerEvent:
+    def cancel_turn(
+        self,
+        turn_id: str,
+        reason: str = TURN_CANCEL_REASON_CLIENT,
+    ) -> ServerEvent:
+        if reason not in TURN_CANCEL_REASONS:
+            raise ValueError("invalid_cancel_reason")
         turn = self._require_turn(turn_id)
         with turn._cancel_condition:
             while turn._cancellation_in_progress and turn._cancel_event_message is None:
@@ -263,9 +281,16 @@ class ConversationSession:
             event = self._cancelled_event(transition)
             with self._lock:
                 turn.status = "cancelled"
-                turn.interrupted = bool(turn.answer)
-                if turn.answer:
+                turn.cancel_reason = reason
+                turn.interrupted = (
+                    reason != TURN_CANCEL_REASON_RESTART_LISTENING and bool(turn.answer)
+                )
+                if turn.interrupted:
                     self._commit_context(turn, interrupted=True)
+                if reason == TURN_CANCEL_REASON_RESTART_LISTENING:
+                    self._limits.release_turn_attempt(turn.turn_id, turn.turn_index)
+                    self.quota.release(turn.turn_id)
+                    self.turn_budget.release(turn.turn_id)
                 self.event_log.append(event)
             with turn._cancel_condition:
                 turn._cancel_event_message = event

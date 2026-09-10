@@ -313,7 +313,7 @@
 #endif
 
 #ifndef DEMO_BOOT_SOUND_PATH
-#define DEMO_BOOT_SOUND_PATH "/spiffs/intro_1.pcm"
+#define DEMO_BOOT_SOUND_PATH "/spiffs/boot_1.pcm"
 #endif
 
 #ifndef DEMO_BOOT_SOUND_MAX_BYTES
@@ -432,6 +432,10 @@
 
 #ifndef DEMO_DISPLAY_POLL_MS
 #define DEMO_DISPLAY_POLL_MS 50
+#endif
+
+#ifndef DEMO_TOUCH_ACTION_DEBOUNCE_MS
+#define DEMO_TOUCH_ACTION_DEBOUNCE_MS 300
 #endif
 
 #ifndef DEMO_DISPLAY_TASK_STACK_SIZE

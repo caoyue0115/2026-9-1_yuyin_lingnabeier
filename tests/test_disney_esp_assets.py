@@ -31,7 +31,8 @@ def test_display_timeout_contract_is_30_and_60_seconds() -> None:
     display = _read(ESP_MAIN / "display_state.c")
     assert "#define DEMO_DISPLAY_DIM_AFTER_MS 30000" in config
     assert "#define DEMO_DISPLAY_OFF_AFTER_MS 60000" in config
-    assert "if (s_power_state == DISPLAY_POWER_OFF)" in display
+    assert "if (s_power_state != DISPLAY_POWER_ACTIVE)" in display
+    assert "s_last_activity_us = esp_timer_get_time();" in display
     assert "display_wake source=touch" in display
 
 
@@ -116,6 +117,18 @@ def test_display_uses_bounded_single_dma_buffer() -> None:
     assert "bsp_display_start_with_config(&display_cfg)" in display
 
 
+def test_display_fallback_does_not_starve_cold_boot_with_software_effects() -> None:
+    display = _read(ESP_MAIN / "display_state.c")
+    assert "display_orb_size_anim" not in display
+    assert "LV_ANIM_REPEAT_INFINITE" not in display
+    assert "lv_obj_set_style_shadow_width(s_orb" not in display
+    assert "lv_obj_set_style_shadow_color(s_orb" not in display
+    # The optimized fallback must not remove the actual Judy state videos.
+    assert "display_state_video_task" in display
+    assert "DISPLAY_VIDEO_LISTENING_THINKING" in display
+    assert "DISPLAY_VIDEO_SPEAKING" in display
+
+
 def test_websocket_task_stack_uses_psram_for_repeat_conversations() -> None:
     websocket = _read(
         ESP_DIR
@@ -129,12 +142,18 @@ def test_websocket_task_stack_uses_psram_for_repeat_conversations() -> None:
     assert "CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM" in websocket
 
 
-def test_touch_is_not_routed_to_the_voice_pipeline() -> None:
+def test_touch_is_state_aware_but_cannot_wake_voice_from_idle() -> None:
     main = _read(ESP_MAIN / "main.c")
     display = _read(ESP_MAIN / "display_state.c")
     assert "display_state_notify_wake_word();" in main
     assert "lv_indev_add_event_cb(touch, display_touch_event" in display
     assert "app_start_pipeline_task" not in display
+    assert "display_state_set_touch_callback(app_display_touch_callback" in main
+    assert "APP_TOUCH_ACTION_RESTART_LISTENING" in main
+    assert "APP_TOUCH_ACTION_INTERRUPT_PLAYBACK" in main
+    assert '"restart_listening"' in main
+    assert '"interrupt_playback"' in main
+    assert "TRIGGER_EVENT_TOUCH" not in main
 
 
 def test_runtime_uses_disney_brand_and_neutral_prompt_assets() -> None:
@@ -143,7 +162,8 @@ def test_runtime_uses_disney_brand_and_neutral_prompt_assets() -> None:
     cmake = _read(ESP_MAIN / "CMakeLists.txt")
     assert 'ssid_prefix = "DisneyDemo"' in network
     assert '"DisneyDemo-%08lx-%08lx"' in conversation
-    assert "network_required_1.pcm" not in cmake
+    assert "network_connected_1.pcm" in cmake
+    assert "network_required_1.pcm" in cmake
     assert "conversation_done_1.pcm" not in cmake
 
 

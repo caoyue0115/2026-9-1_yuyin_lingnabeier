@@ -54,6 +54,8 @@ static idle_video_t *s_state_videos[DISPLAY_VIDEO_COUNT];
 static idle_video_decoder_t *s_video_decoder;
 static uint8_t *s_video_frame_buffers[2];
 static int s_video_displayed_buffer;
+static display_touch_callback_t s_touch_callback;
+static void *s_touch_callback_ctx;
 
 static display_video_asset_t display_video_asset_for_state(display_ui_state_t state)
 {
@@ -118,12 +120,6 @@ static display_video_asset_t display_desired_video_asset(void)
     return display_video_asset_for_state(state);
 }
 
-static void display_orb_size_anim(void *object, int32_t size)
-{
-    lv_obj_set_size((lv_obj_t *)object, size, size);
-    lv_obj_align((lv_obj_t *)object, LV_ALIGN_CENTER, 0, -8);
-}
-
 static void display_create_ui(void)
 {
     lv_obj_t *screen = lv_screen_active();
@@ -142,8 +138,11 @@ static void display_create_ui(void)
     lv_obj_align(s_orb, LV_ALIGN_CENTER, 0, -8);
     lv_obj_set_style_radius(s_orb, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(s_orb, 0, 0);
-    lv_obj_set_style_shadow_width(s_orb, 32, 0);
-    lv_obj_set_style_shadow_opa(s_orb, LV_OPA_40, 0);
+    /*
+     * Keep the boot/network/error fallback cheap to draw.  A continuously
+     * resized 32 px software shadow starved IDLE0 on a cold boot before the
+     * Judy video task could take over, which then tripped the task watchdog.
+     */
 
     s_title = lv_label_create(screen);
     lv_obj_set_style_text_color(s_title, lv_color_hex(0xFFFFFF), 0);
@@ -165,16 +164,6 @@ static void display_create_ui(void)
     lv_obj_set_style_shadow_color(s_direction_marker, lv_color_hex(0xFF80B5), 0);
     lv_obj_set_style_shadow_width(s_direction_marker, 16, 0);
     lv_obj_add_flag(s_direction_marker, LV_OBJ_FLAG_HIDDEN);
-
-    lv_anim_t animation;
-    lv_anim_init(&animation);
-    lv_anim_set_var(&animation, s_orb);
-    lv_anim_set_exec_cb(&animation, display_orb_size_anim);
-    lv_anim_set_values(&animation, 132, 148);
-    lv_anim_set_duration(&animation, 900);
-    lv_anim_set_playback_duration(&animation, 900);
-    lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&animation);
 }
 
 static void display_set_standard_ui_visible(bool visible)
@@ -244,7 +233,6 @@ static void display_render_state(display_ui_state_t state, display_video_asset_t
     lv_label_set_text(s_title, title);
     lv_label_set_text(s_subtitle, subtitle);
     lv_obj_set_style_bg_color(s_orb, lv_color_hex(color), 0);
-    lv_obj_set_style_shadow_color(s_orb, lv_color_hex(color), 0);
     lv_obj_align(s_title, LV_ALIGN_CENTER, 0, -10);
     lv_obj_align(s_subtitle, LV_ALIGN_CENTER, 0, 86);
 }
@@ -476,17 +464,24 @@ static void display_touch_event(lv_event_t *event)
 {
     (void)event;
     bool should_wake = false;
+    display_touch_callback_t callback;
+    void *callback_ctx;
     taskENTER_CRITICAL(&s_lock);
-    if (s_power_state == DISPLAY_POWER_OFF) {
-        s_last_activity_us = esp_timer_get_time();
+    s_last_activity_us = esp_timer_get_time();
+    if (s_power_state != DISPLAY_POWER_ACTIVE) {
         s_power_state = DISPLAY_POWER_ACTIVE;
         should_wake = true;
     }
+    callback = s_touch_callback;
+    callback_ctx = s_touch_callback_ctx;
     taskEXIT_CRITICAL(&s_lock);
 
     if (should_wake) {
         ESP_LOGI(TAG, "display_wake source=touch");
         (void)bsp_display_brightness_set(DEMO_DISPLAY_ACTIVE_BRIGHTNESS);
+    }
+    if (callback != NULL) {
+        callback(callback_ctx);
     }
 }
 
@@ -637,6 +632,14 @@ esp_err_t display_state_init(void)
     }
 #endif
     return ESP_OK;
+}
+
+void display_state_set_touch_callback(display_touch_callback_t callback, void *user_ctx)
+{
+    taskENTER_CRITICAL(&s_lock);
+    s_touch_callback = callback;
+    s_touch_callback_ctx = user_ctx;
+    taskEXIT_CRITICAL(&s_lock);
 }
 
 void display_state_set(display_ui_state_t state)
