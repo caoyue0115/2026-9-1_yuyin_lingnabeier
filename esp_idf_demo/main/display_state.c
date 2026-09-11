@@ -29,11 +29,31 @@ typedef enum {
     DISPLAY_VIDEO_COUNT,
 } display_video_asset_t;
 
+typedef enum {
+    DISPLAY_IDLE_PAGE_ASSISTANT = 0,
+    DISPLAY_IDLE_PAGE_DESKTOP,
+} display_idle_page_t;
+
+#define DISPLAY_IDLE_SWIPE_MIN_DISTANCE_PX (BSP_LCD_H_RES / 6)
+#define DISPLAY_IDLE_TAP_MAX_MOVEMENT_PX 24
+#define DISPLAY_MUSIC_CARD_WIDTH 270
+#define DISPLAY_MUSIC_CARD_HEIGHT 156
+#define DISPLAY_MUSIC_CARD_CENTER_Y (-5)
+
 static const char *TAG = "disney_display";
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static display_ui_state_t s_ui_state = DISPLAY_UI_BOOT;
 static display_ui_state_t s_rendered_state = (display_ui_state_t)-1;
 static display_power_state_t s_power_state = DISPLAY_POWER_ACTIVE;
+static display_idle_page_t s_idle_page = DISPLAY_IDLE_PAGE_ASSISTANT;
+static uint32_t s_idle_page_revision;
+static uint32_t s_rendered_idle_page_revision;
+static bool s_music_playing;
+static uint32_t s_music_revision;
+static uint32_t s_rendered_music_revision;
+static bool s_idle_swipe_tracking;
+static lv_point_t s_idle_swipe_start;
+static lv_point_t s_idle_swipe_last;
 static display_video_asset_t s_published_video_asset = DISPLAY_VIDEO_NONE;
 static display_video_asset_t s_rendered_video_asset = DISPLAY_VIDEO_NONE;
 static bool s_initialized;
@@ -45,6 +65,13 @@ static lv_obj_t *s_orb;
 static lv_obj_t *s_title;
 static lv_obj_t *s_subtitle;
 static lv_obj_t *s_direction_marker;
+static lv_obj_t *s_desktop_root;
+static lv_obj_t *s_desktop_title;
+static lv_obj_t *s_desktop_voice_card;
+static lv_obj_t *s_desktop_voice_title;
+static lv_obj_t *s_desktop_voice_hint;
+static lv_obj_t *s_desktop_music_hint;
+static lv_obj_t *s_desktop_swipe_hint;
 static bool s_direction_valid;
 static int s_direction_degrees = 90;
 static uint32_t s_direction_revision;
@@ -56,6 +83,9 @@ static uint8_t *s_video_frame_buffers[2];
 static int s_video_displayed_buffer;
 static display_touch_callback_t s_touch_callback;
 static void *s_touch_callback_ctx;
+static display_music_toggle_callback_t s_music_toggle_callback;
+static void *s_music_toggle_callback_ctx;
+static lv_indev_t *s_touch_indev;
 
 static display_video_asset_t display_video_asset_for_state(display_ui_state_t state)
 {
@@ -110,11 +140,14 @@ static display_video_asset_t display_desired_video_asset(void)
 {
     display_ui_state_t state;
     display_power_state_t power;
+    display_idle_page_t idle_page;
     taskENTER_CRITICAL(&s_lock);
     state = s_ui_state;
     power = s_power_state;
+    idle_page = s_idle_page;
     taskEXIT_CRITICAL(&s_lock);
-    if (power == DISPLAY_POWER_OFF) {
+    if (power == DISPLAY_POWER_OFF ||
+        (state == DISPLAY_UI_IDLE && idle_page == DISPLAY_IDLE_PAGE_DESKTOP)) {
         return DISPLAY_VIDEO_NONE;
     }
     return display_video_asset_for_state(state);
@@ -164,10 +197,59 @@ static void display_create_ui(void)
     lv_obj_set_style_shadow_color(s_direction_marker, lv_color_hex(0xFF80B5), 0);
     lv_obj_set_style_shadow_width(s_direction_marker, 16, 0);
     lv_obj_add_flag(s_direction_marker, LV_OBJ_FLAG_HIDDEN);
+
+    s_desktop_root = lv_obj_create(screen);
+    lv_obj_remove_flag(s_desktop_root, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(s_desktop_root, BSP_LCD_H_RES, BSP_LCD_V_RES);
+    lv_obj_align(s_desktop_root, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_radius(s_desktop_root, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_desktop_root, 0, 0);
+    lv_obj_set_style_pad_all(s_desktop_root, 0, 0);
+    lv_obj_set_style_bg_color(s_desktop_root, lv_color_hex(0xFFF2F8), 0);
+    lv_obj_set_style_bg_opa(s_desktop_root, LV_OPA_COVER, 0);
+
+    s_desktop_title = lv_label_create(s_desktop_root);
+    lv_label_set_text(s_desktop_title, "JUDY MUSIC");
+    lv_obj_set_style_text_color(s_desktop_title, lv_color_hex(0x5A315D), 0);
+    lv_obj_set_style_text_letter_space(s_desktop_title, 2, 0);
+    lv_obj_align(s_desktop_title, LV_ALIGN_CENTER, 0, -116);
+
+    s_desktop_voice_card = lv_obj_create(s_desktop_root);
+    lv_obj_remove_flag(s_desktop_voice_card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(s_desktop_voice_card, DISPLAY_MUSIC_CARD_WIDTH, DISPLAY_MUSIC_CARD_HEIGHT);
+    lv_obj_align(s_desktop_voice_card, LV_ALIGN_CENTER, 0, DISPLAY_MUSIC_CARD_CENTER_Y);
+    lv_obj_set_style_radius(s_desktop_voice_card, 30, 0);
+    lv_obj_set_style_border_width(s_desktop_voice_card, 2, 0);
+    lv_obj_set_style_border_color(s_desktop_voice_card, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_color(s_desktop_voice_card, lv_color_hex(0xF7B8D4), 0);
+    lv_obj_set_style_bg_opa(s_desktop_voice_card, LV_OPA_COVER, 0);
+
+    s_desktop_voice_title = lv_label_create(s_desktop_voice_card);
+    lv_label_set_text(s_desktop_voice_title, "TRY EVERYTHING");
+    lv_obj_set_style_text_color(s_desktop_voice_title, lv_color_hex(0x5A315D), 0);
+    lv_obj_set_style_text_letter_space(s_desktop_voice_title, 2, 0);
+    lv_obj_align(s_desktop_voice_title, LV_ALIGN_CENTER, 0, -38);
+
+    s_desktop_voice_hint = lv_label_create(s_desktop_voice_card);
+    lv_label_set_text(s_desktop_voice_hint, "ZOOTOPIA  |  SHAKIRA");
+    lv_obj_set_style_text_color(s_desktop_voice_hint, lv_color_hex(0x7B517D), 0);
+    lv_obj_align(s_desktop_voice_hint, LV_ALIGN_CENTER, 0, -4);
+
+    s_desktop_music_hint = lv_label_create(s_desktop_root);
+    lv_label_set_text(s_desktop_music_hint, "TAP TO PLAY");
+    lv_obj_set_style_text_color(s_desktop_music_hint, lv_color_hex(0x5A315D), 0);
+    lv_obj_align(s_desktop_music_hint, LV_ALIGN_CENTER, 0, 39);
+
+    s_desktop_swipe_hint = lv_label_create(s_desktop_root);
+    lv_label_set_text(s_desktop_swipe_hint, "<  SWIPE RIGHT");
+    lv_obj_set_style_text_color(s_desktop_swipe_hint, lv_color_hex(0xB07A9D), 0);
+    lv_obj_align(s_desktop_swipe_hint, LV_ALIGN_CENTER, 0, 126);
+    lv_obj_add_flag(s_desktop_root, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void display_set_standard_ui_visible(bool visible)
 {
+    lv_obj_add_flag(s_desktop_root, LV_OBJ_FLAG_HIDDEN);
     if (visible) {
         lv_obj_remove_flag(s_orb, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_title, LV_OBJ_FLAG_HIDDEN);
@@ -181,8 +263,35 @@ static void display_set_standard_ui_visible(bool visible)
     }
 }
 
-static void display_render_state(display_ui_state_t state, display_video_asset_t published_asset)
+static void display_set_desktop_visible(bool visible)
 {
+    if (!visible) {
+        lv_obj_add_flag(s_desktop_root, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_add_flag(s_state_image, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_orb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_title, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_subtitle, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_direction_marker, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_desktop_root, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_desktop_root);
+}
+
+static void display_render_state(display_ui_state_t state,
+                                 display_video_asset_t published_asset,
+                                 display_idle_page_t idle_page,
+                                 bool music_playing)
+{
+    const bool show_desktop = state == DISPLAY_UI_IDLE &&
+                              idle_page == DISPLAY_IDLE_PAGE_DESKTOP;
+    display_set_desktop_visible(show_desktop);
+    if (show_desktop) {
+        lv_label_set_text(s_desktop_music_hint,
+                          music_playing ? "TAP TO STOP" : "TAP TO PLAY");
+        return;
+    }
+
     const char *title = "DISNEY DEMO";
     const char *subtitle = "STARTING";
     uint32_t color = 0xF28AB2;
@@ -466,8 +575,20 @@ static void display_touch_event(lv_event_t *event)
     bool should_wake = false;
     display_touch_callback_t callback;
     void *callback_ctx;
+
+    lv_point_t point = {0};
+    if (s_touch_indev != NULL) {
+        lv_indev_get_point(s_touch_indev, &point);
+    }
     taskENTER_CRITICAL(&s_lock);
     s_last_activity_us = esp_timer_get_time();
+    s_idle_swipe_tracking = s_touch_indev != NULL &&
+                            s_power_state == DISPLAY_POWER_ACTIVE &&
+                            s_ui_state == DISPLAY_UI_IDLE;
+    if (s_idle_swipe_tracking) {
+        s_idle_swipe_start = point;
+        s_idle_swipe_last = point;
+    }
     if (s_power_state != DISPLAY_POWER_ACTIVE) {
         s_power_state = DISPLAY_POWER_ACTIVE;
         should_wake = true;
@@ -482,6 +603,84 @@ static void display_touch_event(lv_event_t *event)
     }
     if (callback != NULL) {
         callback(callback_ctx);
+    }
+}
+
+static void display_touch_pressing_event(lv_event_t *event)
+{
+    (void)event;
+    if (!s_idle_swipe_tracking || s_touch_indev == NULL) {
+        return;
+    }
+    lv_indev_get_point(s_touch_indev, &s_idle_swipe_last);
+}
+
+static void display_touch_release_event(lv_event_t *event)
+{
+    (void)event;
+    if (s_idle_swipe_tracking && s_touch_indev != NULL) {
+        lv_indev_get_point(s_touch_indev, &s_idle_swipe_last);
+    }
+
+    const int distance_x = (int)s_idle_swipe_last.x - (int)s_idle_swipe_start.x;
+    const int distance_y = (int)s_idle_swipe_last.y - (int)s_idle_swipe_start.y;
+    display_idle_page_t next_page;
+    bool changed = false;
+    bool tracked = false;
+    bool music_toggle = false;
+    display_music_toggle_callback_t music_callback = NULL;
+    void *music_callback_ctx = NULL;
+
+    taskENTER_CRITICAL(&s_lock);
+    next_page = s_idle_page;
+    tracked = s_idle_swipe_tracking;
+    if (tracked && s_ui_state == DISPLAY_UI_IDLE &&
+        abs(distance_x) >= DISPLAY_IDLE_SWIPE_MIN_DISTANCE_PX &&
+        abs(distance_x) > abs(distance_y)) {
+        if (s_idle_page == DISPLAY_IDLE_PAGE_ASSISTANT && distance_x < 0) {
+            next_page = DISPLAY_IDLE_PAGE_DESKTOP;
+            changed = true;
+        } else if (s_idle_page == DISPLAY_IDLE_PAGE_DESKTOP && distance_x > 0) {
+            next_page = DISPLAY_IDLE_PAGE_ASSISTANT;
+            changed = true;
+        }
+    }
+    if (changed) {
+        s_idle_page = next_page;
+        s_idle_page_revision++;
+        s_published_video_asset = DISPLAY_VIDEO_NONE;
+        s_last_activity_us = esp_timer_get_time();
+    } else if (tracked && s_ui_state == DISPLAY_UI_IDLE &&
+               s_idle_page == DISPLAY_IDLE_PAGE_DESKTOP &&
+               abs(distance_x) <= DISPLAY_IDLE_TAP_MAX_MOVEMENT_PX &&
+               abs(distance_y) <= DISPLAY_IDLE_TAP_MAX_MOVEMENT_PX) {
+        const int card_left = (BSP_LCD_H_RES - DISPLAY_MUSIC_CARD_WIDTH) / 2;
+        const int card_top = (BSP_LCD_V_RES - DISPLAY_MUSIC_CARD_HEIGHT) / 2 +
+                             DISPLAY_MUSIC_CARD_CENTER_Y;
+        music_toggle = s_idle_swipe_last.x >= card_left &&
+                       s_idle_swipe_last.x < card_left + DISPLAY_MUSIC_CARD_WIDTH &&
+                       s_idle_swipe_last.y >= card_top &&
+                       s_idle_swipe_last.y < card_top + DISPLAY_MUSIC_CARD_HEIGHT;
+        if (music_toggle) {
+            music_callback = s_music_toggle_callback;
+            music_callback_ctx = s_music_toggle_callback_ctx;
+            s_last_activity_us = esp_timer_get_time();
+        }
+    }
+    s_idle_swipe_tracking = false;
+    taskEXIT_CRITICAL(&s_lock);
+
+    if (tracked) {
+        ESP_LOGI(TAG,
+                 "idle_swipe dx=%d dy=%d changed=%d page=%s",
+                 distance_x,
+                 distance_y,
+                 changed ? 1 : 0,
+                 next_page == DISPLAY_IDLE_PAGE_DESKTOP ? "desktop" : "assistant");
+    }
+    if (music_toggle && music_callback != NULL) {
+        ESP_LOGI(TAG, "desktop_music_toggle source=touch");
+        music_callback(music_callback_ctx);
     }
 }
 
@@ -511,6 +710,10 @@ static void display_task(void *arg)
         bool direction_valid;
         int direction_degrees;
         uint32_t direction_revision;
+        display_idle_page_t idle_page;
+        uint32_t idle_page_revision;
+        bool music_playing;
+        uint32_t music_revision;
         int64_t last_activity_us;
         taskENTER_CRITICAL(&s_lock);
         ui_state = s_ui_state;
@@ -520,6 +723,10 @@ static void display_task(void *arg)
         direction_valid = s_direction_valid;
         direction_degrees = s_direction_degrees;
         direction_revision = s_direction_revision;
+        idle_page = s_idle_page;
+        idle_page_revision = s_idle_page_revision;
+        music_playing = s_music_playing;
+        music_revision = s_music_revision;
         taskEXIT_CRITICAL(&s_lock);
 
         display_power_state_t desired_power = DISPLAY_POWER_ACTIVE;
@@ -540,13 +747,17 @@ static void display_task(void *arg)
         }
 
         if ((ui_state != s_rendered_state || published_asset != s_rendered_video_asset ||
-             direction_revision != s_rendered_direction_revision) &&
+             direction_revision != s_rendered_direction_revision ||
+             idle_page_revision != s_rendered_idle_page_revision ||
+             music_revision != s_rendered_music_revision) &&
             bsp_display_lock(100)) {
-            display_render_state(ui_state, published_asset);
+            display_render_state(ui_state, published_asset, idle_page, music_playing);
             display_render_sound_direction(ui_state, direction_valid, direction_degrees);
             s_rendered_state = ui_state;
             s_rendered_video_asset = published_asset;
             s_rendered_direction_revision = direction_revision;
+            s_rendered_idle_page_revision = idle_page_revision;
+            s_rendered_music_revision = music_revision;
             bsp_display_unlock();
         }
         vTaskDelay(pdMS_TO_TICKS(DEMO_DISPLAY_POLL_MS));
@@ -582,7 +793,10 @@ esp_err_t display_state_init(void)
     display_create_ui();
     lv_indev_t *touch = bsp_display_get_input_dev();
     if (touch != NULL) {
+        s_touch_indev = touch;
         lv_indev_add_event_cb(touch, display_touch_event, LV_EVENT_PRESSED, NULL);
+        lv_indev_add_event_cb(touch, display_touch_pressing_event, LV_EVENT_PRESSING, NULL);
+        lv_indev_add_event_cb(touch, display_touch_release_event, LV_EVENT_RELEASED, NULL);
     }
     bsp_display_unlock();
 
@@ -639,6 +853,25 @@ void display_state_set_touch_callback(display_touch_callback_t callback, void *u
     taskENTER_CRITICAL(&s_lock);
     s_touch_callback = callback;
     s_touch_callback_ctx = user_ctx;
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+void display_state_set_music_toggle_callback(display_music_toggle_callback_t callback,
+                                             void *user_ctx)
+{
+    taskENTER_CRITICAL(&s_lock);
+    s_music_toggle_callback = callback;
+    s_music_toggle_callback_ctx = user_ctx;
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+void display_state_set_music_playing(bool playing)
+{
+    taskENTER_CRITICAL(&s_lock);
+    if (s_music_playing != playing) {
+        s_music_playing = playing;
+        s_music_revision++;
+    }
     taskEXIT_CRITICAL(&s_lock);
 }
 

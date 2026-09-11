@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 data/incoming/
 data/output/
+data/music/*.fopus
 data/tasks.db
 indices/
 tmp/

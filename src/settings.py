@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     sqlite_path: str = "./data/tasks.db"
     public_base_url: str = "http://localhost:8010"
     ota_artifact_dir: str = "./data/ota_artifacts"
+    music_asset_dir: str = "./data/music"
     queue_name: str = "disney_tasks"
     max_upload_mb: int = 3
     max_audio_seconds: int = 8
@@ -104,6 +105,13 @@ class Settings(BaseSettings):
     @property
     def ota_artifact_path(self) -> Path:
         raw = Path(self.ota_artifact_dir)
+        if raw.is_absolute():
+            return raw
+        return (self.project_root / raw).resolve()
+
+    @property
+    def music_asset_path(self) -> Path:
+        raw = Path(self.music_asset_dir)
         if raw.is_absolute():
             return raw
         return (self.project_root / raw).resolve()

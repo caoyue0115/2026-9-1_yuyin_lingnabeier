@@ -9,6 +9,7 @@
 #include "cloud_conversation.h"
 #include "conversation_controller.h"
 #include "playback_session.h"
+#include "music_player.h"
 
 #include "esp_err.h"
 #include "esp_app_desc.h"
@@ -38,6 +39,7 @@ static TaskHandle_t s_pipeline_task_handle = NULL;
 static TaskHandle_t s_ota_manifest_task_handle = NULL;
 static int64_t s_last_pipeline_finish_us = 0;
 static int64_t s_next_ota_manifest_check_us = 0;
+static volatile bool s_music_toggle_requested;
 
 #define APP_OTA_P3C_NVS_NAMESPACE "ota_p3c"
 #define APP_OTA_P3C_KEY_PENDING   "pending"
@@ -64,6 +66,7 @@ typedef enum {
 } app_state_t;
 
 static app_state_t s_app_state = APP_STATE_ERROR;
+static const char *app_state_to_string(app_state_t state);
 
 typedef enum {
     APP_TOUCH_ACTION_NONE = 0,
@@ -141,6 +144,33 @@ static void app_display_touch_callback(void *user_ctx)
                      ? "restart_listening"
                      : "interrupt_playback");
     }
+}
+
+static void app_display_music_toggle_callback(void *user_ctx)
+{
+    (void)user_ctx;
+    __atomic_store_n(&s_music_toggle_requested, true, __ATOMIC_RELEASE);
+}
+
+static void app_process_music_toggle(void)
+{
+    if (!__atomic_exchange_n(&s_music_toggle_requested, false, __ATOMIC_ACQ_REL)) {
+        return;
+    }
+    if (s_app_state != APP_STATE_IDLE || s_pipeline_task_handle != NULL) {
+        ESP_LOGW(TAG, "music_toggle ignored state=%s", app_state_to_string(s_app_state));
+        return;
+    }
+
+    esp_err_t ret;
+    if (music_player_is_active()) {
+        ret = music_player_stop(pdMS_TO_TICKS(DEMO_MUSIC_STOP_TIMEOUT_MS));
+        ESP_LOGI(TAG, "music_toggle action=stop result=%s", esp_err_to_name(ret));
+    } else {
+        ret = music_player_start();
+        ESP_LOGI(TAG, "music_toggle action=play result=%s", esp_err_to_name(ret));
+    }
+    display_state_set_music_playing(music_player_is_active());
 }
 
 static const char *app_state_to_string(app_state_t state)
@@ -268,6 +298,7 @@ static void app_log_runtime_config(void)
              DEMO_SOUND_DIRECTION_REVERSED);
     ESP_LOGI(TAG, "  wifi_ssid=%s", DEMO_WIFI_SSID);
     ESP_LOGI(TAG, "  server_base_url=%s", DEMO_SERVER_BASE_URL);
+    ESP_LOGI(TAG, "  music_stream_url=%s", DEMO_MUSIC_STREAM_URL);
     ESP_LOGI(TAG, "  device_id=%s", DEMO_DEVICE_ID);
     ESP_LOGI(TAG, "  app_runtime_task_stack_size=%d", DEMO_APP_RUNTIME_TASK_STACK_SIZE);
     ESP_LOGI(TAG, "  audio_mode=%s", app_audio_mode_name());
@@ -3013,6 +3044,7 @@ static void app_runtime_task(void *arg)
     ESP_LOGI(TAG, "========================================");
 
     display_state_set_touch_callback(app_display_touch_callback, NULL);
+    display_state_set_music_toggle_callback(app_display_music_toggle_callback, NULL);
     esp_err_t display_ret = display_state_init();
     if (display_ret != ESP_OK) {
         ESP_LOGW(TAG, "Display initialization failed; audio assistant will continue: %s",
@@ -3080,6 +3112,9 @@ static void app_runtime_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
+    if (music_player_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Music player initialization failed; voice assistant will continue");
+    }
 #if DEMO_OTA_BOOT_SWITCH_ENABLED && DEMO_OTA_ROLLBACK_VALIDATION_ENABLED
     s_ota_audio_ready = true;
 #endif
@@ -3097,6 +3132,8 @@ static void app_runtime_task(void *arg)
         app_ota_rollback_note_business_ready(rollback_app_desc != NULL ? rollback_app_desc->version : "");
 #endif
         app_poll_ota_manifest_dry_run_if_due();
+        display_state_set_music_playing(music_player_is_active());
+        app_process_music_toggle();
 
         trigger_input_set_accepting(&trigger, s_app_state == APP_STATE_IDLE && s_pipeline_task_handle == NULL);
 
@@ -3129,6 +3166,19 @@ static void app_runtime_task(void *arg)
                     display_state_set_sound_direction(event.sound_direction_degrees,
                                                       event.sound_direction_valid);
                     display_state_notify_wake_word();
+                    if (music_player_is_active()) {
+                        ESP_LOGI(TAG, "wake_word preempting_music");
+                        esp_err_t music_stop_ret = music_player_stop(
+                            pdMS_TO_TICKS(DEMO_MUSIC_STOP_TIMEOUT_MS));
+                        display_state_set_music_playing(music_player_is_active());
+                        if (music_stop_ret != ESP_OK) {
+                            ESP_LOGE(TAG,
+                                     "wake_word music_stop_failed result=%s",
+                                     esp_err_to_name(music_stop_ret));
+                            vTaskDelay(pdMS_TO_TICKS(DEMO_TRIGGER_POLL_INTERVAL_MS));
+                            continue;
+                        }
+                    }
                 }
                 ESP_LOGI(TAG, "trigger source=%s x=%u y=%u direction_valid=%d direction_degrees=%d -> starting pipeline",
                          trigger_input_source_name(event.type),

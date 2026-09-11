@@ -156,6 +156,46 @@ def test_touch_is_state_aware_but_cannot_wake_voice_from_idle() -> None:
     assert "TRIGGER_EVENT_TOUCH" not in main
 
 
+def test_idle_horizontal_swipe_opens_desktop_without_changing_voice_state() -> None:
+    main = _read(ESP_MAIN / "main.c")
+    display = _read(ESP_MAIN / "display_state.c")
+
+    assert "DISPLAY_IDLE_PAGE_ASSISTANT" in display
+    assert "DISPLAY_IDLE_PAGE_DESKTOP" in display
+    assert "LV_EVENT_PRESSING" in display
+    assert "lv_indev_get_point" in display
+    assert "DISPLAY_IDLE_SWIPE_MIN_DISTANCE_PX (BSP_LCD_H_RES / 6)" in display
+    assert "abs(distance_x) > abs(distance_y)" in display
+    assert "distance_x < 0" in display
+    assert "distance_x > 0" in display
+    assert 'lv_label_set_text(s_desktop_title, "JUDY MUSIC")' in display
+    assert 'lv_label_set_text(s_desktop_voice_title, "TRY EVERYTHING")' in display
+    assert "s_ui_state == DISPLAY_UI_IDLE" in display
+    assert "s_power_state == DISPLAY_POWER_ACTIVE" in display
+    assert "s_idle_page = DISPLAY_IDLE_PAGE_ASSISTANT" in display
+    assert "s_idle_page = next_page" in display
+    assert "s_idle_swipe_tracking = false" in display
+    assert "display_state_notify_wake_word();" in main
+    assert "trigger_input_set_accepting(&trigger, s_app_state == APP_STATE_IDLE" in main
+
+
+def test_music_desktop_streams_server_opus_and_wake_word_preempts_it() -> None:
+    main = _read(ESP_MAIN / "main.c")
+    display = _read(ESP_MAIN / "display_state.c")
+    player = _read(ESP_MAIN / "music_player.c")
+    config = _read(ESP_MAIN / "config.h")
+
+    assert '"TAP TO PLAY"' in display
+    assert '"TAP TO STOP"' in display
+    assert "display_music_toggle_callback_t" in display
+    assert "music_player_start()" in main
+    assert "music_player_stop(" in main
+    assert '"wake_word preempting_music"' in main
+    assert "playback_session_start(DEMO_MUSIC_STREAM_URL" in player
+    assert "playback_session_join_interruptible" in player
+    assert '"/api/v1/music/try-everything/audio"' in config
+
+
 def test_runtime_uses_disney_brand_and_neutral_prompt_assets() -> None:
     network = _read(ESP_MAIN / "app_network.cc")
     conversation = _read(ESP_MAIN / "cloud_conversation.c")

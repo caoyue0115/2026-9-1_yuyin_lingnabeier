@@ -19,9 +19,13 @@ typedef enum {
 } display_ui_state_t;
 
 typedef void (*display_touch_callback_t)(void *user_ctx);
+typedef void (*display_music_toggle_callback_t)(void *user_ctx);
 
 esp_err_t display_state_init(void);
 void display_state_set_touch_callback(display_touch_callback_t callback, void *user_ctx);
+void display_state_set_music_toggle_callback(display_music_toggle_callback_t callback,
+                                             void *user_ctx);
+void display_state_set_music_playing(bool playing);
 void display_state_set(display_ui_state_t state);
 void display_state_notify_wake_word(void);
 void display_state_set_sound_direction(int degrees, bool valid);
